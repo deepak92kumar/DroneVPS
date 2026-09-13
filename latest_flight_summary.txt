@@ -1,14 +1,14 @@
 =================================================================
              AUTONOMOUS DRONE FLIGHT MISSION SUMMARY
- Date & Time           : 2026-09-13 14:07:18
+ Date & Time           : 2026-09-13 14:07:58
 =================================================================
- Flight Duration       : 1150.2 sec (19.2 mins)
+ Flight Duration       : 1190.2 sec (19.8 mins)
  Max Outbound Distance : 0.00 meters (0 cm)
  Total Path Flown      : 0.00 meters (0 cm) [Odometer]
- Current Position      : North:+0.00m, East:+0.00m (Yaw:6.5°)
+ Current Position      : North:+0.00m, East:+0.00m (Yaw:6.4°)
  Distance to Home      : 0.00 meters (0 cm)
  Max Altitude Reached  : 0.00 meters
- Total VIO Packets Sent: 40491 packets (30 Hz)
+ Total VIO Packets Sent: 42490 packets (30 Hz)
  ArUco Pad Detections  : 0 times
  GPS Health            : Sats=0, Fix=0
  Autopilot EKF Status  : PosVar=0.001, Mode=ALT_HOLD
