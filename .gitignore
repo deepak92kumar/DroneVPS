@@ -1,0 +1,15 @@
+# Source-only checkpoint: large/binary/live data excluded (full tarball in /mnt/ssd/DRONE_backups)
+flight_images/
+flight_logs/
+.cursor/
+.cache/
+__pycache__/
+*.bin
+*.jpg
+*.png
+*.pdf
+*.log
+*.csv
+*.tmp
+.~lock*
+*.bak_*

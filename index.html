@@ -1,0 +1,730 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Indigenous Hexacopter – AI-Assisted GNSS-Denied Navigation</title>
+  <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
+  <style>
+    @keyframes pulseSlow {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.6; transform: scale(1.05); }
+    }
+    .pulse-indicator {
+      animation: pulseSlow 2.5s infinite ease-in-out;
+    }
+    .flow-line {
+      stroke-dasharray: 6;
+      animation: dash 1.5s linear infinite;
+    }
+    @keyframes dash {
+      to {
+        stroke-dashoffset: -12;
+      }
+    }
+    .tab-active {
+      border-color: #3b82f6;
+      color: #3b82f6;
+      background-color: rgba(59, 130, 246, 0.1);
+    }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 antialiased p-4 md:p-8 font-sans">
+
+  <!-- Main Container -->
+  <div class="max-w-7xl mx-auto space-y-6">
+
+    <!-- Header Section -->
+    <header class="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 shadow-2xl backdrop-blur-md relative overflow-hidden">
+      <div class="absolute -right-16 -top-16 w-64 h-64 bg-cyan-500/10 rounded-full blur-3xl pointer-events-none"></div>
+      <div class="absolute -left-16 -bottom-16 w-64 h-64 bg-blue-500/10 rounded-full blur-3xl pointer-events-none"></div>
+      
+      <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 relative z-10">
+        <div>
+          <div class="flex items-center gap-2 mb-2">
+            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-cyan-500/20 text-cyan-400 border border-cyan-500/30">
+              INDIGENOUS AEROSPACE AVIONICS
+            </span>
+            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+              10-KG PAYLOAD CLASS
+            </span>
+            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-purple-500/20 text-purple-400 border border-purple-500/30">
+              ZERO-DEPENDENCY SENSING
+            </span>
+          </div>
+          <h1 class="text-2xl md:text-3xl font-extrabold tracking-tight text-white uppercase">
+            INDIGENOUS HEXACOPTER – AI-ASSISTED GNSS-DENIED NAVIGATION
+          </h1>
+          <p class="text-sm md:text-base text-cyan-400 font-medium tracking-wide mt-1">
+            CUAV X7 Pro + NVIDIA Jetson Orin Nano + Luxonis OAK-D Pro
+          </p>
+        </div>
+
+        <div class="flex items-center gap-3">
+          <div class="bg-slate-800/80 border border-slate-700/80 rounded-xl px-4 py-2.5 text-right">
+            <span class="text-[10px] uppercase tracking-wider text-slate-400 block font-semibold">Operational Status</span>
+            <span class="text-xs font-bold text-emerald-400 flex items-center justify-end gap-1.5 mt-0.5">
+              <span class="w-2 h-2 rounded-full bg-emerald-400 pulse-indicator inline-block"></span>
+              FLIGHT SYSTEM READY
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Navigation Tabs -->
+      <div class="flex flex-wrap items-center gap-2 mt-6 pt-5 border-t border-slate-800 text-sm font-medium">
+        <button onclick="switchTab('concept')" id="tab-btn-concept" class="tab-btn tab-active px-4 py-2 rounded-lg border border-transparent transition-all">
+          📐 3D Engineering Concept
+        </button>
+        <button onclick="switchTab('wiring')" id="tab-btn-wiring" class="tab-btn text-slate-400 hover:text-white px-4 py-2 rounded-lg border border-transparent hover:bg-slate-800 transition-all">
+          ⚡ Hardware Wiring & Buses
+        </button>
+        <button onclick="switchTab('gnss')" id="tab-btn-gnss" class="tab-btn text-slate-400 hover:text-white px-4 py-2 rounded-lg border border-transparent hover:bg-slate-800 transition-all">
+          🛰️ GNSS-Denied Recovery Simulator
+        </button>
+        <button onclick="switchTab('workload')" id="tab-btn-workload" class="tab-btn text-slate-400 hover:text-white px-4 py-2 rounded-lg border border-transparent hover:bg-slate-800 transition-all">
+          🧠 Autopilot vs Companion AI Matrix
+        </button>
+        <button onclick="switchTab('battery')" id="tab-btn-battery" class="tab-btn text-slate-400 hover:text-white px-4 py-2 rounded-lg border border-transparent hover:bg-slate-800 transition-all">
+          🔋 Battery & Failsafe Logic
+        </button>
+      </div>
+    </header>
+
+    <!-- TAB 1: 3D CONCEPT OVERVIEW -->
+    <section id="tab-concept" class="tab-content block space-y-6">
+      <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 shadow-xl relative">
+        <div class="flex items-center justify-between mb-4">
+          <div>
+            <h2 class="text-lg font-bold text-white flex items-center gap-2">
+              <span>Isometric CAD System Rendering & Architecture Annotations</span>
+            </h2>
+            <p class="text-xs text-slate-400">High-detail hardware placement, avionic integration, sensor positioning, and telemetry lines</p>
+          </div>
+          <span class="text-xs px-3 py-1 bg-blue-500/10 text-blue-400 border border-blue-500/20 rounded-md font-mono">
+            6x BLDC (M1-M6) | 1200mm Wheelbase
+          </span>
+        </div>
+
+        <div class="rounded-xl overflow-hidden border border-slate-700/80 bg-black relative group">
+          <img 
+            src="/home/abc/.gemini/antigravity/brain/ccdcf346-da64-4d34-b7ce-d41a795d5a1a/hexacopter_gnss_denied_architecture_1788520177442.jpg" 
+            alt="Indigenous Hexacopter Engineering Concept Diagram"
+            class="w-full h-auto object-cover rounded-xl"
+          />
+        </div>
+
+        <!-- Hardware Callout Cards -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-6">
+          <div class="bg-slate-800/60 border border-slate-700/80 rounded-xl p-4">
+            <div class="flex items-center gap-2 text-cyan-400 font-bold text-sm mb-1">
+              <span class="w-3 h-3 rounded-full bg-cyan-400 inline-block"></span>
+              Luxonis OAK-D Pro (Vision)
+            </div>
+            <p class="text-xs text-slate-300 leading-relaxed">
+              Front nose-mounted active IR stereo depth camera. Transmits 800p depth @ 30 FPS + 12MP RGB + IMU over USB 3.0 Type-C to Jetson for real-time visual odometry (VIO) in low light.
+            </p>
+          </div>
+
+          <div class="bg-slate-800/60 border border-slate-700/80 rounded-xl p-4">
+            <div class="flex items-center gap-2 text-emerald-400 font-bold text-sm mb-1">
+              <span class="w-3 h-3 rounded-full bg-emerald-400 inline-block"></span>
+              NVIDIA Jetson Orin Nano (AI)
+            </div>
+            <p class="text-xs text-slate-300 leading-relaxed">
+              Companion computer running Isaac ROS & YOLOv8. Computes 6-DOF visual odometry, 3D obstacle avoidance grid, and dead-reckoning recovery vectors to bypass RF denial.
+            </p>
+          </div>
+
+          <div class="bg-slate-800/60 border border-slate-700/80 rounded-xl p-4">
+            <div class="flex items-center gap-2 text-amber-400 font-bold text-sm mb-1">
+              <span class="w-3 h-3 rounded-full bg-amber-400 inline-block"></span>
+              CUAV X7 Pro (Autopilot)
+            </div>
+            <p class="text-xs text-slate-300 leading-relaxed">
+              Internal vibration-isolated flight controller. Runs EKF3 sensor fusion, high-rate attitude PID loops (400 Hz), failsafe manager, and controls 6 ESCs via DShot600.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 2: HARDWARE WIRING & BUSES -->
+    <section id="tab-wiring" class="tab-content hidden space-y-6">
+      <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 shadow-xl">
+        <h2 class="text-lg font-bold text-white mb-2">Avionic Interconnect & Physical Wiring Schematic</h2>
+        <p class="text-xs text-slate-400 mb-6">Complete pinout mapping, baud rates, communication protocols, and signal isolation lines</p>
+
+        <!-- Vector Schematic Graphic -->
+        <div class="bg-slate-950 border border-slate-800 rounded-xl p-6 overflow-x-auto">
+          <svg viewBox="0 0 1000 600" class="w-full min-w-[800px] h-auto text-xs font-sans">
+            <!-- Background Grid -->
+            <defs>
+              <pattern id="grid" width="20" height="20" patternUnits="userSpaceOnUse">
+                <path d="M 20 0 L 0 0 0 20" fill="none" stroke="rgba(255,255,255,0.03)" stroke-width="1"/>
+              </pattern>
+              <marker id="arrow-cyan" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+                <path d="M0,0 L0,6 L8,3 z" fill="#06b6d4" />
+              </marker>
+              <marker id="arrow-green" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+                <path d="M0,0 L0,6 L8,3 z" fill="#10b981" />
+              </marker>
+              <marker id="arrow-amber" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+                <path d="M0,0 L0,6 L8,3 z" fill="#f59e0b" />
+              </marker>
+              <marker id="arrow-blue" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+                <path d="M0,0 L0,6 L8,3 z" fill="#3b82f6" />
+              </marker>
+            </defs>
+            <rect width="1000" height="600" fill="url(#grid)" />
+
+            <!-- BLOCK 1: LUXONIS OAK-D PRO -->
+            <g transform="translate(30, 180)">
+              <rect width="210" height="240" rx="12" fill="#0f172a" stroke="#06b6d4" stroke-width="2"/>
+              <text x="105" y="32" fill="#38bdf8" font-size="14" font-weight="bold" text-anchor="middle">LUXONIS OAK-D PRO</text>
+              <text x="105" y="48" fill="#94a3b8" font-size="10" text-anchor="middle">Front Active Depth AI Sensor</text>
+              
+              <rect x="20" y="65" width="170" height="35" rx="6" fill="#1e293b" stroke="#334155"/>
+              <text x="30" y="86" fill="#f8fafc" font-size="11">Dual 800p Stereo IR</text>
+
+              <rect x="20" y="110" width="170" height="35" rx="6" fill="#1e293b" stroke="#334155"/>
+              <text x="30" y="131" fill="#f8fafc" font-size="11">12MP RGB Camera</text>
+
+              <rect x="20" y="155" width="170" height="35" rx="6" fill="#1e293b" stroke="#334155"/>
+              <text x="30" y="176" fill="#f8fafc" font-size="11">Active Laser Dot Projector</text>
+
+              <rect x="185" y="195" width="25" height="15" rx="3" fill="#06b6d4"/>
+              <text x="175" y="222" fill="#06b6d4" font-size="10" font-weight="bold">USB-C</text>
+            </g>
+
+            <!-- BUS: USB 3.0 Type-C -->
+            <path d="M 240 385 L 360 385" stroke="#06b6d4" stroke-width="3" fill="none" class="flow-line" marker-end="url(#arrow-cyan)"/>
+            <rect x="260" y="360" width="80" height="20" rx="4" fill="#082f49" stroke="#06b6d4" stroke-width="1"/>
+            <text x="300" y="374" fill="#38bdf8" font-size="9" text-anchor="middle" font-weight="bold">USB 3.2 Gen 2</text>
+
+            <!-- BLOCK 2: NVIDIA JETSON ORIN NANO -->
+            <g transform="translate(360, 100)">
+              <rect width="250" height="400" rx="12" fill="#0f172a" stroke="#10b981" stroke-width="2"/>
+              <text x="125" y="32" fill="#34d399" font-size="14" font-weight="bold" text-anchor="middle">NVIDIA JETSON ORIN NANO</text>
+              <text x="125" y="48" fill="#94a3b8" font-size="10" text-anchor="middle">Companion AI Computer (40 TOPS)</text>
+
+              <!-- Modules inside Jetson -->
+              <rect x="20" y="65" width="210" height="48" rx="6" fill="#1e293b" stroke="#334155"/>
+              <text x="30" y="86" fill="#a7f3d0" font-size="11" font-weight="bold">Isaac ROS Visual Odometry</text>
+              <text x="30" y="102" fill="#94a3b8" font-size="9">6-DOF VIO Pose / Velocity (30Hz)</text>
+
+              <rect x="20" y="125" width="210" height="48" rx="6" fill="#1e293b" stroke="#334155"/>
+              <text x="30" y="146" fill="#a7f3d0" font-size="11" font-weight="bold">YOLOv8 / TensorRT Hazard Det.</text>
+              <text x="30" y="162" fill="#94a3b8" font-size="9">Obstacle Bounding Boxes & Distance</text>
+
+              <rect x="20" y="185" width="210" height="48" rx="6" fill="#1e293b" stroke="#334155"/>
+              <text x="30" y="206" fill="#a7f3d0" font-size="11" font-weight="bold">3D Local Trajectory Planner</text>
+              <text x="30" y="222" fill="#94a3b8" font-size="9">Safe Return Path Dead Reckoning</text>
+
+              <rect x="20" y="245" width="210" height="48" rx="6" fill="#1e293b" stroke="#334155"/>
+              <text x="30" y="266" fill="#a7f3d0" font-size="11" font-weight="bold">MAVROS / MAVLink Gateway</text>
+              <text x="30" y="282" fill="#94a3b8" font-size="9">Streams VISION_POSITION_ESTIMATE</text>
+
+              <!-- Ports -->
+              <rect x="235" y="260" width="15" height="20" rx="3" fill="#f59e0b"/>
+              <text x="180" y="320" fill="#fbbf24" font-size="10">UART1 (/dev/ttyTHS1)</text>
+
+              <rect x="235" y="340" width="15" height="20" rx="3" fill="#3b82f6"/>
+              <text x="180" y="375" fill="#60a5fa" font-size="10">Optional DroneCAN</text>
+            </g>
+
+            <!-- BUS: High-Speed UART -->
+            <path d="M 610 270 L 710 270" stroke="#f59e0b" stroke-width="3" fill="none" class="flow-line" marker-end="url(#arrow-amber)"/>
+            <rect x="625" y="245" width="70" height="20" rx="4" fill="#451a03" stroke="#f59e0b" stroke-width="1"/>
+            <text x="660" y="259" fill="#fde68a" font-size="9" text-anchor="middle" font-weight="bold">921.6k UART</text>
+
+            <!-- BUS: Optional CAN -->
+            <path d="M 610 350 L 710 350" stroke="#3b82f6" stroke-dasharray="4" stroke-width="2" fill="none" marker-end="url(#arrow-blue)"/>
+            <rect x="625" y="325" width="70" height="20" rx="4" fill="#172554" stroke="#3b82f6" stroke-width="1"/>
+            <text x="660" y="339" fill="#93c5fd" font-size="9" text-anchor="middle" font-weight="bold">Opt. CAN Bus</text>
+
+            <!-- BLOCK 3: CUAV X7 PRO -->
+            <g transform="translate(710, 120)">
+              <rect width="250" height="360" rx="12" fill="#0f172a" stroke="#f59e0b" stroke-width="2"/>
+              <text x="125" y="32" fill="#fbbf24" font-size="14" font-weight="bold" text-anchor="middle">CUAV X7 PRO AUTOPILOT</text>
+              <text x="125" y="48" fill="#94a3b8" font-size="10" text-anchor="middle">Shock-Damped Flight Controller</text>
+
+              <rect x="20" y="65" width="210" height="45" rx="6" fill="#1e293b" stroke="#334155"/>
+              <text x="30" y="85" fill="#fef08a" font-size="11" font-weight="bold">EKF3 Multi-Source Fusion</text>
+              <text x="30" y="100" fill="#94a3b8" font-size="9">Dual GPS + VIO Vision Fallback</text>
+
+              <rect x="20" y="120" width="210" height="45" rx="6" fill="#1e293b" stroke="#334155"/>
+              <text x="30" y="140" fill="#fef08a" font-size="11" font-weight="bold">400Hz Attitude / Rate PID</text>
+              <text x="30" y="155" fill="#94a3b8" font-size="9">Precise Heavy-Lift Disturbance Rejection</text>
+
+              <rect x="20" y="175" width="210" height="45" rx="6" fill="#1e293b" stroke="#334155"/>
+              <text x="30" y="195" fill="#fef08a" font-size="11" font-weight="bold">Failsafe & Emergency Manager</text>
+              <text x="30" y="210" fill="#94a3b8" font-size="9">GPS Loss -> Auto VIO Safe Landing</text>
+
+              <rect x="20" y="230" width="210" height="45" rx="6" fill="#1e293b" stroke="#334155"/>
+              <text x="30" y="250" fill="#fef08a" font-size="11" font-weight="bold">Power / Battery Monitor</text>
+              <text x="30" y="265" fill="#94a3b8" font-size="9">CAN PMU Dual 12S Telemetry</text>
+
+              <rect x="20" y="285" width="210" height="50" rx="6" fill="#1e293b" stroke="#334155"/>
+              <text x="30" y="305" fill="#38bdf8" font-size="11" font-weight="bold">6x DShot600 ESC Outputs</text>
+              <text x="30" y="322" fill="#94a3b8" font-size="9">M1, M2, M3, M4, M5, M6 Channels</text>
+            </g>
+
+            <!-- MOTORS HARNESS OUTPUT -->
+            <path d="M 835 480 L 835 540" stroke="#38bdf8" stroke-width="3" fill="none" class="flow-line" marker-end="url(#arrow-cyan)"/>
+            <g transform="translate(680, 540)">
+              <rect width="310" height="40" rx="6" fill="#1e293b" stroke="#0284c7" stroke-width="1.5"/>
+              <text x="155" y="25" fill="#7dd3fc" font-size="11" font-weight="bold" text-anchor="middle">
+                TO 6× 80A ESCs & 100KV HEAVY-LIFT MOTORS (M1 - M6)
+              </text>
+            </g>
+
+            <!-- POWER BLOCK BOTTOM LEFT -->
+            <g transform="translate(30, 480)">
+              <rect width="320" height="90" rx="8" fill="#111827" stroke="#ef4444" stroke-width="1.5"/>
+              <text x="160" y="25" fill="#f87171" font-size="12" font-weight="bold" text-anchor="middle">
+                12S 28000mAh LiPo & SMART CAN PMU
+              </text>
+              <text x="160" y="45" fill="#94a3b8" font-size="10" text-anchor="middle">
+                Dual High-Voltage Shunt Sensing + Isolated Avionics Regulators
+              </text>
+              <text x="160" y="68" fill="#cbd5e1" font-size="9" text-anchor="middle">
+                44.4V High-Current Rail -> ESCs | 12V 5A -> Jetson | Dual 5.3V -> CUAV X7
+              </text>
+            </g>
+          </svg>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 3: GNSS-DENIED RECOVERY SIMULATOR -->
+    <section id="tab-gnss" class="tab-content hidden space-y-6">
+      <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 shadow-xl">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+          <div>
+            <h2 class="text-lg font-bold text-white">Autonomous GNSS-Denied Safe Recovery Protocol</h2>
+            <p class="text-xs text-slate-400">Deterministic handover from satellite navigation to OAK-D Pro Visual Odometry</p>
+          </div>
+          <button id="jamming-btn" onclick="toggleJamming()" class="px-5 py-2.5 rounded-xl text-xs font-bold transition-all bg-red-600 hover:bg-red-500 text-white shadow-lg shadow-red-900/30 flex items-center gap-2">
+            <span class="w-2 h-2 rounded-full bg-white animate-ping"></span>
+            <span id="jamming-btn-text">INJECT GNSS JAMMING / LOSS</span>
+          </button>
+        </div>
+
+        <!-- Simulation Flow Cards -->
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+          <!-- Step 1 -->
+          <div id="sim-step-1" class="border border-emerald-500/50 bg-emerald-950/20 rounded-xl p-4 transition-all duration-500">
+            <div class="flex items-center justify-between text-xs mb-2">
+              <span class="text-emerald-400 font-bold">STAGE 1: NOMINAL</span>
+              <span id="status-tag-1" class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-mono text-[10px]">ACTIVE</span>
+            </div>
+            <h3 class="text-sm font-semibold text-white mb-1">Dual DroneCAN GNSS</h3>
+            <p class="text-xs text-slate-300 leading-relaxed">
+              CUAV X7 Pro EKF3 fuses RTK/GNSS with onboard IMUs. Jetson streams background VIO verification at 30Hz.
+            </p>
+            <div class="mt-3 text-[11px] text-slate-400 font-mono">
+              Satellites: <span id="sat-count" class="text-emerald-400 font-bold">18</span> | HDOP: <span id="hdop-val" class="text-emerald-400">0.8</span>
+            </div>
+          </div>
+
+          <!-- Step 2 -->
+          <div id="sim-step-2" class="border border-slate-800 bg-slate-900/60 rounded-xl p-4 transition-all duration-500 opacity-60">
+            <div class="flex items-center justify-between text-xs mb-2">
+              <span class="text-amber-400 font-bold">STAGE 2: TRIGGER</span>
+              <span id="status-tag-2" class="px-2 py-0.5 rounded bg-slate-800 text-slate-400 font-mono text-[10px]">STANDBY</span>
+            </div>
+            <h3 class="text-sm font-semibold text-white mb-1">Jamming / Loss Detected</h3>
+            <p class="text-xs text-slate-300 leading-relaxed">
+              HDOP spikes > 2.5. Autopilot integrity monitor flags GPS anomaly within 30ms and triggers safe transition.
+            </p>
+            <div class="mt-3 text-[11px] text-slate-400 font-mono">
+              Handover Latency: <span class="text-cyan-400 font-bold">&lt; 40 ms</span>
+            </div>
+          </div>
+
+          <!-- Step 3 -->
+          <div id="sim-step-3" class="border border-slate-800 bg-slate-900/60 rounded-xl p-4 transition-all duration-500 opacity-60">
+            <div class="flex items-center justify-between text-xs mb-2">
+              <span class="text-cyan-400 font-bold">STAGE 3: RECOVERY</span>
+              <span id="status-tag-3" class="px-2 py-0.5 rounded bg-slate-800 text-slate-400 font-mono text-[10px]">STANDBY</span>
+            </div>
+            <h3 class="text-sm font-semibold text-white mb-1">Vision Odometry Backtrack</h3>
+            <p class="text-xs text-slate-300 leading-relaxed">
+              OAK-D Pro active IR stereo feeds 6-DOF local dead reckoning. Jetson plans reverse return vector toward safe haven.
+            </p>
+            <div class="mt-3 text-[11px] text-slate-400 font-mono">
+              VIO Confidence: <span id="vio-conf" class="text-slate-400">98.2%</span>
+            </div>
+          </div>
+
+          <!-- Step 4 -->
+          <div id="sim-step-4" class="border border-slate-800 bg-slate-900/60 rounded-xl p-4 transition-all duration-500 opacity-60">
+            <div class="flex items-center justify-between text-xs mb-2">
+              <span class="text-purple-400 font-bold">STAGE 4: TOUCHDOWN</span>
+              <span id="status-tag-4" class="px-2 py-0.5 rounded bg-slate-800 text-slate-400 font-mono text-[10px]">STANDBY</span>
+            </div>
+            <h3 class="text-sm font-semibold text-white mb-1">Optical Safe Landing</h3>
+            <p class="text-xs text-slate-300 leading-relaxed">
+              Stereo depth point cloud scans terrain slope (<5°), checks for obstacles, nudges if unsafe, and gently touches down.
+            </p>
+            <div class="mt-3 text-[11px] text-slate-400 font-mono">
+              Descent: <span class="text-purple-400 font-bold">0.4 m/s controlled</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Simulation Narrative Box -->
+        <div class="bg-slate-950 border border-slate-800 rounded-xl p-4 mt-6">
+          <div class="flex items-center gap-2 mb-2">
+            <span class="w-2 h-2 rounded-full bg-cyan-400"></span>
+            <span class="text-xs font-bold uppercase tracking-wider text-cyan-400">Autonomous Avionics Flight Log</span>
+          </div>
+          <div id="flight-terminal" class="font-mono text-xs text-slate-400 space-y-1 bg-black/40 p-3 rounded-lg max-h-40 overflow-y-auto">
+            <div>[00:00:00] <span class="text-emerald-400">SYSTEM READY:</span> Dual DroneCAN Neo3 Pro GNSS healthy. EKF3 primary: GPS.</div>
+            <div>[00:00:01] <span class="text-cyan-400">OAK-D PRO:</span> Active stereo depth streaming 800p @ 30 FPS. IR dot projector active.</div>
+            <div>[00:00:02] <span class="text-emerald-400">JETSON ORIN NANO:</span> Isaac ROS Visual Odometry node running (30 Hz). VISION_POSITION_ESTIMATE sync OK.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 4: AUTOPILOT VS COMPANION AI MATRIX -->
+    <section id="tab-workload" class="tab-content hidden space-y-6">
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <!-- NVIDIA Jetson Orin Nano -->
+        <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 shadow-xl">
+          <div class="flex items-center justify-between pb-4 mb-4 border-b border-slate-800">
+            <div>
+              <span class="text-xs font-bold text-emerald-400 uppercase tracking-wider">Companion Compute Layer</span>
+              <h3 class="text-lg font-bold text-white">NVIDIA Jetson Orin Nano (8GB)</h3>
+            </div>
+            <span class="text-xs px-2.5 py-1 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded-md font-mono">
+              40 TOPS AI
+            </span>
+          </div>
+
+          <ul class="space-y-3 text-xs text-slate-300">
+            <li class="flex items-start gap-2">
+              <span class="text-emerald-400 font-bold">✔</span>
+              <div>
+                <strong class="text-white">Stereo Visual-Inertial Odometry (VIO):</strong>
+                Processes synchronized Luxonis OAK-D Pro stereo depth & IMU to generate real-time 6-DOF relative positioning without satellites.
+              </div>
+            </li>
+            <li class="flex items-start gap-2">
+              <span class="text-emerald-400 font-bold">✔</span>
+              <div>
+                <strong class="text-white">AI Obstacle Detection (YOLOv8/TensorRT):</strong>
+                Performs edge-accelerated object recognition to detect power lines, poles, cranes, foliage, and humans in the flight corridor.
+              </div>
+            </li>
+            <li class="flex items-start gap-2">
+              <span class="text-emerald-400 font-bold">✔</span>
+              <div>
+                <strong class="text-white">3D Voxel OctoMap & Local Path Planning:</strong>
+                Maintains a dynamic local occupancy grid to compute collision-free recovery waypoints.
+              </div>
+            </li>
+            <li class="flex items-start gap-2">
+              <span class="text-emerald-400 font-bold">✔</span>
+              <div>
+                <strong class="text-white">Safe-Haven Trajectory Dead Reckoning:</strong>
+                Continuously stores ingress keyframe checkpoints to guide the drone back to safe home coordinates during RF denial.
+              </div>
+            </li>
+          </ul>
+        </div>
+
+        <!-- CUAV X7 Pro Flight Controller -->
+        <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 shadow-xl">
+          <div class="flex items-center justify-between pb-4 mb-4 border-b border-slate-800">
+            <div>
+              <span class="text-xs font-bold text-amber-400 uppercase tracking-wider">Hard Real-Time Layer</span>
+              <h3 class="text-lg font-bold text-white">CUAV X7 Pro Autopilot</h3>
+            </div>
+            <span class="text-xs px-2.5 py-1 bg-amber-500/10 text-amber-400 border border-amber-500/20 rounded-md font-mono">
+              STM32H753 (480 MHz)
+            </span>
+          </div>
+
+          <ul class="space-y-3 text-xs text-slate-300">
+            <li class="flex items-start gap-2">
+              <span class="text-amber-400 font-bold">✔</span>
+              <div>
+                <strong class="text-white">Triple-Redundant IMU & Vibration Isolation:</strong>
+                Shock-damped industrial IMUs filter out motor harmonics from the 6 high-torque heavy-lift BLDC motors.
+              </div>
+            </li>
+            <li class="flex items-start gap-2">
+              <span class="text-amber-400 font-bold">✔</span>
+              <div>
+                <strong class="text-white">EKF3 Extended Kalman Filter Fusion:</strong>
+                Fuses barometric altitude, optical flow/VIO pose, and GNSS; performs instant sub-50ms fallback to vision odometry.
+              </div>
+            </li>
+            <li class="flex items-start gap-2">
+              <span class="text-amber-400 font-bold">✔</span>
+              <div>
+                <strong class="text-white">400Hz Attitude PID & Motor Mixing:</strong>
+                Direct deterministic control of the 6 ESCs (DShot600 digital protocol) guaranteeing aerodynamic stability under 10 kg payload.
+              </div>
+            </li>
+            <li class="flex items-start gap-2">
+              <span class="text-amber-400 font-bold">✔</span>
+              <div>
+                <strong class="text-white">Hardware Health & Failsafe Watchdogs:</strong>
+                Monitors RC link loss, battery voltage sags, ESC telemetry faults, and triggers emergency parachute or controlled descent.
+              </div>
+            </li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 5: BATTERY & FAILSAFE LOGIC -->
+    <section id="tab-battery" class="tab-content hidden space-y-6">
+      <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 shadow-xl">
+        <h2 class="text-lg font-bold text-white mb-2">12S Smart LiPo Battery Telemetry & Multi-Tier Failsafe</h2>
+        <p class="text-xs text-slate-400 mb-6">Interactive state assessment based on dual CAN PMU cell voltage and discharge current</p>
+
+        <!-- Interactive Battery Slider -->
+        <div class="bg-slate-950 border border-slate-800 rounded-xl p-6 max-w-xl mx-auto space-y-4">
+          <div class="flex items-center justify-between text-sm">
+            <span class="text-slate-300 font-medium">Simulated Battery State of Charge (SoC):</span>
+            <span id="soc-display" class="font-bold text-emerald-400 font-mono text-base">85% (3.95 V/cell)</span>
+          </div>
+          
+          <input 
+            type="range" 
+            min="3" 
+            max="100" 
+            value="85" 
+            id="battery-slider" 
+            oninput="updateBattery(this.value)"
+            class="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-cyan-500"
+          />
+
+          <div class="flex justify-between text-[11px] text-slate-500 font-mono">
+            <span>5% Critical</span>
+            <span>15% Low</span>
+            <span>25% Warning</span>
+            <span>100% Full</span>
+          </div>
+
+          <!-- Dynamic Action Result -->
+          <div id="battery-action-card" class="bg-emerald-950/30 border border-emerald-500/40 rounded-xl p-4 mt-4 transition-all">
+            <div class="flex items-center gap-2 text-emerald-400 font-bold text-xs uppercase mb-1">
+              <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
+              <span id="battery-action-title">Normal Operations</span>
+            </div>
+            <p id="battery-action-desc" class="text-xs text-slate-300 leading-relaxed">
+              Battery voltage nominal (47.4V pack). Continuous flight authorized. AI object detection & heavy-lift payload delivery fully active.
+            </p>
+          </div>
+        </div>
+
+        <!-- Failsafe Table -->
+        <div class="mt-8 border border-slate-800 rounded-xl overflow-hidden">
+          <table class="w-full text-left text-xs">
+            <thead class="bg-slate-800/80 text-slate-300 font-semibold uppercase text-[11px] border-b border-slate-700">
+              <tr>
+                <th class="p-3">Battery Tier</th>
+                <th class="p-3">Cell Voltage / SoC</th>
+                <th class="p-3">Autopilot Trigger</th>
+                <th class="p-3">Jetson AI Action</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-800 text-slate-300">
+              <tr class="hover:bg-slate-800/40">
+                <td class="p-3 font-semibold text-emerald-400">Nominal</td>
+                <td class="p-3 font-mono">> 3.65 V (&gt; 25%)</td>
+                <td class="p-3">Normal Mission Execution</td>
+                <td class="p-3">Full VIO, 30 FPS Depth, YOLO Inference</td>
+              </tr>
+              <tr class="hover:bg-slate-800/40">
+                <td class="p-3 font-semibold text-amber-400">Stage 1 Warning</td>
+                <td class="p-3 font-mono">≤ 3.65 V (25%)</td>
+                <td class="p-3">GCS Low Battery Alert; Energy calculation</td>
+                <td class="p-3">Computes energy required for Safe Haven return</td>
+              </tr>
+              <tr class="hover:bg-slate-800/40">
+                <td class="p-3 font-semibold text-orange-400">Stage 2 Critical</td>
+                <td class="p-3 font-mono">≤ 3.50 V (15%)</td>
+                <td class="p-3">Autonomous Return-to-Safe-Haven (RTSH)</td>
+                <td class="p-3">Switches to high-efficiency return path planning</td>
+              </tr>
+              <tr class="hover:bg-slate-800/40">
+                <td class="p-3 font-semibold text-red-400">Stage 3 Emergency</td>
+                <td class="p-3 font-mono">≤ 3.35 V (5%)</td>
+                <td class="p-3">Immediate Controlled Vertical Descent</td>
+                <td class="p-3">OAK-D Pro scans ground terrain for flat landing spot</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="text-center text-xs text-slate-500 py-4 border-t border-slate-800/80">
+      Indigenous Heavy-Lift Hexacopter Architecture • CUAV X7 Pro + NVIDIA Jetson Orin Nano + Luxonis OAK-D Pro • Project Reference 2026
+    </footer>
+
+  </div>
+
+  <script>
+    function switchTab(tabId) {
+      document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
+      document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.classList.remove('tab-active');
+        btn.classList.add('text-slate-400');
+      });
+
+      const selectedContent = document.getElementById('tab-' + tabId);
+      const selectedBtn = document.getElementById('tab-btn-' + tabId);
+      if (selectedContent) selectedContent.classList.remove('hidden');
+      if (selectedBtn) {
+        selectedBtn.classList.add('tab-active');
+        selectedBtn.classList.remove('text-slate-400');
+      }
+    }
+
+    let isJammed = false;
+    function toggleJamming() {
+      isJammed = !isJammed;
+      const btn = document.getElementById('jamming-btn');
+      const btnText = document.getElementById('jamming-btn-text');
+      const terminal = document.getElementById('flight-terminal');
+      
+      const s1 = document.getElementById('sim-step-1');
+      const s2 = document.getElementById('sim-step-2');
+      const s3 = document.getElementById('sim-step-3');
+      const s4 = document.getElementById('sim-step-4');
+
+      const tag1 = document.getElementById('status-tag-1');
+      const tag2 = document.getElementById('status-tag-2');
+      const tag3 = document.getElementById('status-tag-3');
+      const tag4 = document.getElementById('status-tag-4');
+
+      const satCount = document.getElementById('sat-count');
+      const hdopVal = document.getElementById('hdop-val');
+      const vioConf = document.getElementById('vio-conf');
+
+      if (isJammed) {
+        btnText.innerText = 'RESTORE GNSS SIGNALS';
+        btn.classList.replace('bg-red-600', 'bg-emerald-600');
+        btn.classList.replace('hover:bg-red-500', 'hover:bg-emerald-500');
+
+        satCount.innerText = '2 (UNLOCKED)';
+        satCount.classList.replace('text-emerald-400', 'text-red-400');
+        hdopVal.innerText = '99.9 (INVALID)';
+        hdopVal.classList.replace('text-emerald-400', 'text-red-400');
+        vioConf.innerText = '99.4% (ENGAGED)';
+        vioConf.classList.add('text-cyan-400');
+
+        s1.classList.add('opacity-40');
+        tag1.innerText = 'DEGRADED';
+        tag1.classList.replace('text-emerald-300', 'text-red-300');
+
+        s2.classList.remove('opacity-60');
+        s2.classList.add('border-amber-500', 'bg-amber-950/20');
+        tag2.innerText = 'TRIGGERED';
+        tag2.classList.replace('text-slate-400', 'text-amber-300');
+
+        s3.classList.remove('opacity-60');
+        s3.classList.add('border-cyan-500', 'bg-cyan-950/20');
+        tag3.innerText = 'ACTIVE VIO';
+        tag3.classList.replace('text-slate-400', 'text-cyan-300');
+
+        s4.classList.remove('opacity-60');
+        s4.classList.add('border-purple-500', 'bg-purple-950/20');
+        tag4.innerText = 'ARMED';
+        tag4.classList.replace('text-slate-400', 'text-purple-300');
+
+        terminal.innerHTML += `
+          <div>[00:00:15] <span class="text-red-400 font-bold">WARNING:</span> Satellite lock lost. HDOP > 5.0. RF jamming detected.</div>
+          <div>[00:00:15] <span class="text-amber-400">FAILOVER:</span> CUAV X7 Pro EKF3 automatically disables GPS fusion.</div>
+          <div>[00:00:15] <span class="text-cyan-400 font-bold">HANDOVER:</span> Primary position reference switched to Luxonis OAK-D Pro Visual Odometry (VIO).</div>
+          <div>[00:00:16] <span class="text-cyan-400">JETSON:</span> Calculating dead-reckoning trajectory along safe ingress corridor.</div>
+          <div>[00:00:18] <span class="text-purple-400 font-bold">SAFE RECOVERY:</span> Returning toward predefined safe area using local visual maps.</div>
+        `;
+        terminal.scrollTop = terminal.scrollHeight;
+      } else {
+        btnText.innerText = 'INJECT GNSS JAMMING / LOSS';
+        btn.classList.replace('bg-emerald-600', 'bg-red-600');
+        btn.classList.replace('hover:bg-emerald-500', 'hover:bg-red-500');
+
+        satCount.innerText = '18';
+        satCount.classList.replace('text-red-400', 'text-emerald-400');
+        hdopVal.innerText = '0.8';
+        hdopVal.classList.replace('text-red-400', 'text-emerald-400');
+        vioConf.innerText = '98.2%';
+        vioConf.classList.remove('text-cyan-400');
+
+        s1.classList.remove('opacity-40');
+        tag1.innerText = 'ACTIVE';
+        tag1.classList.replace('text-red-300', 'text-emerald-300');
+
+        s2.classList.add('opacity-60');
+        s2.classList.remove('border-amber-500', 'bg-amber-950/20');
+        tag2.innerText = 'STANDBY';
+        tag2.classList.replace('text-amber-300', 'text-slate-400');
+
+        s3.classList.add('opacity-60');
+        s3.classList.remove('border-cyan-500', 'bg-cyan-950/20');
+        tag3.innerText = 'STANDBY';
+        tag3.classList.replace('text-cyan-300', 'text-slate-400');
+
+        s4.classList.add('opacity-60');
+        s4.classList.remove('border-purple-500', 'bg-purple-950/20');
+        tag4.innerText = 'STANDBY';
+        tag4.classList.replace('text-purple-300', 'text-slate-400');
+
+        terminal.innerHTML += `
+          <div>[00:00:30] <span class="text-emerald-400 font-bold">RESTORED:</span> GNSS signal re-acquired. Dual GPS valid lock (18 sats).</div>
+          <div>[00:00:30] <span class="text-slate-400">EKF3:</span> Re-enabling multi-sensor fusion with dual GPS & VIO health checks.</div>
+        `;
+        terminal.scrollTop = terminal.scrollHeight;
+      }
+    }
+
+    function updateBattery(val) {
+      const soc = parseInt(val);
+      const display = document.getElementById('soc-display');
+      const card = document.getElementById('battery-action-card');
+      const title = document.getElementById('battery-action-title');
+      const desc = document.getElementById('battery-action-desc');
+
+      const cellV = (3.30 + (soc / 100) * (4.20 - 3.30)).toFixed(2);
+      display.innerText = `${soc}% (${cellV} V/cell)`;
+
+      if (soc > 25) {
+        display.className = 'font-bold text-emerald-400 font-mono text-base';
+        card.className = 'bg-emerald-950/30 border border-emerald-500/40 rounded-xl p-4 mt-4 transition-all';
+        title.className = 'text-emerald-400 font-bold text-xs uppercase';
+        title.innerText = 'Normal Operations';
+        desc.innerText = `Battery voltage nominal (~${(cellV * 12).toFixed(1)}V pack). Continuous flight authorized. AI object detection & heavy-lift payload delivery fully active.`;
+      } else if (soc > 15) {
+        display.className = 'font-bold text-amber-400 font-mono text-base';
+        card.className = 'bg-amber-950/30 border border-amber-500/40 rounded-xl p-4 mt-4 transition-all';
+        title.className = 'text-amber-400 font-bold text-xs uppercase';
+        title.innerText = 'Stage 1 Warning (25% Threshold)';
+        desc.innerText = `Low battery caution alert dispatched to Ground Control. Companion computer checks distance to safe haven vs available reserve capacity.`;
+      } else if (soc > 5) {
+        display.className = 'font-bold text-orange-400 font-mono text-base';
+        card.className = 'bg-orange-950/30 border border-orange-500/40 rounded-xl p-4 mt-4 transition-all';
+        title.className = 'text-orange-400 font-bold text-xs uppercase';
+        title.innerText = 'Stage 2 Critical (15% Threshold) - Autonomous Return';
+        desc.innerText = `Autonomous Return-to-Safe-Haven (RTSH) initiated immediately via visual odometry dead reckoning. Non-essential AI pipelines throttled to conserve power.`;
+      } else {
+        display.className = 'font-bold text-red-400 font-mono text-base';
+        card.className = 'bg-red-950/30 border border-red-500/40 rounded-xl p-4 mt-4 transition-all';
+        title.className = 'text-red-400 font-bold text-xs uppercase';
+        title.innerText = 'Stage 3 Emergency (5% Threshold) - Precision Landing';
+        desc.innerText = `Immediate controlled vertical descent at current coordinates. Luxonis OAK-D Pro depth camera activates terrain slope scanning to perform safe touchdown.`;
+      }
+    }
+  </script>
+</body>
+</html>

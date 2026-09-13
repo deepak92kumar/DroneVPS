@@ -1,0 +1,121 @@
+
+=====================================================
+ DRONE VISUAL ODOMETRY ROUND-TRIP FLIGHT REPORT
+ Date & Time       : 2026-09-04 20:17:19
+=====================================================
+ Max Outbound Dist : 0.76 meters (75 cm)
+ Total Path Length : 2.82 meters (281 cm)
+ Final Return Pos  : X: +0.36m (36cm), Y: -0.31m (-30cm)
+ Residual Drift    : 0.47 meters (47 cm)
+ Ground Clearance  : 0.74 meters
+ System Status     : OAK-D Pro Visual Inertial Odometry
+=====================================================
+
+=====================================================
+ DRONE VISUAL ODOMETRY ROUND-TRIP FLIGHT REPORT
+ Date & Time       : 2026-09-04 20:17:30
+=====================================================
+ Max Outbound Dist : 0.76 meters (75 cm)
+ Total Path Length : 2.82 meters (281 cm)
+ Final Return Pos  : X: +0.36m (36cm), Y: -0.31m (-30cm)
+ Residual Drift    : 0.47 meters (47 cm)
+ Ground Clearance  : 0.36 meters
+ System Status     : OAK-D Pro Visual Inertial Odometry
+=====================================================
+
+=====================================================
+ DRONE VISUAL ODOMETRY ROUND-TRIP FLIGHT REPORT
+ Date & Time       : 2026-09-04 20:27:53
+=====================================================
+ Max Outbound Dist : 0.29 meters (28 cm)
+ Total Path Length : 1.67 meters (166 cm) [Odometer]
+ Final Return Pos  : X: -0.24m (-23cm), Y: +0.05m (4cm)
+ Residual Drift    : 0.24 meters (24 cm) [Distance from Home]
+ Ground Clearance  : 4.28 meters
+ Memory Match      : 0 Features (Optical Flow Integration)
+ Tracking Sensor   : OV9282 Global Shutter + BNO086 IMU + Active IR
+=====================================================
+
+=====================================================
+ DRONE VISUAL ODOMETRY ROUND-TRIP FLIGHT REPORT
+ Date & Time       : 2026-09-04 20:33:21
+=====================================================
+ Max Outbound Dist : 0.16 meters (16 cm)
+ Total Path Length : 0.47 meters (46 cm) [Odometer]
+ Final Return Pos  : X: -0.09m (-8cm), Y: +0.02m (2cm)
+ Residual Drift    : 0.09 meters (9 cm) [Distance from Home]
+ Ground Clearance  : 2.46 meters
+ Tilt (Roll, Pitch): R: +0.9 deg, P: -6.2 deg
+ Memory Match      : 1 Features (Optical Flow Integration)
+ Tracking Sensor   : OV9282 Global Shutter + BNO086 IMU + Active IR
+=====================================================
+
+=====================================================
+ DRONE VISUAL ODOMETRY ROUND-TRIP FLIGHT REPORT
+ Date & Time       : 2026-09-05 09:17:34
+=====================================================
+ Max Outbound Dist : 1.15 meters (115 cm)
+ Total Path Length : 3.61 meters (360 cm) [Odometer]
+ Final Return Pos  : X: +0.33m (32cm), Y: -0.26m (-26cm)
+ Residual Drift    : 0.42 meters (41 cm) [Distance from Home]
+ Ground Clearance  : 2.13 meters
+ Tilt (Roll, Pitch): R: +1.0 deg, P: -3.6 deg
+ Memory Match      : 14 Features (LOCKED (Visual Memory Re-localized))
+ Tracking Sensor   : OV9282 Global Shutter + BNO086 IMU + Active IR
+=====================================================
+
+=====================================================
+ DRONE VISUAL ODOMETRY ROUND-TRIP FLIGHT REPORT
+ Date & Time       : 2026-09-05 09:26:01
+=====================================================
+ Max Outbound Dist : 0.03 meters (3 cm)
+ Total Path Length : 0.17 meters (16 cm) [Odometer]
+ Final Return Pos  : X: -0.00m (0cm), Y: -0.02m (-2cm)
+ Residual Drift    : 0.02 meters (2 cm) [Distance from Home]
+ Ground Clearance  : 0.32 meters (Desk Mode (35cm Scaled))
+ Tilt (Roll, Pitch): R: +1.6 deg, P: -0.4 deg
+ Memory Match      : 0 Features (Optical Flow Integration)
+ Tracking Sensor   : Decoupled Affine OV9282 Global Shutter + Active IR
+=====================================================
+
+=====================================================
+ DRONE VISUAL ODOMETRY ROUND-TRIP FLIGHT REPORT
+ Date & Time       : 2026-09-05 09:33:27
+=====================================================
+ Max Outbound Dist : 0.48 meters (48 cm)
+ Total Path Length : 2.47 meters (247 cm) [Odometer]
+ Final Return Pos  : X: -0.43m (-42cm), Y: +0.23m (22cm)
+ Residual Drift    : 0.48 meters (48 cm) [Distance from Home]
+ Ground Clearance  : 0.31 meters (Desk Mode (0.31m))
+ Tilt (Roll, Pitch): R: +1.3 deg, P: +0.0 deg
+ Memory Match      : 22 Features (LOCKED (Visual Memory Re-localized))
+ Tracking Sensor   : Decoupled Affine OV9282 Global Shutter + Active IR
+=====================================================
+
+=====================================================
+ DRONE VISUAL ODOMETRY ROUND-TRIP FLIGHT REPORT
+ Date & Time       : 2026-09-05 09:36:14
+=====================================================
+ Max Outbound Dist : 1.11 meters (111 cm)
+ Total Path Length : 2.49 meters (249 cm) [Odometer]
+ Final Return Pos  : X: -0.73m (-72cm), Y: +0.27m (27cm)
+ Residual Drift    : 0.78 meters (77 cm) [Distance from Home]
+ Ground Clearance  : 0.27 meters (Desk Mode (0.27m))
+ Tilt (Roll, Pitch): R: +1.1 deg, P: -0.1 deg
+ Memory Match      : 0 Features (Optical Flow Integration)
+ Tracking Sensor   : Decoupled Affine OV9282 Global Shutter + Active IR
+=====================================================
+
+=====================================================
+ DRONE VISUAL ODOMETRY ROUND-TRIP FLIGHT REPORT
+ Date & Time       : 2026-09-05 14:05:30
+=====================================================
+ Max Outbound Dist : 0.58 meters (58 cm)
+ Total Path Length : 0.56 meters (55 cm) [Odometer]
+ Final Return Pos  : X: +0.46m (46cm), Y: +0.24m (24cm)
+ Residual Drift    : 0.52 meters (52 cm) [Distance from Home]
+ Ground Clearance  : 0.25 meters (Desk Mode (0.25m))
+ Tilt (Roll, Pitch): R: -7.9 deg, P: +0.6 deg
+ Memory Match      : 0 Features (Optical Flow Integration)
+ Tracking Sensor   : Decoupled Affine OV9282 Global Shutter + Active IR
+=====================================================

@@ -1,0 +1,15 @@
+[Unit]
+Description=VIO ground-test status page (browser on second laptop)
+After=network-online.target drone-vio.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=abc
+WorkingDirectory=/home/abc/SSD/DRONE
+ExecStart=/usr/bin/python3 /home/abc/SSD/DRONE/ground_status_server.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

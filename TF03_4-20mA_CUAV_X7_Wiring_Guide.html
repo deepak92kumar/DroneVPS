@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang='hi'>
+<head>
+<meta charset='UTF-8'>
+<title>CUAV X7 Pro &amp; Benewake TF03 (4-20mA) Wiring Guide</title>
+</head>
+<body style='font-family: Liberation Sans, DejaVu Sans, Arial, sans-serif; color: #1e293b; line-height: 1.35; font-size: 9.5pt; margin: 15px 30px;'>
+
+<!-- ====================================================================
+     PAGE 1: TITLE, META, ROOT CAUSE, BILL OF MATERIALS
+     ==================================================================== -->
+<table width='100%' border='0' cellspacing='0' cellpadding='0'>
+  <tr>
+    <td style='border-bottom: 3px solid #1e40af; padding-bottom: 6px;'>
+      <font size='5' color='#1e3a8a'><b>CUAV X7 Pro &amp; Benewake TF03 (4-20mA) Wiring Guide</b></font><br>
+      <font size='2' color='#475569'><b>Complete Hardware Integration Manual, Bill of Materials, Wiring Diagram &amp; ArduPilot Setup</b></font>
+    </td>
+  </tr>
+</table>
+
+<table width='100%' border='1' bordercolor='#cbd5e1' cellspacing='0' cellpadding='4' bgcolor='#f8fafc' style='margin-top: 8px; font-size: 8.5pt;'>
+  <tr>
+    <td width='25%'><b>Autopilot:</b> CUAV X7 Pro / X7+</td>
+    <td width='25%'><b>Firmware:</b> ArduCopter 4.7.1</td>
+    <td width='25%'><b>Sensor:</b> TF03-4-20mA (5-24V)</td>
+    <td width='25%'><b>FC Port:</b> Port 09: ADC (Analog)</td>
+  </tr>
+</table>
+
+<!-- Root cause warning box -->
+<table width='100%' border='0' cellspacing='0' cellpadding='8' bgcolor='#fffbeb' style='border-left: 6px solid #d97706; border-top: 1px solid #fde68a; border-right: 1px solid #fde68a; border-bottom: 1px solid #fde68a; margin-top: 10px;'>
+  <tr>
+    <td>
+      <font size='2' color='#92400e'><b>1. UART Par '0' Kyun Aa Raha Tha? (Root Cause Explanation)</b></font><br>
+      <font size='2' color='#1e293b'>
+      Aapke LiDAR sensor ke sticker par likha hai: <b>'TF03-4-20mA 5-24V'</b>.<br>
+      Yeh standard drone LiDAR (UART) nahi hai, balki factory cranes aur industrial automation ke liye banaya gaya <b>4-20mA Current-Loop Sensor</b> hai.<br>
+      Official Benewake TF03 4-20mA User Manual (Page 11 &amp; 14) ke mutabiq:<br>
+      <i>"Normally, the UART interface can only be used to configure TF03. DO NOT use UART interface to transmit detection data."</i><br>
+      <b>Nateeja:</b> Is sensor ka distance UART port par bilkul nahi nikalta (isliye Mission Planner mein 0 aa raha tha). Distance reading sirf <b>Green Wire (Pin 3) par 4mA se 20mA analog current</b> ke roop mein nikalta hai.
+      </font>
+    </td>
+  </tr>
+</table>
+
+<table width='100%' border='0' cellspacing='0' cellpadding='0' style='margin-top: 12px; margin-bottom: 6px;'>
+  <tr>
+    <td style='border-bottom: 2px solid #1e3a8a; padding-bottom: 2px;'>
+      <font size='3' color='#1e3a8a'><b>2. Saman Ki List (Bill of Materials - Kya Khareedna Hai)</b></font>
+    </td>
+  </tr>
+</table>
+
+<p style='margin: 4px 0 6px 0; font-size: 9pt;'>Is sensor ko CUAV X7 Pro se jodne ke liye aapke paas 2 aasan vikalp (options) hain:</p>
+
+<table width='100%' border='1' bordercolor='#cbd5e1' cellspacing='0' cellpadding='5' style='font-size: 8.5pt;'>
+  <tr bgcolor='#1e3a8a'>
+    <th width='15%' align='left'><font color='#ffffff'>Option</font></th>
+    <th width='30%' align='left'><font color='#ffffff'>Component / Saman</font></th>
+    <th width='35%' align='left'><font color='#ffffff'>Specification / Details</font></th>
+    <th width='20%' align='left'><font color='#ffffff'>Kahan Milega / Price</font></th>
+  </tr>
+  <tr>
+    <td><b>Option A<br><font color='#16a34a'>Sabse Aasan &amp; Lightest</font></b></td>
+    <td><b>150 &Omega; (ya 250 &Omega;) Resistor</b><br>(Resistance / Pratirodh)</td>
+    <td>&bull; Value: <b>150 Ohm</b> (ya 250 Ohm)<br>&bull; Tolerance: 1% Metal Film Precision<br>&bull; Power: 1/4 Watt ya 1/2 Watt</td>
+    <td>Kisi bhi electronics shop ya Robu.in<br><b>&#8377;2 - &#8377;10</b></td>
+  </tr>
+  <tr bgcolor='#f8fafc'>
+    <td><b>Option B<br>Ready-Made Module</b></td>
+    <td><b>4-20mA to 0-3.3V Converter Module</b></td>
+    <td>&bull; LM358 Current to Voltage Board<br>&bull; Zero and Span calibration potentiometer</td>
+    <td>Amazon.in / Robu.in<br><b>&#8377;150 - &#8377;250</b></td>
+  </tr>
+  <tr>
+    <td><b>Cable</b></td>
+    <td><b>JST-GH 5-Pin Cable</b></td>
+    <td>1.25mm pitch connector (CUAV X7 Pro Port 09 ADC)</td>
+    <td>CUAV Cable Set Box / Robu</td>
+  </tr>
+  <tr bgcolor='#f8fafc'>
+    <td><b>Insulation</b></td>
+    <td><b>Heat Shrink Sleeve / Tape</b></td>
+    <td>2mm &amp; 4mm heat shrink sleeves for joints</td>
+    <td>Electronics store (&#8377;10)</td>
+  </tr>
+</table>
+
+<!-- ====================================================================
+     PAGE 2: PIN MAPPING & SCHEMATIC DIAGRAM
+     ==================================================================== -->
+<br clear='all' style='page-break-before: always;'>
+
+<table width='100%' border='0' cellspacing='0' cellpadding='0'>
+  <tr>
+    <td style='border-bottom: 2px solid #1e3a8a; padding-bottom: 3px;'>
+      <font size='3' color='#1e3a8a'><b>3. Pin-to-Pin Connection Mapping Table</b></font>
+    </td>
+  </tr>
+</table>
+
+<table width='100%' border='1' bordercolor='#cbd5e1' cellspacing='0' cellpadding='4' style='font-size: 8.5pt; margin-top: 6px;'>
+  <tr bgcolor='#1e3a8a'>
+    <th width='20%' align='left'><font color='#ffffff'>TF03 Molex Wire</font></th>
+    <th width='24%' align='left'><font color='#ffffff'>Sensor Function</font></th>
+    <th width='28%' align='left'><font color='#ffffff'>Kahan Jodna Hai</font></th>
+    <th width='28%' align='left'><font color='#ffffff'>CUAV Port 09 Pinout</font></th>
+  </tr>
+  <tr bgcolor='#fff5f5'>
+    <td><b>RED (Pin 1)</b></td>
+    <td>VCC (+5V to +24V)</td>
+    <td>5V Power Supply</td>
+    <td><b>Pin 1 (+5V Power)</b></td>
+  </tr>
+  <tr>
+    <td>WHITE (Pin 2)</td>
+    <td>NC (Not Connected)</td>
+    <td>Tape lagakar alag karein</td>
+    <td><i>Not Connected (Empty)</i></td>
+  </tr>
+  <tr bgcolor='#f0fdf4'>
+    <td><b>GREEN (Pin 3)</b></td>
+    <td><b>Analog Signal (4-20mA)</b></td>
+    <td>150&Omega; Resistor Leg 1 se</td>
+    <td><b>Pin 2 (ADC Voltage In)</b></td>
+  </tr>
+  <tr>
+    <td>BLUE (Pin 5)</td>
+    <td>UART RxD (Config only)</td>
+    <td>Tape lagakar alag karein</td>
+    <td><i>Not Connected (Empty)</i></td>
+  </tr>
+  <tr>
+    <td>BROWN (Pin 6)</td>
+    <td>UART TxD (Config only)</td>
+    <td>Tape lagakar alag karein</td>
+    <td><i>Not Connected (Empty)</i></td>
+  </tr>
+  <tr bgcolor='#f1f5f9'>
+    <td><b>BLACK (Pin 7)</b></td>
+    <td><b>GND (Power &amp; Signal Ground)</b></td>
+    <td>150&Omega; Resistor Leg 2 se</td>
+    <td><b>Pin 4 (GND Ground)</b></td>
+  </tr>
+</table>
+
+<table width='100%' border='0' cellspacing='0' cellpadding='0' style='margin-top: 10px; margin-bottom: 4px;'>
+  <tr>
+    <td style='border-bottom: 2px solid #1e3a8a; padding-bottom: 3px;'>
+      <font size='3' color='#1e3a8a'><b>4. Wiring Schematic Diagram (CUAV X7 Pro Flight Controller ke Anusar)</b></font>
+    </td>
+  </tr>
+</table>
+
+<div align='center' style='margin: 6px 0;'>
+  <img src='/home/abc/Desktop/DRONE/tf03_wiring_diagram.png' width='640' height='400' style='border: 1px solid #94a3b8; border-radius: 4px;'>
+</div>
+
+<!-- ====================================================================
+     PAGE 3: OHM'S LAW FORMULA & STEP-BY-STEP ASSEMBLY
+     ==================================================================== -->
+<br clear='all' style='page-break-before: always;'>
+
+<table width='100%' border='0' cellspacing='0' cellpadding='0'>
+  <tr>
+    <td style='border-bottom: 2px solid #1e3a8a; padding-bottom: 3px;'>
+      <font size='3' color='#1e3a8a'><b>5. Resistor Ka Mathematical Formula (Ohm's Law Calculation)</b></font>
+    </td>
+  </tr>
+</table>
+
+<table width='100%' border='0' cellspacing='0' cellpadding='8' bgcolor='#eff6ff' style='border-left: 6px solid #2563eb; border-top: 1px solid #bfdbfe; border-right: 1px solid #bfdbfe; border-bottom: 1px solid #bfdbfe; margin-top: 6px;'>
+  <tr>
+    <td>
+      <font size='2' color='#1e40af'><b>Formula: Voltage (V) = Current (I) &times; Resistance (R)</b></font><br>
+      <font size='2' color='#1e293b'>
+      Jab hum TF03 ke Green wire aur Ground ke beech <b>150 &Omega; resistor</b> lagate hain:<br>
+      &bull; <b>Minimum Range (0.0 Meter, 4mA current):</b> 0.004 A &times; 150 &Omega; = <b>0.60 Volts</b><br>
+      &bull; <b>Maximum Range (180.0 Meter, 20mA current):</b> 0.020 A &times; 150 &Omega; = <b>3.00 Volts</b><br>
+      &bull; <b>Voltage Span (&Delta;V):</b> 3.00 V - 0.60 V = <b>2.40 Volts</b><br>
+      &bull; <b>ArduPilot Scaling Factor:</b> 180.0 m / 2.40 V = <b>75.0 meters/Volt</b><br>
+      &bull; <b>ArduPilot Offset Factor:</b> -(0.60 V &times; 75.0) = <b>-45.0 meters</b><br>
+      <b>Suraksha (Safety):</b> CUAV X7 Pro ka ADC port 0V se 3.3V tak voltage padhta hai. Hamara maximum voltage <b>3.00V</b> hai, jo flight controller ke safe range ke andar 100% surakshit hai.
+      </font>
+    </td>
+  </tr>
+</table>
+
+<table width='100%' border='0' cellspacing='0' cellpadding='0' style='margin-top: 12px; margin-bottom: 6px;'>
+  <tr>
+    <td style='border-bottom: 2px solid #1e3a8a; padding-bottom: 3px;'>
+      <font size='3' color='#1e3a8a'><b>6. Step-by-Step Connection Guide (Kaise Jodna Hai)</b></font>
+    </td>
+  </tr>
+</table>
+
+<table width='100%' border='1' bordercolor='#cbd5e1' cellspacing='0' cellpadding='6' bgcolor='#f8fafc' style='margin-top: 4px; font-size: 9pt;'>
+  <tr>
+    <td>
+      <font color='#1e3a8a'><b>Step 1: 150-Ohm Resistor Lagana</b></font><br>
+      Resistor ke do siray (leads) hote hain:<br>
+      1. Pehla sira: TF03 ke <b>GREEN taar</b> aur CUAV JST-GH cable ke <b>Pin 2 (ADC)</b> se jodein.<br>
+      2. Doosra sira: TF03 ke <b>BLACK taar</b> aur CUAV JST-GH cable ke <b>Pin 4 (GND)</b> se jodein.<br>
+      <i>(Jod par heat shrink sleeve ya tape chadhakar insulate kar dein taaki aapas mein touch na ho).</i>
+    </td>
+  </tr>
+</table>
+
+<table width='100%' border='1' bordercolor='#cbd5e1' cellspacing='0' cellpadding='6' bgcolor='#f8fafc' style='margin-top: 6px; font-size: 9pt;'>
+  <tr>
+    <td>
+      <font color='#1e3a8a'><b>Step 2: Power (5V) Connection</b></font><br>
+      TF03 ka <b>RED taar</b> CUAV JST-GH cable ke <b>Pin 1 (+5V)</b> se jodein.<br>
+      <i>(Agar drone par alag 12V BEC hai, toh Red ko BEC 12V se aur Black ko common ground se jod sakte hain).</i>
+    </td>
+  </tr>
+</table>
+
+<table width='100%' border='1' bordercolor='#cbd5e1' cellspacing='0' cellpadding='6' bgcolor='#f8fafc' style='margin-top: 6px; font-size: 9pt;'>
+  <tr>
+    <td>
+      <font color='#1e3a8a'><b>Step 3: Faltu Wires Ko Tape Karein</b></font><br>
+      TF03 ke <b>BLUE (Rx)</b>, <b>BROWN (Tx)</b> aur <b>WHITE</b> taaron par electrical tape laga dein taaki koi accidental short-circuit na ho.
+    </td>
+  </tr>
+</table>
+
+<table width='100%' border='1' bordercolor='#cbd5e1' cellspacing='0' cellpadding='6' bgcolor='#f8fafc' style='margin-top: 6px; font-size: 9pt;'>
+  <tr>
+    <td>
+      <font color='#1e3a8a'><b>Step 4: Flight Controller Mein Plug Karein</b></font><br>
+      JST-GH 5-pin connector ko CUAV X7 Pro ke <b>Port 09: ADC</b> socket mein laga dein.
+    </td>
+  </tr>
+</table>
+
+<!-- ====================================================================
+     PAGE 4: MISSION PLANNER PARAMETERS, VERIFICATION & INSTANT FLIGHT
+     ==================================================================== -->
+<br clear='all' style='page-break-before: always;'>
+
+<table width='100%' border='0' cellspacing='0' cellpadding='0'>
+  <tr>
+    <td style='border-bottom: 2px solid #1e3a8a; padding-bottom: 3px;'>
+      <font size='3' color='#1e3a8a'><b>7. Mission Planner Parameters (Full Parameter List)</b></font>
+    </td>
+  </tr>
+</table>
+
+<p style='margin: 4px 0 5px 0; font-size: 8.5pt;'>Mission Planner open karein &rarr; <b>CONFIG</b> &rarr; <b>Full Parameter List</b> mein jakar yeh values save karein:</p>
+
+<table width='100%' border='1' bordercolor='#cbd5e1' cellspacing='0' cellpadding='4' style='font-size: 8.5pt;'>
+  <tr bgcolor='#1e3a8a'>
+    <th width='26%' align='left'><font color='#ffffff'>Parameter Name</font></th>
+    <th width='14%' align='center'><font color='#ffffff'>Value</font></th>
+    <th width='60%' align='left'><font color='#ffffff'>Matlab / Reason</font></th>
+  </tr>
+  <tr>
+    <td><b>RNGFND1_TYPE</b></td>
+    <td align='center'><b>1</b></td>
+    <td>Analog Rangefinder mode (ADC pin se voltage padhega)</td>
+  </tr>
+  <tr bgcolor='#f8fafc'>
+    <td><b>RNGFND1_PIN</b></td>
+    <td align='center'><b>103</b></td>
+    <td>CUAV X7 Pro Port 09 (ADC) ka pin number</td>
+  </tr>
+  <tr>
+    <td><b>RNGFND1_SCALING</b></td>
+    <td align='center'><b>75.0</b></td>
+    <td>Conversion factor: 180 meters / 2.40 Volts = 75.0 m/V</td>
+  </tr>
+  <tr bgcolor='#f8fafc'>
+    <td><b>RNGFND1_OFFSET</b></td>
+    <td align='center'><b>-45.0</b></td>
+    <td>Offset: 0.60V ko 0.0 meter par calibrate karne ke liye</td>
+  </tr>
+  <tr>
+    <td><b>RNGFND1_MIN_CM</b></td>
+    <td align='center'><b>10</b></td>
+    <td>Minimum valid distance: 10 cm (0.10 meter)</td>
+  </tr>
+  <tr bgcolor='#f8fafc'>
+    <td><b>RNGFND1_MAX_CM</b></td>
+    <td align='center'><b>18000</b></td>
+    <td>Maximum valid distance: 180.0 meters (18000 cm)</td>
+  </tr>
+  <tr>
+    <td><b>RNGFND1_GNDCLEAR</b></td>
+    <td align='center'><b>15</b></td>
+    <td>Landing gear par floor se sensor ki doori (15 cm)</td>
+  </tr>
+  <tr bgcolor='#f8fafc'>
+    <td><b>RNGFND1_ORIENT</b></td>
+    <td align='center'><b>25</b></td>
+    <td>Downward-facing (Sensor zameen ki taraf point karega)</td>
+  </tr>
+  <tr>
+    <td><b>EK3_SRC1_POSZ</b></td>
+    <td align='center'><b>2</b></td>
+    <td>Altitude hold ke liye Rangefinder ko primary source banayein</td>
+  </tr>
+</table>
+
+<table width='100%' border='0' cellspacing='0' cellpadding='0' style='margin-top: 10px; margin-bottom: 4px;'>
+  <tr>
+    <td style='border-bottom: 2px solid #1e3a8a; padding-bottom: 3px;'>
+      <font size='3' color='#1e3a8a'><b>8. Testing &amp; Live Verification (Kaise Check Karein)</b></font>
+    </td>
+  </tr>
+</table>
+
+<table width='100%' border='1' bordercolor='#cbd5e1' cellspacing='0' cellpadding='6' bgcolor='#f8fafc' style='font-size: 8.5pt;'>
+  <tr>
+    <td>
+      <b>1. Connect Karein:</b> Battery lagakar Mission Planner se USB / Telemetry connect karein.<br>
+      <b>2. Status Tab:</b> FLIGHT DATA screen par neeche <b>Status</b> tab kholiye.<br>
+      <b>3. sonarvoltage Check:</b> Sensor ko zameen par point karne par lagbhag <b>0.61V se 0.65V</b> aana chahiye (0 nahi aana chahiye). Agar 0.62V aa raha hai toh circuit 100% theek hai.<br>
+      <b>4. sonarrange Check:</b> Yeh live distance meters mein dikhayega (jaise 0.15m ya 0.50m).<br>
+      <b>5. Live Hand Test:</b> TF03 lens ke aage 50 cm par haath rakhein &rarr; <i>sonarrange</i> 0.50m dikhayega. Haath door karein &rarr; reading smooth badhegi.<br>
+      <b>6. Pre-Arm Safety:</b> Saare pre-arm checks pass hone chahiye aur <i>'Rangefinder 1: No Data'</i> error gayab ho jayega.
+    </td>
+  </tr>
+</table>
+
+<!-- Instant flight option box -->
+<table width='100%' border='0' cellspacing='0' cellpadding='8' bgcolor='#f0fdf4' style='border-left: 6px solid #16a34a; border-top: 1px solid #bbf7d0; border-right: 1px solid #bbf7d0; border-bottom: 1px solid #bbf7d0; margin-top: 10px; font-size: 8.5pt;'>
+  <tr>
+    <td>
+      <font color='#166534'><b>9. Turant Udaan Ke Liye (Instant Flight Option Without Resistor):</b></font><br>
+      Jab tak aap resistor ya module arrange kar rahe hain, aapka drone <b>abhi bhi bilkul safely udd sakta hai!</b><br>
+      Aapka downward <b>Luxonis OAK-D Pro camera</b> active IR depth chala raha hai aur bilkul healthy hai.<br>
+      Mission Planner mein set karein: <b>RNGFND1_TYPE = 10</b> (Mavlink / Camera Depth) &rarr; Saare pre-arm error turant khatam ho jayenge, aur drone ALT_HOLD aur LOITER mein bina GPS ke rock-solid hover karega.
+    </td>
+  </tr>
+</table>
+
+<table width='100%' border='0' cellspacing='0' cellpadding='0' style='margin-top: 16px; border-top: 1px solid #cbd5e1; padding-top: 6px;'>
+  <tr>
+    <td align='center'>
+      <font size='1' color='#64748b'><b>Antigravity Autonomous Flight Systems</b> &bull; Heavy-Lift Industrial Drone Integration &bull; September 2026</font>
+    </td>
+  </tr>
+</table>
+
+</body>
+</html>
