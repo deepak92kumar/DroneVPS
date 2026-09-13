@@ -18,6 +18,7 @@ import logging
 import argparse
 import threading
 import queue
+from collections import deque
 from datetime import datetime
 import numpy as np
 import cv2
@@ -331,6 +332,57 @@ def main():
         oak_yaw_deg = 0.0
         prev_roll_rad = None
         prev_pitch_rad = None
+        # Frame-time derotation: (host-synced ts s, roll rad, pitch rad) per OAK rotation-vector sample.
+        imu_att_hist = deque(maxlen=128)
+        # Measured on this OAK @100 FPS: IMU lands 1-12 ms after its frame; 15 ms brackets 98.5% of frames.
+        IMU_SYNC_WAIT_S = 0.015
+
+        def drain_imu():
+            nonlocal oak_roll_deg, oak_pitch_deg, oak_yaw_deg
+            in_imu = q_imu.tryGet()
+            if in_imu is None:
+                return
+            for packet in in_imu.packets:
+                rv = packet.rotationVector
+                q_i, q_j, q_k, q_r = rv.i, rv.j, rv.k, rv.real
+                sinr_cosp = 2 * (q_r * q_i + q_j * q_k)
+                cosr_cosp = 1 - 2 * (q_i * q_i + q_j * q_j)
+                oak_roll_deg = math.atan2(sinr_cosp, cosr_cosp) * 57.2958
+
+                sinp = 2 * (q_r * q_j - q_k * q_i)
+                if abs(sinp) >= 1:
+                    oak_pitch_deg = math.copysign(90.0, sinp)
+                else:
+                    oak_pitch_deg = math.asin(sinp) * 57.2958
+
+                # 100 Hz Onboard IMU Yaw: atan2(2*(qr*qk + qi*qj), 1 - 2*(qj^2 + qk^2))
+                siny_cosp = 2 * (q_r * q_k + q_i * q_j)
+                cosy_cosp = 1 - 2 * (q_j * q_j + q_k * q_k)
+                oak_yaw_deg = math.atan2(siny_cosp, cosy_cosp) * 57.2958
+                try:
+                    imu_att_hist.append((rv.getTimestamp().total_seconds(),
+                                         math.radians(oak_roll_deg), math.radians(oak_pitch_deg)))
+                except Exception:
+                    pass
+
+        def attitude_at(t):
+            """(roll, pitch) rad linearly interpolated at host-synced time t, and whether t was bracketed."""
+            if not imu_att_hist:
+                return None, False
+            newest = imu_att_hist[-1]
+            if t >= newest[0]:
+                return (newest[1], newest[2]), t == newest[0]
+            if t <= imu_att_hist[0][0]:
+                return (imu_att_hist[0][1], imu_att_hist[0][2]), False
+            for i in range(len(imu_att_hist) - 1, 0, -1):
+                t0, r0, p0 = imu_att_hist[i - 1]
+                t1, r1, p1 = imu_att_hist[i]
+                if t0 <= t <= t1:
+                    a = 0.0 if t1 <= t0 else (t - t0) / (t1 - t0)
+                    dr = (r1 - r0 + math.pi) % (2.0 * math.pi) - math.pi
+                    return (r0 + a * dr, p0 + a * (p1 - p0)), True
+            return (newest[1], newest[2]), False
+
         last_aruco_lock_time = 0.0
         last_aruco_offset = (0.0, 0.0)
         last_aruco_z = 0.0
@@ -496,25 +548,7 @@ def main():
                 break
 
             # 1. Update IMU Attitude (100 Hz) and CUAV Compass Heading
-            in_imu = q_imu.tryGet()
-            if in_imu is not None:
-                for packet in in_imu.packets:
-                    rv = packet.rotationVector
-                    q_i, q_j, q_k, q_r = rv.i, rv.j, rv.k, rv.real
-                    sinr_cosp = 2 * (q_r * q_i + q_j * q_k)
-                    cosr_cosp = 1 - 2 * (q_i * q_i + q_j * q_j)
-                    oak_roll_deg = math.atan2(sinr_cosp, cosr_cosp) * 57.2958
-
-                    sinp = 2 * (q_r * q_j - q_k * q_i)
-                    if abs(sinp) >= 1:
-                        oak_pitch_deg = math.copysign(90.0, sinp)
-                    else:
-                        oak_pitch_deg = math.asin(sinp) * 57.2958
-
-                    # 100 Hz Onboard IMU Yaw: atan2(2*(qr*qk + qi*qj), 1 - 2*(qj^2 + qk^2))
-                    siny_cosp = 2 * (q_r * q_k + q_i * q_j)
-                    cosy_cosp = 1 - 2 * (q_j * q_j + q_k * q_k)
-                    oak_yaw_deg = math.atan2(siny_cosp, cosy_cosp) * 57.2958
+            drain_imu()
 
             # Dual-Source Attitude & Heading Fusion:
             # Priority 1: CUAV Compass/EKF Yaw if fresh (within 0.5s)
@@ -819,11 +853,24 @@ def main():
                             oak_roll_rad = math.radians(oak_roll_deg)
 
                             # Derotate with OAK 100 Hz IMU (camera timestamp domain), not 20 Hz CUAV ATTITUDE.
+                            # Use attitude interpolated at this frame's timestamp, waiting briefly for the
+                            # IMU sample that brackets it (latest-sample attitude lagged on ~45% of frames).
+                            imu_bracketed = False
+                            der_roll_rad, der_pitch_rad = oak_roll_rad, oak_pitch_rad
+                            if t_frame_host is not None:
+                                imu_wait_end = time.monotonic() + IMU_SYNC_WAIT_S
+                                while ((not imu_att_hist or imu_att_hist[-1][0] < t_frame_host)
+                                       and time.monotonic() < imu_wait_end):
+                                    drain_imu()
+                                    time.sleep(0.0005)
+                                att_frame, imu_bracketed = attitude_at(t_frame_host)
+                                if att_frame is not None:
+                                    der_roll_rad, der_pitch_rad = att_frame
                             _tdx0, _tdy0 = trans_dx, trans_dy
                             _droll, _dpitch, _tsx, _tsy = 0.0, 0.0, 0.0, 0.0
                             if prev_roll_rad is not None and prev_pitch_rad is not None:
-                                delta_roll = oak_roll_rad - prev_roll_rad
-                                delta_pitch = oak_pitch_rad - prev_pitch_rad
+                                delta_roll = der_roll_rad - prev_roll_rad
+                                delta_pitch = der_pitch_rad - prev_pitch_rad
                                 _droll, _dpitch = delta_roll, delta_pitch
                                 if abs(delta_roll) < 0.20 and abs(delta_pitch) < 0.20:
                                     tilt_shift_x = -focal_length_px * math.tan(delta_roll)
@@ -831,8 +878,8 @@ def main():
                                     _tsx, _tsy = tilt_shift_x, tilt_shift_y
                                     trans_dx -= tilt_shift_x
                                     trans_dy -= tilt_shift_y
-                            prev_roll_rad = oak_roll_rad
-                            prev_pitch_rad = oak_pitch_rad
+                            prev_roll_rad = der_roll_rad
+                            prev_pitch_rad = der_pitch_rad
 
                             pure_trans_dx = trans_dx if abs(trans_dx) >= 0.08 else 0.0
                             pure_trans_dy = trans_dy if abs(trans_dy) >= 0.08 else 0.0
@@ -894,7 +941,7 @@ def main():
                                     if frame_count % 10 == 0:
                                         import json as _json
                                         with open("/home/abc/SSD/DRONE/.cursor/debug-153c11.log", "a") as _df:
-                                            _df.write(_json.dumps({"sessionId":"153c11","runId":"post-fix","hypothesisId":"A,B,E","location":"flight_daemon.py:flow_ned","message":"flow_to_ned","data":{"dt":round(dt,4),"tx0":round(_tdx0,3),"ty0":round(_tdy0,3),"tsx":round(_tsx,3),"tsy":round(_tsy,3),"droll":round(_droll,5),"dpitch":round(_dpitch,5),"dx_b":round(dx_body,4),"dy_b":round(dy_body,4),"dN":round(eff_delta_north,4),"dE":round(eff_delta_east,4),"yaw":round(yaw_deg,2),"h_opt":round(optical_height_m,3),"mpp":round(meter_per_px,6),"nfeat":int(len(good_new)),"inliers":int(inlier_count),"mode":getattr(cuav,"flight_mode",""),"airborne":bool(is_airborne),"armed":bool(cuav.is_armed)},"timestamp":int(time.time()*1000)})+"\n")
+                                            _df.write(_json.dumps({"sessionId":"153c11","runId":"post-fix","hypothesisId":"A,B,E","location":"flight_daemon.py:flow_ned","message":"flow_to_ned","data":{"dt":round(dt,4),"tx0":round(_tdx0,3),"ty0":round(_tdy0,3),"tsx":round(_tsx,3),"tsy":round(_tsy,3),"droll":round(_droll,5),"dpitch":round(_dpitch,5),"dx_b":round(dx_body,4),"dy_b":round(dy_body,4),"dN":round(eff_delta_north,4),"dE":round(eff_delta_east,4),"yaw":round(yaw_deg,2),"h_opt":round(optical_height_m,3),"mpp":round(meter_per_px,6),"imu_sync":bool(imu_bracketed),"nfeat":int(len(good_new)),"inliers":int(inlier_count),"mode":getattr(cuav,"flight_mode",""),"airborne":bool(is_airborne),"armed":bool(cuav.is_armed)},"timestamp":int(time.time()*1000)})+"\n")
                                 except Exception:
                                     pass
                                 # #endregion
