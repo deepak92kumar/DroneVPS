@@ -7,6 +7,8 @@ Streams OAK-D Pro Visual Odometry to ArduPilot EKF3 for GNSS-denied autonomous f
 
 import sys
 import os
+# Must precede pymavlink import: MAVLink1 drops VISION_* covariance and reset_counter.
+os.environ.setdefault("MAVLINK20", "1")
 import glob
 import time
 import math
@@ -42,6 +44,7 @@ class CuavMavlinkClient:
         self.last_heartbeat = 0.0
         self.params = {}
         self.reset_counter = 0
+        self.armed_state_known = False  # True only after a FC HEARTBEAT on the current link
 
         # TF03 LiDAR Rangefinder Telemetry & Freshness Tracking
         # LiDAR still on airframe (~11cm). Downward OAK now under battery (~3cm lens-to-floor).
@@ -183,6 +186,7 @@ class CuavMavlinkClient:
                         self.master = conn
                         self.port = p
                         self.is_connected = True
+                        self.armed_state_known = False
                         self.flight_mode = conn.flightmode
                         self.last_heartbeat = time.time()
                 else:
@@ -230,6 +234,7 @@ class CuavMavlinkClient:
                             except Exception:
                                 pass
                         self.is_armed = new_armed
+                        self.armed_state_known = True
                     elif t == 'STATUSTEXT':
                         stat_txt = getattr(msg, 'text', '')
                         if stat_txt:
@@ -346,10 +351,12 @@ class CuavMavlinkClient:
                         self.is_connected = False
                         self.master = None
                         self.origin_set = False
+                        self.armed_state_known = False
             except Exception:
                 with self._lock:
                     self.is_connected = False
                     self.master = None
+                    self.armed_state_known = False
                 time.sleep(1.0)
 
     def send_vision_estimate(self, x, y, z, roll_rad=0.0, pitch_rad=0.0, yaw_rad=0.0, pos_cov=0.01):
@@ -387,10 +394,11 @@ class CuavMavlinkClient:
             sys_id = getattr(mav_ref, 'target_system', 1) or 1
             mav_ref.mav.srcSystem = 255  # companion; sysid=1 is the FC and VPE can be dropped
             mav_ref.mav.srcComponent = mavutil.mavlink.MAV_COMP_ID_ONBOARD_COMPUTER
-            # This pymavlink dialect is MAVLink1: usec, x, y, z, roll, pitch, yaw only.
+            # MAVLink2 extension fields: covariance (21) + reset_counter.
             mav_ref.mav.vision_position_estimate_send(
                 usec, float(x), float(y), float(z),
                 float(roll_rad), float(pitch_rad), float(yaw_rad),
+                covariance, int(self.reset_counter) & 0xFF,
             )
             with self._lock:
                 self.vio_packets_sent += 1
@@ -422,9 +430,10 @@ class CuavMavlinkClient:
             sys_id = getattr(mav_ref, 'target_system', 1) or 1
             mav_ref.mav.srcSystem = 255
             mav_ref.mav.srcComponent = mavutil.mavlink.MAV_COMP_ID_ONBOARD_COMPUTER
-            # This pymavlink dialect is MAVLink1: usec, vx, vy, vz only.
+            # MAVLink2 extension fields: covariance (9) + reset_counter.
             mav_ref.mav.vision_speed_estimate_send(
                 usec, float(vx), float(vy), float(vz),
+                cov_matrix, int(self.reset_counter) & 0xFF,
             )
             return True
         except Exception as e:
@@ -639,6 +648,11 @@ class CuavMavlinkClient:
     def set_parameter(self, param_name, value, timeout=2.5):
         if not self.is_connected or not self.master:
             return False
+        # EKF source params are static config: refuse while armed or before arm state is known.
+        if param_name.startswith('EK3_SRC') and (self.is_armed or not self.armed_state_known):
+            import logging as _log
+            _log.error(f"[!] Refused {param_name}={value}: EKF source write while armed/unknown arm state")
+            return False
         with self._lock:
             if param_name in self.params:
                 del self.params[param_name]
@@ -671,7 +685,7 @@ class CuavMavlinkClient:
         EK3_SRC1_VELXY=6 (ExternalNav velocity active for LOITER braking).
         EK3_SRC1_POSZ=2 (Rangefinder / TF03 LiDAR).
         """
-        p1 = self.set_parameter('EK3_SRC1_POSXY', 0.0) # None — EKF integrates velocity
+        p1 = self.set_parameter('EK3_SRC1_POSXY', 6.0) # ExternalNav position (static)
         p2 = self.set_parameter('EK3_SRC1_VELXY', 6.0) # ExternalNav velocity
         p3 = self.set_parameter('EK3_SRC1_VELZ', 0.0)  # None — baro/LiDAR derived
         p4 = self.set_parameter('EK3_SRC1_POSZ', 2.0)  # Rangefinder (TF03 LiDAR)

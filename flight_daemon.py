@@ -7,6 +7,8 @@ Streams OAK-D Pro Visual Odometry + ArUco Precision Landing to CUAV X7 Pro EKF3.
 """
 
 import os
+# Must precede pymavlink import: MAVLink1 drops VISION_* covariance and reset_counter.
+os.environ.setdefault("MAVLINK20", "1")
 import sys
 import time
 import math
@@ -396,14 +398,22 @@ def main():
         cuav_params_configured = False
         def apply_cuav_parameters():
             nonlocal cuav_params_configured
-            if not cuav.is_connected:
+            # Never (re)write FC config in flight, e.g. after a MAVLink reconnect while armed.
+            if not cuav.is_connected or not cuav.armed_state_known or cuav.is_armed:
                 return False
             try:
                 cuav.set_parameter('VISO_DELAY_MS', 90.0)
                 cuav.set_parameter('LOIT_BRK_DELAY', 0.10)
                 cuav.set_parameter('LOIT_BRK_ACCEL', 25.0)
-                cuav.set_parameter('EK3_SRC1_POSXY', 0.0)  # table: no XY pos → LOITER PreArm stays. Air+trust → 6.
-                cuav.set_parameter('EK3_SRC1_VELXY', 6.0)
+                # Static EKF sources, written only while disarmed; never switched in flight.
+                src_ok = all([
+                    cuav.set_parameter('EK3_SRC1_POSXY', 6.0),
+                    cuav.set_parameter('EK3_SRC1_VELXY', 6.0),
+                    cuav.set_parameter('EK3_SRC1_YAW', 1.0),
+                ])
+                cuav._posxy_static_ok = bool(src_ok)
+                if not src_ok:
+                    logging.error("[!] EK3_SRC1 POSXY=6 / VELXY=6 / YAW=1 not confirmed by FC")
                 cuav.set_parameter('EK3_SRC1_VELZ', 0.0)
                 cuav.set_parameter('EK3_SRC1_POSZ', 2.0)
                 cuav.set_parameter('VISO_TYPE', 1.0)
@@ -449,7 +459,7 @@ def main():
                     logging.warning("[!] EKF origin NOT set — LOITER will keep Need Position Estimate")
                 cuav_params_configured = True
                 if plnd_ok:
-                    logging.info("[+] CUAV EKF3/VIO: POSXY=0 (ground) VELXY=6 GATE=300 VISO=1 — POSXY=6 only after VIO trust")
+                    logging.info("[+] CUAV EKF3/VIO: static POSXY=6 VELXY=6 YAW=1 GATE=300 VISO=1 (no in-flight source writes)")
                 else:
                     logging.warning("[!] CUAV EKF OK but PLND params not confirmed — hover-on-marker may not engage")
                 return True
@@ -518,7 +528,7 @@ def main():
             else:
                 roll_deg = oak_roll_deg
                 pitch_deg = oak_pitch_deg
-                yaw_deg = oak_yaw_deg
+                yaw_deg = cuav.yaw_deg  # no OAK yaw fallback: OAK yaw is ~170° off airframe heading
                 _att_src = "OAK"
             # #region agent log
             try:
@@ -817,7 +827,7 @@ def main():
                                 _droll, _dpitch = delta_roll, delta_pitch
                                 if abs(delta_roll) < 0.20 and abs(delta_pitch) < 0.20:
                                     tilt_shift_x = -focal_length_px * math.tan(delta_roll)
-                                    tilt_shift_y = -focal_length_px * math.tan(delta_pitch)
+                                    tilt_shift_y = focal_length_px * math.tan(delta_pitch)  # flight logs: ty ≈ +f·dPitch
                                     _tsx, _tsy = tilt_shift_x, tilt_shift_y
                                     trans_dx -= tilt_shift_x
                                     trans_dy -= tilt_shift_y
@@ -978,7 +988,6 @@ def main():
                             if getattr(cuav, '_vio_trust_announced', False):
                                 cuav._vio_trust_announced = False
                                 cuav._ekf_xy_ok = False
-                                cuav.set_parameter('EK3_SRC1_POSXY', 0.0, timeout=0)
                                 cuav._posxy_loiter = False
                                 cuav.send_statustext(">>> VIO MUTED | WAIT TAKEOFF", severity=4)
                             if not _f04_paused:
@@ -998,16 +1007,21 @@ def main():
                                     why = "warmup frames"
                                 else:
                                     why = "weak track"
-                                logging.warning(f"[!] VIO muted ({why}) — high-cov freeze at 0,0")
+                                logging.warning(f"[!] VIO muted ({why}) — airborne: VIO packets suppressed")
 
-                        sent_p = cuav.send_vision_estimate(
-                            x=px, y=py, z=-float(current_altitude_m),
-                            roll_rad=math.radians(roll_deg),
-                            pitch_rad=math.radians(pitch_deg),
-                            yaw_rad=math.radians(yaw_deg),
-                            pos_cov=pos_cov,
-                        )
-                        sent = cuav.send_vision_speed(vx=vn, vy=ve, vz=0.0, vel_cov=vel_cov)
+                        # Airborne + untrusted: send nothing. A fake 0,0 / 0 m/s would be fused as truth.
+                        suppress_vio = bool(is_airborne and not trust_vision)
+                        sent_p = False
+                        sent = False
+                        if not suppress_vio:
+                            sent_p = cuav.send_vision_estimate(
+                                x=px, y=py, z=-float(current_altitude_m),
+                                roll_rad=math.radians(roll_deg),
+                                pitch_rad=math.radians(pitch_deg),
+                                yaw_rad=math.radians(yaw_deg),
+                                pos_cov=pos_cov,
+                            )
+                            sent = cuav.send_vision_speed(vx=vn, vy=ve, vz=0.0, vel_cov=vel_cov)
                         if sent or sent_p:
                             vio_sent_count += 1
                         if ready_to_fuse and (not getattr(cuav, '_vio_trust_announced', False)):
@@ -1015,7 +1029,7 @@ def main():
                                 logging.error("[!] VISION_POSITION_ESTIMATE not actually sent — FC has no XY")
                                 cuav.send_statustext(">>> VPE SEND FAIL | NO LOITER", severity=2)
                             else:
-                                posxy_ok = cuav.set_parameter('EK3_SRC1_POSXY', 6.0, timeout=1.2)
+                                posxy_ok = bool(getattr(cuav, '_posxy_static_ok', False))  # static, confirmed while disarmed
                                 cuav._posxy_loiter = bool(posxy_ok)
                                 flags = int(getattr(cuav, 'ekf_status_flags', 0))
                                 ekf_xy = bool(flags & (8 | 16))
@@ -1136,7 +1150,7 @@ def main():
                         else:
                             logging.warning("[!] AI AUTO-SWITCH to GPS failed — FC did not confirm parameter change")
                     elif not is_clean_gps and current_nav_mode != 'VIO':
-                        ok1 = cuav.set_parameter('EK3_SRC1_POSXY', 0.0)
+                        ok1 = cuav.set_parameter('EK3_SRC1_POSXY', 6.0)
                         ok2 = cuav.set_parameter('EK3_SRC1_VELXY', 6.0)  # Active 30Hz VIO Velocity
                         ok3 = cuav.set_parameter('EK3_SRC1_VELZ', 0.0)
                         ok4 = cuav.set_parameter('AHRS_GPS_USE', 0.0)
