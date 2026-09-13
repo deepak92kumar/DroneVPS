@@ -13,3 +13,6 @@ __pycache__/
 *.tmp
 .~lock*
 *.bak_*
+
+# Rewritten by flight_daemon.py every 10 s (runtime output, not source)
+latest_flight_summary.txt
