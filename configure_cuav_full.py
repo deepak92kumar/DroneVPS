@@ -39,7 +39,7 @@ PARAMETERS = {
     'EK3_SRC1_YAW': 1.0,     # 1 = Compass
     'VISO_DELAY_MS': 35.0,   # Optical flow processing latency compensation (ms)
     'EK3_VEL_I_GATE': 400.0, # Velocity innovation gate
-    'FS_EKF_ACTION': 0.0,    # 0 = Warning only during tuning (prevents sudden LAND switch!)
+    'FS_EKF_ACTION': 2.0,    # 2 = AltHold if mode needs position (0 = report only, 1 = Land)
     'FS_EKF_THRESH': 1.20,   # EKF variance threshold
     
     # Secondary Sources: Disabled indoor to prevent 'AHRS: EK3 sources require GPS' prearm lock

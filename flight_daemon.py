@@ -479,7 +479,7 @@ def main():
                     cuav.send_statustext("VISO_TYPE=1 | REBOOT CUAV ONCE", severity=6)
                 cuav.set_parameter('AHRS_GPS_USE', 0.0)
                 cuav.set_parameter('TERRAIN_ENABLE', 0)
-                cuav.set_parameter('FS_EKF_ACTION', 0.0)
+                cuav.set_parameter('FS_EKF_ACTION', 2.0)  # 2 = AltHold if mode needs position (0 = report only)
                 cuav.set_parameter('FS_EKF_THRESH', 1.20)
                 # EK3_*_I_GATE is percent-of-sigma (range 100–1000). Default 500 = 5σ.
                 gate_ok = (
