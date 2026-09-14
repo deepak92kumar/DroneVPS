@@ -531,6 +531,9 @@ def main():
         _vio_blind = True
         _vio_fresh = 0
         VIO_FRESH_FRAMES = 5
+        # Loop runs at 100 FPS. Every 4th frame = 25 Hz VPE+VSE (~5 kB/s). At 50 Hz (~9.9 kB/s) the
+        # 115200 baud link was near full and the FC forwarded it to the RC link (slow param download).
+        VIO_SEND_EVERY_N_FRAMES = 4
         VIO_TRUST_HOLD_S = 2.5  # skip takeoff 1–2s blur before fusing XY
         _vio_clear_since = 0.0
         _dbg_last_yaw = None
@@ -1136,7 +1139,7 @@ def main():
                         logging.info("[+] VIO trust warmup complete (5 clean frames)")
                 else:
                     _vio_fresh = 0
-                if cuav.is_connected and (frame_count % 2 == 0):
+                if cuav.is_connected and (frame_count % VIO_SEND_EVERY_N_FRAMES == 0):
                     try:
                         if getattr(args, 'outdoor_gps', False) and not cuav.origin_set and vio_sent_count > 15:
                             if args.home_lat is not None and args.home_lon is not None:
