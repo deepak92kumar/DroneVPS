@@ -191,7 +191,8 @@ def main():
                         help="Home/EKF origin altitude MSL in meters (0.0 = auto-read ground baro)")
     parser.add_argument("--max-exposure", type=int, default=1500, help="Max auto exposure microseconds (1.5ms reduces motion blur)")
     parser.add_argument("--max-iso", type=int, default=1200, help="Maximum ISO for auto exposure")
-    parser.add_argument("--marker-size", type=float, default=0.25, help="Physical ArUco marker width in meters (default 0.25m / 25cm)")
+    parser.add_argument("--marker-size", type=float, default=0.244, help="Outer black-border edge of the printed ArUco marker in meters (measured print: 0.244 m)")
+    parser.add_argument("--no-prec-loiter", dest="prec_loiter", action="store_false", default=True, help="Do not auto-enable ArduPilot Precision Loiter over ArUco #0 in LOITER")
     parser.add_argument("--save-images", action="store_true", default=True, help="Save camera and ArUco detection frames to disk (default: True)")
     parser.add_argument("--port", type=str, default="/dev/ttyTHS1", help="Primary serial/UART port for CUAV (default: /dev/ttyTHS1)")
     parser.add_argument("--no-save-images", dest="save_images", action="store_false", help="Disable saving images")
@@ -336,6 +337,14 @@ def main():
         imu_att_hist = deque(maxlen=128)
         # Measured on this OAK @100 FPS: IMU lands 1-12 ms after its frame; 15 ms brackets 98.5% of frames.
         IMU_SYNC_WAIT_S = 0.015
+        # Change F: tilt between frames from integrated gyro. The rotation vector is smoothed and
+        # under-reads fast tilt (flight fits: 525-680 px/rad vs f=396). (host ts s, gx, gy) rad/s.
+        gyro_hist = deque(maxlen=512)
+        prev_der_ts = None
+        # Gyro axis/sign is verified at runtime against rotation-vector deltas before it is used.
+        tilt_val_pairs = deque(maxlen=60)       # (gyro_x_sum, gyro_y_sum, rv_roll_sum, rv_pitch_sum)
+        tilt_win = [0.0, 0.0, 0.0, 0.0, 0.0]    # gx, gy, rv_roll, rv_pitch, seconds
+        gyro_derot = {"ok": False, "sign_r": 1.0, "sign_p": 1.0, "verdict": None}
 
         def drain_imu():
             nonlocal oak_roll_deg, oak_pitch_deg, oak_yaw_deg
@@ -364,6 +373,11 @@ def main():
                                          math.radians(oak_roll_deg), math.radians(oak_pitch_deg)))
                 except Exception:
                     pass
+                try:
+                    g = packet.gyroscope
+                    gyro_hist.append((g.getTimestamp().total_seconds(), float(g.x), float(g.y)))
+                except Exception:
+                    pass
 
         def attitude_at(t):
             """(roll, pitch) rad linearly interpolated at host-synced time t, and whether t was bracketed."""
@@ -383,12 +397,73 @@ def main():
                     return (r0 + a * dr, p0 + a * (p1 - p0)), True
             return (newest[1], newest[2]), False
 
+        def gyro_tilt_delta(t0, t1):
+            """Integrate gyro x/y (rad) over [t0, t1] (host-synced s); None if samples do not cover it."""
+            if t1 <= t0 or len(gyro_hist) < 2 or gyro_hist[0][0] > t0 or gyro_hist[-1][0] < t1:
+                return None
+            sx = sy = 0.0
+            prev = None
+            for s in gyro_hist:
+                if prev is not None and prev[0] >= t1:
+                    break
+                if prev is not None and s[0] > t0:
+                    ta, tb = prev[0], s[0]
+                    if tb - ta > 0.02:
+                        return None
+                    a0, a1 = max(ta, t0), min(tb, t1)
+                    if a1 > a0 and tb > ta:
+                        k0, k1 = (a0 - ta) / (tb - ta), (a1 - ta) / (tb - ta)
+                        sx += 0.5 * ((prev[1] + (s[1] - prev[1]) * k0) + (prev[1] + (s[1] - prev[1]) * k1)) * (a1 - a0)
+                        sy += 0.5 * ((prev[2] + (s[2] - prev[2]) * k0) + (prev[2] + (s[2] - prev[2]) * k1)) * (a1 - a0)
+                prev = s
+            return sx, sy
+
+        def update_gyro_validation(gdx, gdy, rv_dr, rv_dp, dt_s):
+            """Compare ~0.4 s windows of gyro vs rotation-vector tilt. Gyro derotation turns ON only when
+            both axes agree (>=15 moving windows, |corr|>=0.85, 0.7<=|slope|<=2.0) and OFF if agreement is lost."""
+            tilt_win[0] += gdx
+            tilt_win[1] += gdy
+            tilt_win[2] += rv_dr
+            tilt_win[3] += rv_dp
+            tilt_win[4] += dt_s
+            if tilt_win[4] < 0.4:
+                return
+            tilt_val_pairs.append(tuple(tilt_win[:4]))
+            tilt_win[:] = [0.0, 0.0, 0.0, 0.0, 0.0]
+            verdict = []
+            for gi, ri in ((0, 2), (1, 3)):
+                pts = [(p[gi], p[ri]) for p in tilt_val_pairs if abs(p[ri]) > 0.005]
+                if len(pts) < 15:
+                    return
+                gv = np.array([p[0] for p in pts])
+                rvv = np.array([p[1] for p in pts])
+                verdict.append((float(np.dot(gv, rvv) / np.dot(rvv, rvv)), float(np.corrcoef(gv, rvv)[0, 1])))
+            gyro_derot["verdict"] = verdict
+            agree = all(abs(c) >= 0.85 and 0.7 <= abs(sl) <= 2.0 and np.sign(sl) == np.sign(c) for sl, c in verdict)
+            if agree and not gyro_derot["ok"]:
+                gyro_derot.update(ok=True, sign_r=float(np.sign(verdict[0][0])), sign_p=float(np.sign(verdict[1][0])))
+                logging.info(f"[+] Gyro tilt derotation ON: roll slope {verdict[0][0]:+.2f} corr {verdict[0][1]:+.2f} | "
+                             f"pitch slope {verdict[1][0]:+.2f} corr {verdict[1][1]:+.2f}")
+                cuav.send_statustext(">>> TILT: GYRO DEROT ON", severity=6)
+            elif gyro_derot["ok"]:
+                signs = (gyro_derot["sign_r"], gyro_derot["sign_p"])
+                if not all(abs(c) >= 0.6 and np.sign(sl) == s for (sl, c), s in zip(verdict, signs)):
+                    gyro_derot["ok"] = False
+                    logging.warning(f"[!] Gyro tilt derotation OFF (agreement lost {verdict}) — using rotation vector")
+                    cuav.send_statustext(">>> TILT: GYRO DEROT OFF", severity=4)
+
         last_aruco_lock_time = 0.0
         last_aruco_offset = (0.0, 0.0)
         last_aruco_z = 0.0
         last_aruco_ang_x = 0.0
         last_aruco_ang_y = 0.0
         last_aruco_size_rad = 0.0
+        aruco_hits = deque(maxlen=128)   # times of valid ArUco #0 PnP solutions
+        ARUCO_CONFIRM_HITS = 3           # within 0.5 s before any LANDING_TARGET is sent
+        PREC_LOITER_MIN_HITS = 8         # within 1.0 s before Precision Loiter is enabled
+        PLND_LAG_S = 0.03                # measured frame->wire 18.7 ms median / 28.8 p95, + serial/FC ~5 ms
+        aruco_target_sent = 0
+        t_mono_host = None
         last_video_time = time.time()
         last_summary_write_time = time.time()
         last_badge_time = 0.0
@@ -493,8 +568,12 @@ def main():
                     and cuav.set_parameter('PLND_TYPE', 1.0)
                     and cuav.set_parameter('PLND_EST_TYPE', 1.0)
                 )
-                if not cuav.set_parameter('PLND_CAM_ORIENT', 25.0):
-                    cuav.set_parameter('PLND_ORIENT', 25.0)
+                # PLND_CAM_ORIENT does not exist on Copter 4.7 (it only burned a 2.5 s timeout).
+                plnd_ok = (
+                    plnd_ok
+                    and cuav.set_parameter('PLND_ORIENT', 25.0)
+                    and cuav.set_parameter('PLND_LAG', PLND_LAG_S)
+                )
                 # Fence demands a position estimate. Indoor GNSS-denied: fence off.
                 # Do NOT zero ARMING_CHECK — that hides compass/IMU/battery faults.
                 cuav.set_parameter('FENCE_ENABLE', 0.0)
@@ -695,15 +774,21 @@ def main():
                                 prev_pts = None
                                 prev_roll_rad = None
                                 prev_pitch_rad = None
+                                prev_der_ts = None
                             logging.warning(f"[!] Frame drop detected: {dropped} frames lost (seq: {ft_prev_seq}->{seq})")
                     ft_prev_seq = seq
                 except Exception:
                     pass
                 t_proc_start = time.perf_counter()
                 mono_f = None
+                t_mono_host = None
                 in_mono = q_mono.tryGet()
                 if in_mono is not None:
                     mono_f = in_mono.getCvFrame()
+                    try:
+                        t_mono_host = in_mono.getTimestamp().total_seconds()
+                    except Exception:
+                        t_mono_host = None
                 # Smart Armed-Only Flight Recording:
                 # Automatically starts recording to a new folder when ARMED, stops when DISARMED (protects disk!)
                 if args.save_images:
@@ -782,7 +867,13 @@ def main():
                         aruco_img_path = os.path.join(flight_record_dir, f"aruco_{flight_img_seq:05d}_ID0.jpg")
                         image_logger.log_image(aruco_img_path, annotated, is_bytes=False)
 
-                    success, rvec, tvec = cv2.solvePnP(aruco_obj_pts, m_corners, K, dist_coeffs)
+                    sides = [float(np.linalg.norm(m_corners[i] - m_corners[(i + 1) % 4])) for i in range(4)]
+                    geom_ok = min(sides) >= 8.0 and max(sides) <= 2.5 * min(sides)
+                    if geom_ok:
+                        success, rvec, tvec = cv2.solvePnP(aruco_obj_pts, m_corners, K, dist_coeffs,
+                                                           flags=cv2.SOLVEPNP_IPPE_SQUARE)
+                    else:
+                        success, rvec, tvec = False, None, None
                     if success:
                         t_x, t_y, t_z = float(tvec[0]), float(tvec[1]), float(tvec[2])
                         # Rotate body camera offset to Earth NED frame using yaw heading
@@ -800,13 +891,25 @@ def main():
                         last_aruco_lock_time = now
                         last_aruco_offset = (pad_offset_north, pad_offset_east)
                         last_aruco_z = t_z
-                        u_c = float(np.mean(m_corners[:, 0]))
-                        v_c = float(np.mean(m_corners[:, 1]))
-                        fy_px = float(K[1, 1]) if K[1, 1] > 50.0 else focal_length_px
-                        last_aruco_ang_x = math.atan2(u_c - cx_f, focal_length_px)
-                        last_aruco_ang_y = math.atan2(v_c - cy_f, fy_px)
-                        side_px = float(np.linalg.norm(m_corners[0] - m_corners[1]))
+                        # Line of sight from the undistorted PnP translation. Camera frame: +x right,
+                        # +y toward tail, +z down (image axes validated against EKF velocity).
+                        # ArduPilot MAVLink backend: forward = -tan(angle_y), right = tan(angle_x).
+                        last_aruco_ang_x = math.atan2(t_x, t_z)
+                        last_aruco_ang_y = math.atan2(t_y, t_z)
+                        side_px = float(np.mean(sides))
                         last_aruco_size_rad = math.atan2(side_px, focal_length_px)
+                        aruco_los_dist = float(np.linalg.norm(tvec))
+                        aruco_hits.append(now)
+                        # Send only this fresh detection (never re-send stale angles), and only after the
+                        # marker was seen repeatedly (rejects single-frame false positives).
+                        if (cuav.is_connected and t_z > 0.08
+                                and sum(1 for t in aruco_hits if now - t <= 0.5) >= ARUCO_CONFIRM_HITS):
+                            if cuav.send_landing_target(
+                                last_aruco_ang_x, last_aruco_ang_y, aruco_los_dist,
+                                last_aruco_size_rad, last_aruco_size_rad,
+                                time_usec=None if t_mono_host is None else int(t_mono_host * 1e6),
+                            ):
+                                aruco_target_sent += 1
 
                         # Use ArUco altitude ONLY as a fallback if TF03 LiDAR and Stereo Depth are unavailable
                         aruco_agl = max(0.0, t_z - 0.03)
@@ -868,9 +971,22 @@ def main():
                                     der_roll_rad, der_pitch_rad = att_frame
                             _tdx0, _tdy0 = trans_dx, trans_dy
                             _droll, _dpitch, _tsx, _tsy = 0.0, 0.0, 0.0, 0.0
+                            _tilt_src, _gd = "none", None
                             if prev_roll_rad is not None and prev_pitch_rad is not None:
                                 delta_roll = der_roll_rad - prev_roll_rad
                                 delta_pitch = der_pitch_rad - prev_pitch_rad
+                                _tilt_src = "rotvec"
+                                if t_frame_host is not None and prev_der_ts is not None and imu_bracketed:
+                                    _gd = gyro_tilt_delta(prev_der_ts, t_frame_host)
+                                if _gd is not None:
+                                    update_gyro_validation(_gd[0], _gd[1], delta_roll, delta_pitch,
+                                                           t_frame_host - prev_der_ts)
+                                    if gyro_derot["ok"]:
+                                        delta_roll = gyro_derot["sign_r"] * _gd[0]
+                                        delta_pitch = gyro_derot["sign_p"] * _gd[1]
+                                        _tilt_src = "gyro"
+                                else:
+                                    tilt_win[:] = [0.0, 0.0, 0.0, 0.0, 0.0]
                                 _droll, _dpitch = delta_roll, delta_pitch
                                 if abs(delta_roll) < 0.20 and abs(delta_pitch) < 0.20:
                                     tilt_shift_x = -focal_length_px * math.tan(delta_roll)
@@ -880,6 +996,7 @@ def main():
                                     trans_dy -= tilt_shift_y
                             prev_roll_rad = der_roll_rad
                             prev_pitch_rad = der_pitch_rad
+                            prev_der_ts = t_frame_host if imu_bracketed else None
 
                             pure_trans_dx = trans_dx if abs(trans_dx) >= 0.08 else 0.0
                             pure_trans_dy = trans_dy if abs(trans_dy) >= 0.08 else 0.0
@@ -911,15 +1028,10 @@ def main():
                                 pos_east = 0.0
                                 live_speed = 0.0
 
-                            # ArUco Centering Nudge: ONLY in LAND mode to guide final touchdown.
-                            # In LOITER/normal flight, optical flow holds position. Nudging in LOITER causes toilet-bowling!
-                            is_landing_phase = (cuav.is_connected and getattr(cuav, 'flight_mode', '') == "LAND")
-                            if aruco_locked and is_airborne and is_landing_phase:
-                                v_nudge_north = float(np.clip(0.20 * last_aruco_offset[0], -0.06, 0.06))
-                                v_nudge_east  = float(np.clip(0.20 * last_aruco_offset[1],  -0.06, 0.06))
-                            else:
-                                v_nudge_north = 0.0
-                                v_nudge_east  = 0.0
+                            # Marker centering is done by ArduPilot PrecLand / PrecLoiter from LANDING_TARGET.
+                            # A fake vision-velocity nudge would corrupt EKF3 velocity fusion, so none is added.
+                            v_nudge_north = 0.0
+                            v_nudge_east  = 0.0
 
                             if allow_flow and (not _vio_blind) and 0.00005 < step_dist < 0.35:
                                 yaw_rad = math.radians(yaw_deg)
@@ -941,7 +1053,7 @@ def main():
                                     if frame_count % 10 == 0:
                                         import json as _json
                                         with open("/home/abc/SSD/DRONE/.cursor/debug-153c11.log", "a") as _df:
-                                            _df.write(_json.dumps({"sessionId":"153c11","runId":"post-fix","hypothesisId":"A,B,E","location":"flight_daemon.py:flow_ned","message":"flow_to_ned","data":{"dt":round(dt,4),"tx0":round(_tdx0,3),"ty0":round(_tdy0,3),"tsx":round(_tsx,3),"tsy":round(_tsy,3),"droll":round(_droll,5),"dpitch":round(_dpitch,5),"dx_b":round(dx_body,4),"dy_b":round(dy_body,4),"dN":round(eff_delta_north,4),"dE":round(eff_delta_east,4),"yaw":round(yaw_deg,2),"h_opt":round(optical_height_m,3),"mpp":round(meter_per_px,6),"imu_sync":bool(imu_bracketed),"nfeat":int(len(good_new)),"inliers":int(inlier_count),"mode":getattr(cuav,"flight_mode",""),"airborne":bool(is_airborne),"armed":bool(cuav.is_armed)},"timestamp":int(time.time()*1000)})+"\n")
+                                            _df.write(_json.dumps({"sessionId":"153c11","runId":"post-fix","hypothesisId":"A,B,E","location":"flight_daemon.py:flow_ned","message":"flow_to_ned","data":{"dt":round(dt,4),"tx0":round(_tdx0,3),"ty0":round(_tdy0,3),"tsx":round(_tsx,3),"tsy":round(_tsy,3),"droll":round(_droll,5),"dpitch":round(_dpitch,5),"dx_b":round(dx_body,4),"dy_b":round(dy_body,4),"dN":round(eff_delta_north,4),"dE":round(eff_delta_east,4),"yaw":round(yaw_deg,2),"h_opt":round(optical_height_m,3),"mpp":round(meter_per_px,6),"imu_sync":bool(imu_bracketed),"tilt_src":_tilt_src,"gdr":None if _gd is None else round(_gd[0],5),"gdp":None if _gd is None else round(_gd[1],5),"nfeat":int(len(good_new)),"inliers":int(inlier_count),"mode":getattr(cuav,"flight_mode",""),"airborne":bool(is_airborne),"armed":bool(cuav.is_armed)},"timestamp":int(time.time()*1000)})+"\n")
                                 except Exception:
                                     pass
                                 # #endregion
@@ -1102,15 +1214,7 @@ def main():
                                 cuav._ekf_xy_ok = True
                                 logging.info(f"[+] EKF horiz pos flag ON (0x{flags:x}) — LOITER allowed")
                                 cuav.send_statustext(">>> VIO TRUST ON | LOITER OK", severity=6)
-                        if aruco_locked and last_aruco_z > 0.08:
-                            dist_m = last_aruco_z if last_aruco_z > 0.08 else max(0.20, float(current_altitude_m))
-                            cuav.send_landing_target(
-                                last_aruco_ang_x,
-                                last_aruco_ang_y,
-                                dist_m,
-                                last_aruco_size_rad,
-                                last_aruco_size_rad,
-                            )
+                        # LANDING_TARGET is sent once per fresh, confirmed ArUco detection (ArUco block above).
                         # #region agent log
                         try:
                             if (vio_sent_count % 8 == 0) or (not tracking_ok and (now - _dbg_f04_log_t) > 0.2):
@@ -1221,12 +1325,27 @@ def main():
                     cuav._prev_aruco_locked = aruco_locked
                     cuav._last_aruco_alert_time = now
 
-                want_precloit = False
-                prev_precloit = getattr(cuav, '_prec_loiter_on', False)
-                if prev_precloit:
+                # Precision Loiter over ArUco #0: only in LOITER, airborne, with a confirmed marker.
+                # ArduPilot itself falls back to normal LOITER on stick input (>0.5 m/s^2) or 2 s target loss.
+                marker_confirmed = sum(1 for t in aruco_hits if now - t <= 1.0) >= PREC_LOITER_MIN_HITS
+                in_loiter = getattr(cuav, 'flight_mode', '') == "LOITER"
+                want_precloit = bool(args.prec_loiter and in_loiter and is_airborne and marker_confirmed)
+                prec_on = getattr(cuav, '_prec_loiter_on', False)
+                last_pl_cmd = getattr(cuav, '_prec_loiter_cmd_t', 0.0)
+                marker_lost = (not aruco_hits) or (now - aruco_hits[-1] > 3.0)
+                if want_precloit and ((not prec_on) or now - last_pl_cmd >= 2.0):
+                    if cuav.set_precision_loiter(True):
+                        cuav._prec_loiter_cmd_t = now
+                        if not prec_on:
+                            cuav._prec_loiter_on = True
+                            logging.info("[+] Precision Loiter ON (ArUco #0 confirmed in LOITER)")
+                            cuav.send_statustext(">>> PREC LOITER ON | PAD #0", severity=6)
+                elif prec_on and ((not in_loiter) or (not is_airborne) or marker_lost):
                     if cuav.set_precision_loiter(False):
                         cuav._prec_loiter_on = False
-                        logging.info("[*] Precision Loiter forced OFF — LOITER + sticks (no pad glue)")
+                        cuav._prec_loiter_cmd_t = now
+                        logging.info("[*] Precision Loiter OFF (left LOITER / landed / marker lost)")
+                        cuav.send_statustext(">>> PREC LOITER OFF", severity=4)
 
                 prev_air = getattr(cuav, '_prev_is_airborne', False)
                 last_air_trans_time = getattr(cuav, '_last_air_trans_time', 0.0)

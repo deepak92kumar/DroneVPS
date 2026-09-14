@@ -348,16 +348,30 @@ class CuavMavlinkClient:
                         import logging as _log
                         _log.warning("[!] MAVLink watchdog: FC heartbeat lost while ARMED — VIO stream halted")
                     with self._lock:
+                        old_master = self.master
                         self.is_connected = False
                         self.master = None
                         self.origin_set = False
                         self.armed_state_known = False
+                    self._close_quietly(old_master)
             except Exception:
                 with self._lock:
+                    old_master = self.master
                     self.is_connected = False
                     self.master = None
                     self.armed_state_known = False
+                self._close_quietly(old_master)
                 time.sleep(1.0)
+
+    @staticmethod
+    def _close_quietly(conn):
+        """Close a dropped MAVLink link so its serial fd is not left open when the port is reopened."""
+        if conn is None:
+            return
+        try:
+            conn.close()
+        except Exception:
+            pass
 
     def send_vision_estimate(self, x, y, z, roll_rad=0.0, pitch_rad=0.0, yaw_rad=0.0, pos_cov=0.01):
         """
@@ -443,12 +457,17 @@ class CuavMavlinkClient:
                 _log.error(f"[!] VISION_SPEED_ESTIMATE send failed: {e}")
             return False
 
-    def send_landing_target(self, angle_x_rad, angle_y_rad, distance_m, size_x_rad=0.0, size_y_rad=0.0):
-        """MAVLink LANDING_TARGET for ArduPilot precland / precision loiter (PLND_TYPE=1)."""
+    def send_landing_target(self, angle_x_rad, angle_y_rad, distance_m, size_x_rad=0.0, size_y_rad=0.0,
+                            time_usec=None):
+        """MAVLink LANDING_TARGET for ArduPilot precland / precision loiter (PLND_TYPE=1).
+
+        ArduPilot 4.7 MAVLink backend accepts only MAV_FRAME_BODY_FRD / LOCAL_FRD and builds the
+        line of sight as (forward=-tan(angle_y), right=tan(angle_x), down=1).
+        """
         if not self.is_connected or not self.master:
             return False
         try:
-            usec = int(time.monotonic() * 1e6)
+            usec = int(time.monotonic() * 1e6) if time_usec is None else int(time_usec)
             with self._lock:
                 mav_ref = self.master
             if mav_ref is None:
@@ -459,12 +478,15 @@ class CuavMavlinkClient:
             mav_ref.mav.landing_target_send(
                 usec,
                 0,
-                mavutil.mavlink.MAV_FRAME_BODY_NED,
+                mavutil.mavlink.MAV_FRAME_BODY_FRD,  # BODY_NED is rejected: "Plnd: Frame not supported"
                 float(angle_x_rad),
                 float(angle_y_rad),
                 float(distance_m),
                 float(size_x_rad),
                 float(size_y_rad),
+                0.0, 0.0, 0.0, (1.0, 0.0, 0.0, 0.0),
+                0,  # type
+                0,  # position_valid: use angle_x/angle_y
             )
             return True
         except Exception:
