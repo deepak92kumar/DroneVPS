@@ -191,7 +191,7 @@ def main():
                         help="Home/EKF origin altitude MSL in meters (0.0 = auto-read ground baro)")
     parser.add_argument("--max-exposure", type=int, default=1500, help="Max auto exposure microseconds (1.5ms reduces motion blur)")
     parser.add_argument("--max-iso", type=int, default=1200, help="Maximum ISO for auto exposure")
-    parser.add_argument("--marker-size", type=float, default=0.244, help="Outer black-border edge of the printed ArUco marker in meters (measured print: 0.244 m)")
+    parser.add_argument("--marker-size", type=float, default=0.242, help="Outer black-border edge of the printed ArUco marker in meters (measured print: 0.242 m)")
     parser.add_argument("--no-prec-loiter", dest="prec_loiter", action="store_false", default=True, help="Do not auto-enable ArduPilot Precision Loiter over ArUco #0 in LOITER")
     parser.add_argument("--save-images", action="store_true", default=True, help="Save camera and ArUco detection frames to disk (default: True)")
     parser.add_argument("--port", type=str, default="/dev/ttyTHS1", help="Primary serial/UART port for CUAV (default: /dev/ttyTHS1)")
