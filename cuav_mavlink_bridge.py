@@ -82,6 +82,14 @@ class CuavMavlinkClient:
 
         self.last_attitude_time = 0.0
         self.attitude_count = 0
+        # Heading for rotating optical flow into NED. Integrated from FC body rates so it is not
+        # the EKF's own yaw fed straight back (that loop froze EKF yaw in flights 18/19), and
+        # pulled slowly toward EKF yaw so the compass still sets the long-term heading.
+        self.FLOW_HDG_TAU_AIR_S = 600.0   # log replay: 30 s kept 49 deg rms error, 300 s 9-11, no pull 0.4
+        self.FLOW_HDG_TAU_GROUND_S = 1.0
+        self.flow_heading_deg = None
+        self._flow_hdg_last_boot_ms = None
+        self._flow_hdg_time = 0.0
         self.thread = threading.Thread(target=self._worker, daemon=True)
         self.thread.start()
 
@@ -246,6 +254,8 @@ class CuavMavlinkClient:
                         self.yaw_deg = msg.yaw * 57.2958
                         self.last_attitude_time = time.time()
                         self.attitude_count += 1
+                        self._update_flow_heading(msg.time_boot_ms, msg.roll, msg.pitch, msg.yaw,
+                                                  msg.rollspeed, msg.pitchspeed, msg.yawspeed)
                     elif t == 'GLOBAL_POSITION_INT':
                         self.rel_alt_m = getattr(msg, 'relative_alt', 0) / 1000.0
                         if getattr(msg, 'hdg', 65535) != 65535 and (time.time() - self.last_attitude_time > 1.0):
@@ -362,6 +372,31 @@ class CuavMavlinkClient:
                     self.armed_state_known = False
                 self._close_quietly(old_master)
                 time.sleep(1.0)
+
+    def _update_flow_heading(self, boot_ms, roll, pitch, yaw, p, q, r):
+        """Integrate Euler yaw rate from body rates; complementary pull toward EKF yaw."""
+        ekf_deg = math.degrees(yaw)
+        last = self._flow_hdg_last_boot_ms
+        self._flow_hdg_last_boot_ms = boot_ms
+        dt = None if last is None else (boot_ms - last) / 1000.0
+        if self.flow_heading_deg is None or dt is None or not (0.0 < dt <= 0.5):
+            self.flow_heading_deg = ekf_deg
+            self._flow_hdg_time = time.time()
+            return
+        c_pitch = math.cos(pitch)
+        yaw_rate = (q * math.sin(roll) + r * math.cos(roll)) / c_pitch if abs(c_pitch) > 0.2 else r
+        hdg = self.flow_heading_deg + math.degrees(yaw_rate) * dt
+        tau = self.FLOW_HDG_TAU_AIR_S if self.is_armed else self.FLOW_HDG_TAU_GROUND_S
+        err = (ekf_deg - hdg + 180.0) % 360.0 - 180.0
+        hdg += err * min(1.0, dt / tau)
+        self.flow_heading_deg = (hdg + 180.0) % 360.0 - 180.0
+        self._flow_hdg_time = time.time()
+
+    def get_flow_heading_deg(self, max_age_s=0.5):
+        """Flow-rotation heading in degrees, or None if stale."""
+        if self.flow_heading_deg is None or time.time() - self._flow_hdg_time > max_age_s:
+            return None
+        return self.flow_heading_deg
 
     @staticmethod
     def _close_quietly(conn):

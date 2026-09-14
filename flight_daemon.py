@@ -1054,7 +1054,10 @@ def main():
                             v_nudge_east  = 0.0
 
                             if allow_flow and (not _vio_blind) and 0.00005 < step_dist < 0.35:
-                                yaw_rad = math.radians(yaw_deg)
+                                # Rotate with the gyro-integrated flow heading, not the EKF yaw fed back.
+                                flow_hdg = cuav.get_flow_heading_deg()
+                                _yaw_flow = yaw_deg if flow_hdg is None else flow_hdg
+                                yaw_rad = math.radians(_yaw_flow)
                                 cos_psi = math.cos(yaw_rad)
                                 sin_psi = math.sin(yaw_rad)
 
@@ -1073,7 +1076,7 @@ def main():
                                     if frame_count % 10 == 0:
                                         import json as _json
                                         with open("/home/abc/SSD/DRONE/.cursor/debug-153c11.log", "a") as _df:
-                                            _df.write(_json.dumps({"sessionId":"153c11","runId":"post-fix","hypothesisId":"A,B,E","location":"flight_daemon.py:flow_ned","message":"flow_to_ned","data":{"dt":round(dt,4),"tx0":round(_tdx0,3),"ty0":round(_tdy0,3),"tsx":round(_tsx,3),"tsy":round(_tsy,3),"droll":round(_droll,5),"dpitch":round(_dpitch,5),"dx_b":round(dx_body,4),"dy_b":round(dy_body,4),"dN":round(eff_delta_north,4),"dE":round(eff_delta_east,4),"yaw":round(yaw_deg,2),"h_opt":round(optical_height_m,3),"mpp":round(meter_per_px,6),"imu_sync":bool(imu_bracketed),"tilt_src":_tilt_src,"gdr":None if _gd is None else round(_gd[0],5),"gdp":None if _gd is None else round(_gd[1],5),"nfeat":int(len(good_new)),"inliers":int(inlier_count),"mode":getattr(cuav,"flight_mode",""),"airborne":bool(is_airborne),"armed":bool(cuav.is_armed)},"timestamp":int(time.time()*1000)})+"\n")
+                                            _df.write(_json.dumps({"sessionId":"153c11","runId":"post-fix","hypothesisId":"A,B,E","location":"flight_daemon.py:flow_ned","message":"flow_to_ned","data":{"dt":round(dt,4),"tx0":round(_tdx0,3),"ty0":round(_tdy0,3),"tsx":round(_tsx,3),"tsy":round(_tsy,3),"droll":round(_droll,5),"dpitch":round(_dpitch,5),"dx_b":round(dx_body,4),"dy_b":round(dy_body,4),"dN":round(eff_delta_north,4),"dE":round(eff_delta_east,4),"yaw":round(yaw_deg,2),"yaw_flow":round(_yaw_flow,2),"h_opt":round(optical_height_m,3),"mpp":round(meter_per_px,6),"imu_sync":bool(imu_bracketed),"tilt_src":_tilt_src,"gdr":None if _gd is None else round(_gd[0],5),"gdp":None if _gd is None else round(_gd[1],5),"nfeat":int(len(good_new)),"inliers":int(inlier_count),"mode":getattr(cuav,"flight_mode",""),"airborne":bool(is_airborne),"armed":bool(cuav.is_armed)},"timestamp":int(time.time()*1000)})+"\n")
                                 except Exception:
                                     pass
                                 # #endregion
