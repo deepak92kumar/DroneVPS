@@ -43,6 +43,23 @@ os.makedirs(IMAGES_DIR, exist_ok=True)
 RUNNING = True
 _cuav_ref = None  # F-14: global ref so signal handler can send LAND on exit
 
+def pick_origin(user_lat, user_lon, default_lat, default_lon):
+    """EKF origin from SCR_USER1/2 (decimal degrees, set on the RC), else the default site.
+
+    Returns (lat, lon, "USER" | "DEFAULT"). 0/missing/out-of-range values fall back to the default.
+    """
+    try:
+        lat = float(user_lat)
+        lon = float(user_lon)
+    except (TypeError, ValueError):
+        return default_lat, default_lon, "DEFAULT"
+    if (math.isfinite(lat) and math.isfinite(lon)
+            and -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0
+            and abs(lat) > 1e-6 and abs(lon) > 1e-6):
+        return lat, lon, "USER"
+    return default_lat, default_lon, "DEFAULT"
+
+
 def handle_exit(signum, frame):
     global RUNNING
     logging.info(f"Received shutdown signal ({signum}). Exiting cleanly...")
@@ -213,7 +230,8 @@ def main():
 
     # Initialize CUAV X7 Pro MAVLink client in background thread
     logging.info(f"[*] Initializing CUAV X7 Pro MAVLink Bridge on {args.port}...")
-    cuav = CuavMavlinkClient(preferred_port=args.port)
+    # Origin waits for SCR_USER1/2 (apply_cuav_parameters): the FC keeps the first origin it gets.
+    cuav = CuavMavlinkClient(preferred_port=args.port, auto_origin=False)
     global _cuav_ref
     _cuav_ref = cuav  # F-14: expose to signal handler for emergency LAND
 
@@ -600,14 +618,23 @@ def main():
                 # Fence demands a position estimate. Indoor GNSS-denied: fence off.
                 # Do NOT zero ARMING_CHECK — that hides compass/IMU/battery faults.
                 cuav.set_parameter('FENCE_ENABLE', 0.0)
-                home_lat = float(getattr(args, 'home_lat', 30.895560) or 30.895560)
-                home_lon = float(getattr(args, 'home_lon', 74.613858) or 74.613858)
+                default_lat = float(getattr(args, 'home_lat', 30.895560) or 30.895560)
+                default_lon = float(getattr(args, 'home_lon', 74.613858) or 74.613858)
+                # Field site from the RC: SCR_USER1 = latitude, SCR_USER2 = longitude (decimal degrees).
+                home_lat, home_lon, origin_src = pick_origin(
+                    cuav.get_parameter('SCR_USER1'), cuav.get_parameter('SCR_USER2'),
+                    default_lat, default_lon,
+                )
                 origin_ok = cuav.set_ekf_origin(lat=home_lat, lon=home_lon)
+                # Bridge re-sends this same site every 2 s until the FC reports a global position.
+                cuav.gps_lat, cuav.gps_lon = home_lat, home_lon
+                cuav.auto_origin = True
                 if origin_ok:
                     logging.info(
-                        f"[+] EKF origin set {home_lat:.6f},{home_lon:.6f} "
+                        f"[+] EKF origin set {home_lat:.6f},{home_lon:.6f} from {origin_src} "
                         "(anchor only — not GPS)"
                     )
+                    cuav.send_statustext(f"ORIGIN {origin_src} {home_lat:.5f},{home_lon:.5f}", severity=6)
                     cuav.send_statustext("EKF ORIGIN OK | ARM ALT_HOLD", severity=6)
                 else:
                     logging.warning("[!] EKF origin NOT set — LOITER will keep Need Position Estimate")

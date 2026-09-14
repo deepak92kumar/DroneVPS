@@ -23,7 +23,7 @@ class CuavMavlinkClient:
     Robust background MAVLink client for CUAV X7 Pro.
     Maintains heartbeat, monitors EKF status, and streams high-rate VIO packets.
     """
-    def __init__(self, preferred_port='/dev/ttyTHS1', baud=115200):
+    def __init__(self, preferred_port='/dev/ttyTHS1', baud=115200, auto_origin=True):
         self.preferred_port = preferred_port
         self.baud = baud
         self.master = None
@@ -65,6 +65,8 @@ class CuavMavlinkClient:
         self.gps_hacc = 99.0
         self.gps_vel = 0.0
         # Exact site coordinates provided by pilot
+        # EKF3 accepts the origin only once per FC boot. False = wait until the owner picks the site.
+        self.auto_origin = bool(auto_origin)
         self.gps_lat = 30.895560
         self.gps_lon = 74.613858
         self.gps_alt = 177.0
@@ -265,7 +267,7 @@ class CuavMavlinkClient:
                         else:
                             # Lat/Lon is 0 -> Autopilot lacks global origin! Auto-inject every 2.0s until locked
                             now_t = time.time()
-                            if now_t - getattr(self, '_last_origin_attempt', 0) > 2.0:
+                            if self.auto_origin and now_t - getattr(self, '_last_origin_attempt', 0) > 2.0:
                                 self._last_origin_attempt = now_t
                                 self.set_ekf_origin()
                     elif t == 'DISTANCE_SENSOR':
