@@ -464,6 +464,26 @@ def main():
         PLND_LAG_S = 0.03                # measured frame->wire 18.7 ms median / 28.8 p95, + serial/FC ~5 ms
         aruco_target_sent = 0
         t_mono_host = None
+        ARUCO_LOST_S = 1.5               # no valid PnP detection for this long -> LOST
+        ARUCO_NOTIFY_GAP_S = 1.0         # min gap between lock/lost RC messages
+        aruco_notify = {"state": "lost", "sent": "lost", "since": 0.0, "held": 0.0, "last_tx": 0.0}
+
+        def aruco_notice(now_t, hits, st, can_send):
+            """Track ArUco #0 LOCK/LOST and return the state to announce ("locked"/"lost") or None.
+            LOCK = >= ARUCO_CONFIRM_HITS valid detections within 0.5 s (same gate as LANDING_TARGET).
+            LOST = no valid detection for ARUCO_LOST_S. Announcements are >= ARUCO_NOTIFY_GAP_S apart;
+            a change during that gap (or while the FC link is down) is announced afterwards."""
+            last_hit = hits[-1] if hits else None
+            if st["state"] == "lost" and sum(1 for t in hits if now_t - t <= 0.5) >= ARUCO_CONFIRM_HITS:
+                st["state"], st["since"] = "locked", now_t
+                logging.info("[+] ArUco #0 LOCK")
+            elif st["state"] == "locked" and (last_hit is None or now_t - last_hit > ARUCO_LOST_S):
+                st["state"], st["held"], st["since"] = "lost", now_t - st["since"], now_t
+                logging.info(f"[-] ArUco #0 LOST (held {st['held']:.1f} s)")
+            if (not can_send) or st["state"] == st["sent"] or now_t - st["last_tx"] < ARUCO_NOTIFY_GAP_S:
+                return None
+            st["sent"], st["last_tx"] = st["state"], now_t
+            return st["state"]
         last_video_time = time.time()
         last_summary_write_time = time.time()
         last_badge_time = 0.0
@@ -1314,16 +1334,13 @@ def main():
                             logging.warning("[!] AI AUTO-SWITCH to VIO failed — FC did not confirm parameter change")
 
             # Instant RC Alerts for Critical Flight Events (Rate-Limited to Prevent GCS Freezing)
+            aruco_event = aruco_notice(now, aruco_hits, aruco_notify, cuav.is_connected)
             if cuav.is_connected:
-                prev_aruco = getattr(cuav, '_prev_aruco_locked', False)
-                last_aruco_alert_time = getattr(cuav, '_last_aruco_alert_time', 0.0)
-                if (aruco_locked != prev_aruco) and (now - last_aruco_alert_time >= 4.0):
-                    if aruco_locked:
-                        cuav.send_statustext(">>> ARUCO HOVER LOCK #0", severity=6)
-                    else:
-                        cuav.send_statustext(">>> ARUCO LOST | FLOW ACTIVE", severity=4)
-                    cuav._prev_aruco_locked = aruco_locked
-                    cuav._last_aruco_alert_time = now
+                if aruco_event == "locked":
+                    off_m = math.hypot(last_aruco_offset[0], last_aruco_offset[1])
+                    cuav.send_statustext(f">>> ARUCO LOCK #0 | z{last_aruco_z:.1f}m off{off_m:.2f}m", severity=6)
+                elif aruco_event == "lost":
+                    cuav.send_statustext(f">>> ARUCO LOST #0 | held {aruco_notify['held']:.0f}s", severity=4)
 
                 # Precision Loiter over ArUco #0: only in LOITER, airborne, with a confirmed marker.
                 # ArduPilot itself falls back to normal LOITER on stick input (>0.5 m/s^2) or 2 s target loss.
@@ -1363,7 +1380,7 @@ def main():
                 if cuav.is_connected:
                     rc_page = getattr(cuav, '_rc_notify_page', 0)
                     fps_val = int(fps) if 'fps' in locals() and fps > 0 else 15
-                    has_aruco = (now - last_aruco_lock_time <= 1.0)
+                    has_aruco = aruco_notify["state"] == "locked"
 
                     if rc_page == 0:
                         # Page 1: 3D Position, Target Tracking & Altitude
