@@ -855,6 +855,28 @@ class CuavMavlinkClient:
         except Exception:
             return False
 
+    def set_flight_mode(self, mode_name):
+        """MAV_CMD_DO_SET_MODE with an ArduCopter custom mode name, e.g. 'ALT_HOLD'."""
+        if not self.is_connected or not self.master:
+            return False
+        try:
+            with self._lock:
+                mav_ref = self.master
+            if mav_ref is None:
+                return False
+            mapping = mav_ref.mode_mapping() or {}
+            if mode_name not in mapping:
+                return False
+            mav_ref.mav.command_long_send(
+                mav_ref.target_system, mav_ref.target_component,
+                mavutil.mavlink.MAV_CMD_DO_SET_MODE,
+                0, float(mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED), float(mapping[mode_name]),
+                0, 0, 0, 0, 0
+            )
+            return True
+        except Exception:
+            return False
+
     def send_rc_display_telemetry(self, lat, lon, gl_alt_m, agl_alt_m, dist_to_home_m=0.0, speed_m_s=0.0, heading_deg=0.0):
         """
         Broadcast GPS_RAW_INT, GLOBAL_POSITION_INT, and NAV_CONTROLLER_OUTPUT

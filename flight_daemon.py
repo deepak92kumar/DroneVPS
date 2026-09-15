@@ -535,6 +535,10 @@ def main():
         aruco_hits = deque(maxlen=128)   # times of valid ArUco #0 PnP solutions
         ARUCO_CONFIRM_HITS = 3           # within 0.5 s before any LANDING_TARGET is sent
         PREC_LOITER_MIN_HITS = 8         # within 1.0 s before Precision Loiter is enabled
+        # Change H: precision loiter oscillated above ~3.4 m (logs 20, 21, 23) while plain LOITER held
+        # at 4.5 m. Enable only at or below 3.0 m; switch it off above 3.5 m.
+        PREC_LOITER_MAX_ALT_M = 3.0
+        PREC_LOITER_OFF_ALT_M = 3.5
         # 0.14 s (fitted from pad-estimate scatter, logs 20/21) made precision loiter oscillate
         # already at 2.5 m in log 22, vs calm at 2.9 m with 0.03 s in log 21. Keep 0.03 s.
         PLND_LAG_S = 0.03                # measured frame->wire 18.7 ms median / 28.8 p95, + serial/FC ~5 ms
@@ -607,6 +611,7 @@ def main():
         last_f04_log = 0.0
         _f04_paused = False
         _vio_blind = True
+        _low_loiter_guard_t = 0.0   # change S: last ALT_HOLD request for LOITER without vision
         _vio_fresh = 0
         VIO_FRESH_FRAMES = 5
         # Loop runs at 100 FPS. Every 4th frame = 25 Hz VPE+VSE (~5 kB/s). At 50 Hz (~9.9 kB/s) the
@@ -844,6 +849,16 @@ def main():
                     cuav.reset_counter = (cuav.reset_counter + 1) % 256
                     logging.info("[+] VIO trust OFF (blind zone / TF03<0.40m)")
                 _vio_blind = True
+                # Change S: LOITER without vision near the ground lets the EKF velocity drift, and LOITER
+                # then demands lean on the ground (log 23: ~20 deg demanded after mute, drone flipped).
+                # ALT_HOLD demands zero lean with sticks centred.
+                if (cuav.is_armed and getattr(cuav, 'flight_mode', '') == "LOITER"
+                        and (on_ground or (tf03_valid and tf03_h < 0.40))
+                        and now - _low_loiter_guard_t >= 2.0):
+                    _low_loiter_guard_t = now
+                    if cuav.set_flight_mode("ALT_HOLD"):
+                        logging.warning(f"[!] LOITER with vision muted near ground (TF03 {tf03_h:.2f} m) -> ALT_HOLD")
+                        cuav.send_statustext(">>> LOW ALT NO VIO | ALT_HOLD", severity=4)
                 _vio_fresh = 0
                 _vio_clear_since = 0.0
                 delta_north = 0.0
@@ -1448,7 +1463,9 @@ def main():
                 # ArduPilot itself falls back to normal LOITER on stick input (>0.5 m/s^2) or 2 s target loss.
                 marker_confirmed = sum(1 for t in aruco_hits if now - t <= 1.0) >= PREC_LOITER_MIN_HITS
                 in_loiter = getattr(cuav, 'flight_mode', '') == "LOITER"
-                want_precloit = bool(args.prec_loiter and in_loiter and is_airborne and marker_confirmed)
+                pl_too_high = current_altitude_m > PREC_LOITER_OFF_ALT_M
+                want_precloit = bool(args.prec_loiter and in_loiter and is_airborne and marker_confirmed
+                                     and current_altitude_m <= PREC_LOITER_MAX_ALT_M)
                 prec_on = getattr(cuav, '_prec_loiter_on', False)
                 last_pl_cmd = getattr(cuav, '_prec_loiter_cmd_t', 0.0)
                 marker_lost = (not aruco_hits) or (now - aruco_hits[-1] > 3.0)
@@ -1459,12 +1476,16 @@ def main():
                             cuav._prec_loiter_on = True
                             logging.info("[+] Precision Loiter ON (ArUco #0 confirmed in LOITER)")
                             cuav.send_statustext(">>> PREC LOITER ON | PAD #0", severity=6)
-                elif prec_on and ((not in_loiter) or (not is_airborne) or marker_lost):
+                elif prec_on and ((not in_loiter) or (not is_airborne) or marker_lost or pl_too_high):
                     if cuav.set_precision_loiter(False):
                         cuav._prec_loiter_on = False
                         cuav._prec_loiter_cmd_t = now
-                        logging.info("[*] Precision Loiter OFF (left LOITER / landed / marker lost)")
-                        cuav.send_statustext(">>> PREC LOITER OFF", severity=4)
+                        if pl_too_high and in_loiter and is_airborne and not marker_lost:
+                            logging.info(f"[*] Precision Loiter OFF (above {PREC_LOITER_OFF_ALT_M:.1f} m: {current_altitude_m:.2f} m)")
+                            cuav.send_statustext(f">>> PREC LOITER OFF | >{PREC_LOITER_OFF_ALT_M:.1f}m", severity=4)
+                        else:
+                            logging.info("[*] Precision Loiter OFF (left LOITER / landed / marker lost)")
+                            cuav.send_statustext(">>> PREC LOITER OFF", severity=4)
 
                 prev_air = getattr(cuav, '_prev_is_airborne', False)
                 last_air_trans_time = getattr(cuav, '_last_air_trans_time', 0.0)
