@@ -29,6 +29,7 @@ import depthai as dai
 sys.path.insert(0, "/home/abc/SSD/DRONE")
 from pymavlink import mavutil
 from cuav_mavlink_bridge import CuavMavlinkClient
+from flow_shadow import LongBaselineTracks, JetsonLKWorker, px_to_ned_velocity
 
 # NVMe SSD paths (primary) with eMMC fallback
 _SSD_BASE   = "/home/abc/SSD/DRONE"
@@ -492,6 +493,18 @@ def main():
                 prev = s
             return sx, sy
 
+        def shadow_tilt_delta(t0, t1):
+            """(droll, dpitch, source) over [t0, t1] from the live flow's tilt source, else None."""
+            if gyro_derot["ok"]:
+                gd = gyro_tilt_delta(t0, t1)
+                if gd is not None:
+                    return gyro_derot["sign_r"] * gd[0], gyro_derot["sign_p"] * gd[1], "gyro"
+            a0, ok0 = attitude_at(t0)
+            a1, ok1 = attitude_at(t1)
+            if a0 is None or a1 is None or not (ok0 and ok1):
+                return None
+            return a1[0] - a0[0], a1[1] - a0[1], "rotvec"
+
         def update_gyro_validation(gdx, gdy, rv_dr, rv_dp, dt_s):
             """Compare ~0.4 s windows of gyro vs rotation-vector tilt. Gyro derotation turns ON only when
             both axes agree (>=15 moving windows, |corr|>=0.85, 0.7<=|slope|<=2.0) and OFF if agreement is lost."""
@@ -587,12 +600,27 @@ def main():
         #        30 Hz disk flushes from stalling the VIO loop on slow eMMC storage.
         vel_log_file = open(vel_log_path, "w", buffering=65536)
         vel_log_file.write("timestamp,delta_north,delta_east,dt,raw_vel_north,raw_vel_east,filtered_vel_north,filtered_vel_east,live_speed,altitude,roll,pitch,yaw,camera_fps\n")
+        # Appended, never truncated, so a daemon restart does not erase a flight's shadow data.
+        shadow_log = None
+        try:
+            shadow_log = open(os.path.join(LOG_DIR, "flow_shadow.csv"), "a", buffering=65536)
+            if shadow_log.tell() == 0:
+                shadow_log.write("wall,t_frame,armed,airborne,vio_blind,h_opt,heading,vn_sent,ve_sent,vn_raw,ve_raw,"
+                                 "vn_N,ve_N,inl_N,base_N,tilt_N,vn_J,ve_J,inl_J,span_J,ms_J\n")
+        except Exception:
+            shadow_log = None
 
         frame_count = 0
         vio_sent_count = 0
         aruco_detect_count = 0
         aruco_seen_seq = 0
         total_skipped_frames = 0   # older queued frames skipped to process the newest
+        # Shadow flow (logged to flow_shadow.csv only): N long-baseline FeatureTracker, J Jetson LK.
+        SHADOW_BASELINE_S = 0.08
+        lb_tracks = LongBaselineTracks(cx_f, cy_f, baseline_s=SHADOW_BASELINE_S)
+        jlk_worker = JetsonLKWorker(cx_f, cy_f)
+        jlk_win = deque(maxlen=64)
+        lb_res = None
         aruco_locked = False
         is_airborne = False
         last_ground_yaw_deg = 0.0
@@ -974,8 +1002,10 @@ def main():
                 # with its own frame image and timestamp.
                 corners, ids = None, None
                 aruco_img, t_aruco_frame = None, None
+                lb_res = None
                 if mono_f is not None:
                     aruco_worker.submit(mono_f, t_mono_host)
+                    jlk_worker.submit(mono_f, t_mono_host)
                 aruco_res = aruco_worker.result_after(aruco_seen_seq)
                 if aruco_res is not None:
                     aruco_seen_seq, aruco_img, t_aruco_frame, corners, ids = aruco_res
@@ -1054,6 +1084,8 @@ def main():
                 # 5. OAK-D Myriad-X FeatureTracker Optical Flow (Zero Jetson CPU!)
                 if in_ft is not None:
                     cur_features = {f.id: (f.position.x, f.position.y) for f in in_ft.trackedFeatures}
+                    if t_frame_host is not None:
+                        lb_res = lb_tracks.update(t_frame_host, cur_features)
                     common_ids = [k for k in cur_features if k in ft_prev_features]
                     if len(common_ids) >= 8:
                         old_pts = np.float32([ft_prev_features[k] for k in common_ids])
@@ -1236,6 +1268,43 @@ def main():
                     )
                 except Exception:
                     pass
+
+                # Shadow flow estimators (logged only, never sent): N = long-baseline FeatureTracker,
+                # J = Jetson LK on the mono stream. Same tilt source, height and heading as the live flow.
+                if shadow_log is not None and (cuav.is_armed or args.test):
+                    try:
+                        cos_tilt_sh = max(0.70, math.cos(math.radians(oak_pitch_deg)) * math.cos(math.radians(oak_roll_deg)))
+                        h_sh = max(0.03, current_altitude_m * cos_tilt_sh
+                                   + max(0.0, cuav.camera_ground_clearance_m - cuav.lidar_ground_clearance_m))
+                        hdg_sh = cuav.get_flow_heading_deg()
+                        hdg_sh = yaw_deg if hdg_sh is None else hdg_sh
+                        n_v = (math.nan, math.nan, 0, 0.0, "")
+                        if lb_res is not None and t_frame_host is not None:
+                            td = shadow_tilt_delta(lb_res[0], t_frame_host)
+                            if td is not None:
+                                vn_s, ve_s = px_to_ned_velocity(lb_res[1], lb_res[2], td[0], td[1], focal_length_px,
+                                                                h_sh, hdg_sh, t_frame_host - lb_res[0])
+                                n_v = (vn_s, ve_s, lb_res[3], t_frame_host - lb_res[0], td[2])
+                        for jt0, jt1, jtx, jty, jn, jms in jlk_worker.pop_results():
+                            td = shadow_tilt_delta(jt0, jt1)
+                            if td is not None and jt1 > jt0:
+                                vn_s, ve_s = px_to_ned_velocity(jtx, jty, td[0], td[1], focal_length_px, h_sh, hdg_sh, jt1 - jt0)
+                                jlk_win.append((jt1, vn_s * (jt1 - jt0), ve_s * (jt1 - jt0), jt1 - jt0, jn, jms))
+                        j_v = (math.nan, math.nan, 0, 0.0, 0.0)
+                        if jlk_win:
+                            w = [x for x in jlk_win if x[0] > jlk_win[-1][0] - SHADOW_BASELINE_S]
+                            span = sum(x[3] for x in w)
+                            if span > 0.02:
+                                j_v = (sum(x[1] for x in w) / span, sum(x[2] for x in w) / span,
+                                       int(np.median([x[4] for x in w])), span, float(np.median([x[5] for x in w])))
+                        shadow_log.write(
+                            f"{time.time():.4f},{(t_frame_host if t_frame_host is not None else math.nan):.4f},"
+                            f"{int(cuav.is_armed)},{int(is_airborne)},{int(_vio_blind)},{h_sh:.3f},{hdg_sh:.2f},"
+                            f"{filtered_vel_north:.4f},{filtered_vel_east:.4f},{raw_vel_north:.4f},{raw_vel_east:.4f},"
+                            f"{n_v[0]:.4f},{n_v[1]:.4f},{n_v[2]},{n_v[3]:.4f},{n_v[4]},"
+                            f"{j_v[0]:.4f},{j_v[1]:.4f},{j_v[2]},{j_v[3]:.4f},{j_v[4]:.2f}\n")
+                    except Exception:
+                        pass
 
                 t_proc_done = time.perf_counter()
                 proc_ms = max(0.0, (t_proc_done - t_proc_start) * 1000.0)
@@ -1589,6 +1658,12 @@ def main():
     image_logger.stop()
     aruco_worker.stop()
     aruco_worker.join(timeout=1.0)  # exiting while detectMarkers runs aborts the interpreter
+    try:
+        jlk_worker.stop()
+        jlk_worker.join(timeout=1.0)
+        shadow_log.close()
+    except Exception:
+        pass
     cuav.close()
     # CQ-5: Close vel_log_file in finally-equivalent block to flush buffered CSV data
     try:
