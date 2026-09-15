@@ -535,7 +535,9 @@ def main():
         aruco_hits = deque(maxlen=128)   # times of valid ArUco #0 PnP solutions
         ARUCO_CONFIRM_HITS = 3           # within 0.5 s before any LANDING_TARGET is sent
         PREC_LOITER_MIN_HITS = 8         # within 1.0 s before Precision Loiter is enabled
-        PLND_LAG_S = 0.03                # measured frame->wire 18.7 ms median / 28.8 p95, + serial/FC ~5 ms
+        # Flight logs 20/21: pad-estimate scatter is smallest when the LOS is rotated with attitude
+        # 120-160 ms old (not 30 ms). A 30 ms lag made precision loiter oscillate above ~3.5 m.
+        PLND_LAG_S = 0.14
         aruco_target_sent = 0
         t_mono_host = None
         ARUCO_LOST_S = 1.5               # no valid PnP detection for this long -> LOST
