@@ -61,6 +61,27 @@ def pick_origin(user_lat, user_lon, default_lat, default_lon):
     return default_lat, default_lon, "DEFAULT"
 
 
+def tf03_glitch_hold(state, tf03_h, tf03_valid, airborne, armed, now, hold_s=0.5):
+    """Change T: hold the last good TF03 height through a short dropout in flight.
+
+    Log 24: one bad sample at 4 m (neighbours 3.97/4.05 m) muted vision for 2.5 s and wiped XY.
+    In flight above 1 m, a reading that is invalid or below half the last good height is replaced by
+    the last good height for up to hold_s. state: dict with 'h' and 't'. Returns (h, valid, held).
+    """
+    last_h, last_t = state.get("h", 0.0), state.get("t", 0.0)
+    implausible = airborne and last_h > 1.0 and tf03_valid and tf03_h < 0.5 * last_h
+    if tf03_valid and not implausible:
+        state["h"], state["t"] = tf03_h, now
+        return tf03_h, True, False
+    if airborne and armed and last_h > 1.0 and now - last_t <= hold_s:
+        return last_h, True, True
+    if tf03_valid:
+        # The change outlasted the hold (e.g. flying over a roof or vehicle): accept the new height.
+        state["h"], state["t"] = tf03_h, now
+        return tf03_h, True, False
+    return tf03_h, False, False
+
+
 def handle_exit(signum, frame):
     global RUNNING
     logging.info(f"Received shutdown signal ({signum}). Exiting cleanly...")
@@ -412,6 +433,10 @@ def main():
         imu_att_hist = deque(maxlen=128)
         # Measured on this OAK @100 FPS: IMU lands 1-12 ms after its frame; 15 ms brackets 98.5% of frames.
         IMU_SYNC_WAIT_S = 0.015
+        # Change K: image shift per radian of tilt is ~1.2*f, not f. Log 24 (6-9 m, IMU accel as truth):
+        # with 1.0 the flow read lateral velocity changes 1.6-1.7x too large; 1.2 gave gain 1.05-1.11
+        # and the lowest error. Log 20 debug showed the same ~0.35 residual on both image axes.
+        DEROT_GAIN = 1.2
         # Change F: tilt between frames from integrated gyro. The rotation vector is smoothed and
         # under-reads fast tilt (flight fits: 525-680 px/rad vs f=396). (host ts s, gx, gy) rad/s.
         gyro_hist = deque(maxlen=512)
@@ -640,6 +665,9 @@ def main():
         _f04_paused = False
         _vio_blind = True
         _low_loiter_guard_t = 0.0   # change S: last ALT_HOLD request for LOITER without vision
+        tf03_hold_state = {"h": 0.0, "t": 0.0}   # change T: last good TF03 height in flight
+        tf03_glitch_count = 0
+        tf03_glitch_log_t = 0.0
         _vio_fresh = 0
         VIO_FRESH_FRAMES = 5
         # Loop runs at 100 FPS. Every 4th frame = 25 Hz VPE+VSE (~5 kB/s). At 50 Hz (~9.9 kB/s) the
@@ -803,6 +831,13 @@ def main():
 
             # 2. Check Ground Altitude with Hardware TF03 LiDAR (Primary) & Autopilot Barometer (Fallback)
             tf03_h, tf03_age, tf03_valid = cuav.get_tf03_height(max_age_s=0.25)
+            tf03_h, tf03_valid, tf03_held = tf03_glitch_hold(
+                tf03_hold_state, tf03_h, tf03_valid, is_airborne, cuav.is_armed, now)
+            if tf03_held:
+                tf03_glitch_count += 1
+                if now - tf03_glitch_log_t >= 2.0:
+                    tf03_glitch_log_t = now
+                    logging.warning(f"[!] TF03 dropout in flight: holding {tf03_h:.2f} m ({tf03_glitch_count} samples held)")
             # Subtract physical mounting clearance (0.11m = 11cm baseline)
             drone_agl_from_lidar = max(0.0, tf03_h - cuav.lidar_ground_clearance_m)
             was_airborne = is_airborne
@@ -1155,8 +1190,8 @@ def main():
                                     tilt_win[:] = [0.0, 0.0, 0.0, 0.0, 0.0]
                                 _droll, _dpitch = delta_roll, delta_pitch
                                 if abs(delta_roll) < 0.20 and abs(delta_pitch) < 0.20:
-                                    tilt_shift_x = -focal_length_px * math.tan(delta_roll)
-                                    tilt_shift_y = focal_length_px * math.tan(delta_pitch)  # flight logs: ty ≈ +f·dPitch
+                                    tilt_shift_x = -focal_length_px * math.tan(DEROT_GAIN * delta_roll)
+                                    tilt_shift_y = focal_length_px * math.tan(DEROT_GAIN * delta_pitch)  # flight logs: ty ≈ +f·dPitch
                                     _tsx, _tsy = tilt_shift_x, tilt_shift_y
                                     trans_dx -= tilt_shift_x
                                     trans_dy -= tilt_shift_y
@@ -1282,13 +1317,15 @@ def main():
                         if lb_res is not None and t_frame_host is not None:
                             td = shadow_tilt_delta(lb_res[0], t_frame_host)
                             if td is not None:
-                                vn_s, ve_s = px_to_ned_velocity(lb_res[1], lb_res[2], td[0], td[1], focal_length_px,
+                                vn_s, ve_s = px_to_ned_velocity(lb_res[1], lb_res[2], DEROT_GAIN * td[0],
+                                                                DEROT_GAIN * td[1], focal_length_px,
                                                                 h_sh, hdg_sh, t_frame_host - lb_res[0])
                                 n_v = (vn_s, ve_s, lb_res[3], t_frame_host - lb_res[0], td[2])
                         for jt0, jt1, jtx, jty, jn, jms in jlk_worker.pop_results():
                             td = shadow_tilt_delta(jt0, jt1)
                             if td is not None and jt1 > jt0:
-                                vn_s, ve_s = px_to_ned_velocity(jtx, jty, td[0], td[1], focal_length_px, h_sh, hdg_sh, jt1 - jt0)
+                                vn_s, ve_s = px_to_ned_velocity(jtx, jty, DEROT_GAIN * td[0], DEROT_GAIN * td[1],
+                                                                focal_length_px, h_sh, hdg_sh, jt1 - jt0)
                                 jlk_win.append((jt1, vn_s * (jt1 - jt0), ve_s * (jt1 - jt0), jt1 - jt0, jn, jms))
                         j_v = (math.nan, math.nan, 0, 0.0, 0.0)
                         if jlk_win:
