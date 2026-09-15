@@ -123,6 +123,61 @@ class AsyncImageLogger(threading.Thread):
     def stop(self):
         self.running = False
 
+
+class ArucoWorker(threading.Thread):
+    """
+    ArUco detection off the flow loop. detectMarkers takes ~17 ms on the Orin Nano; run inline at
+    100 FPS it cut the airborne loop to 58-82 FPS with frames 80-160 ms old (15 Sep flight).
+    Only the newest submitted frame is kept; detections are rate-capped by min_interval_s.
+    OpenCV releases the GIL inside detectMarkers, so the flow loop keeps running meanwhile.
+    """
+    def __init__(self, detector, min_interval_s=0.04):
+        super().__init__(daemon=True)
+        self.detector = detector
+        self.min_interval_s = float(min_interval_s)
+        self._cv = threading.Condition()
+        self._job = None        # (image, frame timestamp s)
+        self._result = None     # (seq, image, frame timestamp s, corners, ids)
+        self._seq = 0
+        self.running = True
+        self.start()
+
+    def run(self):
+        last_start = 0.0
+        while self.running:
+            gap = self.min_interval_s - (time.monotonic() - last_start)
+            if gap > 0:
+                time.sleep(gap)
+            with self._cv:
+                if self._job is None:
+                    self._cv.wait(timeout=0.2)
+                job, self._job = self._job, None
+            if job is None:
+                continue
+            last_start = time.monotonic()
+            img, t_frame = job
+            try:
+                corners, ids, _ = self.detector.detectMarkers(img)
+            except Exception:
+                corners, ids = None, None
+            with self._cv:
+                self._seq += 1
+                self._result = (self._seq, img, t_frame, corners, ids)
+
+    def submit(self, img, t_frame):
+        with self._cv:
+            self._job = (img, t_frame)
+            self._cv.notify()
+
+    def result_after(self, seq):
+        """Newest result with a sequence number above seq, else None."""
+        with self._cv:
+            r = self._result
+        return r if r is not None and r[0] > seq else None
+
+    def stop(self):
+        self.running = False
+
 def setup_logging(test_mode=False):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_file = os.path.join(LOG_DIR, f"flight_{timestamp}.log")
@@ -250,6 +305,7 @@ def main():
     aruco_params.adaptiveThreshWinSizeStep = 10
     aruco_params.cornerRefinementMethod = aruco.CORNER_REFINE_NONE
     aruco_detector = aruco.ArucoDetector(aruco_dict, aruco_params)
+    aruco_worker = ArucoWorker(aruco_detector)  # 25 Hz max, newest frame only
     marker_size_m = float(args.marker_size) # Default 0.25m (25cm) target pad
     aruco_obj_pts = np.array([
         [-marker_size_m/2,  marker_size_m/2, 0],
@@ -529,6 +585,8 @@ def main():
         frame_count = 0
         vio_sent_count = 0
         aruco_detect_count = 0
+        aruco_seen_seq = 0
+        total_skipped_frames = 0   # older queued frames skipped to process the newest
         aruco_locked = False
         is_airborne = False
         last_ground_yaw_deg = 0.0
@@ -798,9 +856,14 @@ def main():
 
             # 3. Get OV9282 Global Shutter Features & Frame
 
-            in_ft = q_features.tryGet()
+            # Newest packet only: a backlog made frames 80-160 ms old. Tracker IDs persist across
+            # skipped frames and dt comes from hardware timestamps, so skipping is safe for flow.
+            ft_pkts = q_features.tryGetAll()
+            in_ft = ft_pkts[-1] if ft_pkts else None
+            ft_skipped = max(0, len(ft_pkts) - 1)
             if in_ft is not None:
                 frame_count += 1
+                total_skipped_frames += ft_skipped
                 t_host_rx = time.monotonic()
                 t_frame_host = None
                 try:
@@ -814,8 +877,8 @@ def main():
                     seq = in_ft.getSequenceNum()
                     if ft_prev_seq is not None:
                         seq_diff = seq - ft_prev_seq
-                        if seq_diff > 2:
-                            dropped = seq_diff - 1
+                        dropped = seq_diff - 1 - ft_skipped
+                        if dropped >= 2 or seq_diff > 20:
                             total_dropped_frames += dropped
                             # Only wipe feature history on significant blackout (>20 frames / >0.2s)
                             # Minor drops preserve hardware feature IDs so VIO tracking does not black out (prevents F-04)
@@ -832,7 +895,8 @@ def main():
                 t_proc_start = time.perf_counter()
                 mono_f = None
                 t_mono_host = None
-                in_mono = q_mono.tryGet()
+                mono_pkts = q_mono.tryGetAll()
+                in_mono = mono_pkts[-1] if mono_pkts else None
                 if in_mono is not None:
                     mono_f = in_mono.getCvFrame()
                     try:
@@ -889,12 +953,15 @@ def main():
                 v_nudge_east = 0.0
 
                 # 4. ArUco Precision Landing Detection (Marker ID 0)
-                # Throttled to 10-15 Hz to conserve Jetson CPU and prevent camera queue backlog
+                # Detection runs in ArucoWorker (<=25 Hz, newest frame); use each new result once,
+                # with its own frame image and timestamp.
                 corners, ids = None, None
-                is_landing_phase = (cuav.is_connected and getattr(cuav, 'flight_mode', '') == "LAND")
-                aruco_stride = 3 if (is_landing_phase or (now - last_aruco_lock_time <= 1.0)) else 8
-                if (frame_count % aruco_stride == 0) and mono_f is not None:
-                    corners, ids, _ = aruco_detector.detectMarkers(mono_f)
+                aruco_img, t_aruco_frame = None, None
+                if mono_f is not None:
+                    aruco_worker.submit(mono_f, t_mono_host)
+                aruco_res = aruco_worker.result_after(aruco_seen_seq)
+                if aruco_res is not None:
+                    aruco_seen_seq, aruco_img, t_aruco_frame, corners, ids = aruco_res
                     if ids is not None and 0 in ids:
                         aruco_detect_count += 1
                         last_aruco_lock_time = now
@@ -909,7 +976,7 @@ def main():
                     # Save annotated detection image when ArUco is locked (visual confirmation during flight)
                     if flight_record_dir and (aruco_detect_count % 5 == 1) and flight_img_seq < 1000:
                         flight_img_seq += 1
-                        annotated = cv2.cvtColor(mono_f, cv2.COLOR_GRAY2BGR)
+                        annotated = cv2.cvtColor(aruco_img, cv2.COLOR_GRAY2BGR)
                         cv2.polylines(annotated, [m_corners.astype(np.int32)], True, (0, 255, 0), 2)
                         cv2.putText(annotated, f"ArUco #0 Locked ({aruco_detect_count})",
                                     (int(m_corners[0][0]), max(20, int(m_corners[0][1]) - 8)),
@@ -957,7 +1024,7 @@ def main():
                             if cuav.send_landing_target(
                                 last_aruco_ang_x, last_aruco_ang_y, aruco_los_dist,
                                 last_aruco_size_rad, last_aruco_size_rad,
-                                time_usec=None if t_mono_host is None else int(t_mono_host * 1e6),
+                                time_usec=None if t_aruco_frame is None else int(t_aruco_frame * 1e6),
                             ):
                                 aruco_target_sent += 1
 
@@ -1330,7 +1397,7 @@ def main():
                 aruco_badge = f"[ARUCO#0 LOCKED dN:{last_aruco_offset[0]:+.2f}m dE:{last_aruco_offset[1]:+.2f}m]" if (now - last_aruco_lock_time <= 1.0) else "[ARUCO: SEARCHING]"
                 vel_status = f"Vel: N:{filtered_vel_north:+.2f} E:{filtered_vel_east:+.2f}m/s"
                 logging.info(
-                    f"[VIO {fps:.1f} FPS | Drops:{total_dropped_frames}] Pos: N:{pos_north:+05.2f}m E:{pos_east:+05.2f}m Z:{current_altitude_m:04.2f}m (Yaw:{yaw_deg:+.1f}°) | "
+                    f"[VIO {fps:.1f} FPS | Drops:{total_dropped_frames} Skip:{total_skipped_frames}] Pos: N:{pos_north:+05.2f}m E:{pos_east:+05.2f}m Z:{current_altitude_m:04.2f}m (Yaw:{yaw_deg:+.1f}°) | "
                     f"{vel_status} | {aruco_badge} | {tf03_log} | "
                     f"Lat: {total_latency_ms:.1f}ms (xfer:{transport_ms:.1f}ms proc:{proc_ms:.1f}ms send:{send_ms:.1f}ms) | "
                     f"VIO Sent: {vio_sent_count} | {cuav_str} | {shield_badge} {gps_diag}"
@@ -1466,7 +1533,8 @@ def main():
                 except Exception:
                     pass
 
-            time.sleep(0.002)
+            if in_ft is None:
+                time.sleep(0.001)  # idle only; a fixed sleep per frame cost 2.1 ms of the 10 ms budget
 
     logging.info("[*] Shutting down Navigation Daemon...")
     # Write Final Flight Mission Report
@@ -1496,6 +1564,8 @@ def main():
         pass
 
     image_logger.stop()
+    aruco_worker.stop()
+    aruco_worker.join(timeout=1.0)  # exiting while detectMarkers runs aborts the interpreter
     cuav.close()
     # CQ-5: Close vel_log_file in finally-equivalent block to flush buffered CSV data
     try:
