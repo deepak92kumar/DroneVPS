@@ -61,6 +61,24 @@ def pick_origin(user_lat, user_lon, default_lat, default_lon):
     return default_lat, default_lon, "DEFAULT"
 
 
+def ir_flood_target(on_now, exposure_us, iso, height_m, max_height_m=5.0, height_valid=True):
+    """Should the IR floodlight be on? Daylight is read from the auto-exposure the camera settles at.
+
+    Bench: indoors the mono camera sits at its 1500 us limit with ISO ~1000; in sunlight it drops to a
+    few hundred us at ISO ~100. The flood only reaches a few metres, so it is pointless high up and in
+    daylight, where it only costs power and heat. Hysteresis keeps it from flickering at dusk.
+    """
+    if exposure_us is None or iso is None:
+        return on_now
+    if height_valid and height_m > max_height_m:
+        return False
+    if exposure_us < 400.0:                      # bright: sunlight
+        return False
+    if exposure_us >= 1200.0 and iso > 400.0:    # dark: dusk / night / indoors
+        return True
+    return on_now
+
+
 def tf03_glitch_hold(state, tf03_h, tf03_valid, airborne, armed, now, hold_s=0.5):
     """Change T: hold the last good TF03 height through a short dropout in flight.
 
@@ -711,6 +729,11 @@ def main():
         _f04_paused = False
         _vio_blind = True
         _low_loiter_guard_t = 0.0   # change S: last ALT_HOLD request for LOITER without vision
+        exp_hist = deque(maxlen=200)      # mono auto-exposure (us) and ISO, for the IR decision
+        iso_hist = deque(maxlen=200)
+        ir_flood_on = True                # matches the intensity set at startup
+        ir_since = 0.0                    # when the opposite state was first wanted
+        ir_last_change = 0.0
         tf03_hold_state = {"h": 0.0, "t": 0.0}   # change T: last good TF03 height in flight
         tf03_glitch_count = 0
         tf03_glitch_log_t = 0.0
@@ -1025,6 +1048,11 @@ def main():
                 in_mono = mono_pkts[-1] if mono_pkts else None
                 if in_mono is not None:
                     mono_f = in_mono.getCvFrame()
+                    try:
+                        exp_hist.append(in_mono.getExposureTime().total_seconds() * 1e6)
+                        iso_hist.append(float(in_mono.getSensitivity()))
+                    except Exception:
+                        pass
                     try:
                         t_mono_host = in_mono.getTimestamp().total_seconds()
                     except Exception:
@@ -1581,6 +1609,29 @@ def main():
                 if current_altitude_m > max_altitude:
                     max_altitude = current_altitude_m
 
+            # Change IR: daylight/height aware floodlight. Only toggled after the condition holds 5 s
+            # and at most every 10 s, so the image brightness never jumps mid-manoeuvre.
+            if exp_hist and (now - ir_last_change) > 10.0:
+                exp_med = float(np.median(exp_hist)); iso_med = float(np.median(iso_hist)) if iso_hist else 0.0
+                want_ir = ir_flood_target(ir_flood_on, exp_med, iso_med, current_altitude_m,
+                                          height_valid=bool(tf03_valid or on_ground))
+                if want_ir == ir_flood_on:
+                    ir_since = 0.0
+                else:
+                    if ir_since == 0.0:
+                        ir_since = now
+                    elif now - ir_since >= 5.0:
+                        try:
+                            device.setIrFloodLightIntensity(0.7 if want_ir else 0.0)
+                            ir_flood_on = want_ir
+                            ir_last_change = now
+                            ir_since = 0.0
+                            logging.info(f"[+] IR floodlight {'ON' if want_ir else 'OFF'} "
+                                         f"(exposure {exp_med:.0f} us, ISO {iso_med:.0f}, {current_altitude_m:.1f} m)")
+                        except Exception as e:
+                            ir_since = 0.0
+                            logging.warning(f"[-] IR floodlight switch failed: {e}")
+
             # Periodic Status Log every 3 seconds
             if now - last_status_log_time >= 3.0:
                 last_status_log_time = now
@@ -1597,11 +1648,13 @@ def main():
                 tf03_volt = getattr(cuav, 'tf03_voltage', 0.0)
                 stereo_str = f"Depth:{raw_depth_m:.2f}m({depth_pts}p)" if (now - last_valid_depth_time <= 0.5) else "Depth:N/A"
                 tf03_log = f"TF03_H={tf03_h:.2f}m (V:{tf03_volt:.3f}V) {stereo_str} [{height_source}]"
+                cam_str = (f"Exp:{np.median(exp_hist):.0f}us ISO:{np.median(iso_hist) if iso_hist else 0:.0f} "
+                           f"IR:{'ON' if ir_flood_on else 'OFF'}") if exp_hist else "Exp:n/a"
                 aruco_badge = f"[ARUCO#0 LOCKED dN:{last_aruco_offset[0]:+.2f}m dE:{last_aruco_offset[1]:+.2f}m]" if (now - last_aruco_lock_time <= 1.0) else "[ARUCO: SEARCHING]"
                 vel_status = f"Vel: N:{filtered_vel_north:+.2f} E:{filtered_vel_east:+.2f}m/s"
                 logging.info(
                     f"[VIO {fps:.1f} FPS | Drops:{total_dropped_frames} Skip:{total_skipped_frames}] Pos: N:{pos_north:+05.2f}m E:{pos_east:+05.2f}m Z:{current_altitude_m:04.2f}m (Yaw:{yaw_deg:+.1f}°) | "
-                    f"{vel_status} | {aruco_badge} | {tf03_log} | "
+                    f"{vel_status} | {aruco_badge} | {tf03_log} | {cam_str} | "
                     f"Lat: {total_latency_ms:.1f}ms (xfer:{transport_ms:.1f}ms proc:{proc_ms:.1f}ms send:{send_ms:.1f}ms) | "
                     f"VIO Sent: {vio_sent_count} | {cuav_str} | {shield_badge} {gps_diag}"
                 )
