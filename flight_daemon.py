@@ -1613,7 +1613,8 @@ def main():
             # and at most every 10 s, so the image brightness never jumps mid-manoeuvre.
             if exp_hist and (now - ir_last_change) > 10.0:
                 exp_med = float(np.median(exp_hist)); iso_med = float(np.median(iso_hist)) if iso_hist else 0.0
-                want_ir = ir_flood_target(ir_flood_on, exp_med, iso_med, current_altitude_m,
+                ir_height = 0.0 if on_ground else current_altitude_m
+                want_ir = ir_flood_target(ir_flood_on, exp_med, iso_med, ir_height,
                                           height_valid=bool(tf03_valid or on_ground))
                 if want_ir == ir_flood_on:
                     ir_since = 0.0
