@@ -81,11 +81,12 @@ class LongBaselineTracks:
 class JetsonLKWorker(threading.Thread):
     """LK optical flow on the newest mono frame. Results: (t0, t1, tx, ty, inliers, proc_ms)."""
 
-    def __init__(self, cx, cy, n_features=150, refresh_below=90):
+    def __init__(self, cx, cy, n_features=150, refresh_below=90, max_gap_s=0.10):
         super().__init__(daemon=True)
         self.cx, self.cy = cx, cy
         self.n_features = n_features
         self.refresh_below = refresh_below
+        self.max_gap_s = max_gap_s
         self._cv = threading.Condition()
         self._job = None
         self._results = deque(maxlen=64)
@@ -122,7 +123,7 @@ class JetsonLKWorker(threading.Thread):
             t_start = time.perf_counter()
             try:
                 if (prev_img is not None and prev_pts is not None and len(prev_pts) >= 8
-                        and 0.0 < t - prev_t < 0.10):
+                        and 0.0 < t - prev_t < self.max_gap_s):
                     p1, st, _ = cv2.calcOpticalFlowPyrLK(prev_img, img, prev_pts, None, winSize=(15, 15),
                                                          maxLevel=2, criteria=crit)
                     good = st.ravel() == 1
@@ -135,7 +136,7 @@ class JetsonLKWorker(threading.Thread):
                         prev_pts = p1[good].reshape(-1, 1, 2)
                     else:
                         prev_pts = None
-                elif prev_t is not None and not (0.0 < t - prev_t < 0.10):
+                elif prev_t is not None and not (0.0 < t - prev_t < self.max_gap_s):
                     prev_pts = None
                 if prev_pts is None or len(prev_pts) < self.refresh_below:
                     prev_pts = cv2.goodFeaturesToTrack(img, self.n_features, 0.01, 8, blockSize=5)

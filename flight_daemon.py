@@ -219,7 +219,7 @@ def setup_logging(test_mode=False):
     logging.info("=" * 65)
     return log_file
 
-def build_oak_pipeline(max_exposure_us=3000, max_iso=1200):
+def build_oak_pipeline(max_exposure_us=3000, max_iso=1200, rgb_shadow=False, rgb_autofocus=False):
     pipeline = dai.Pipeline()
 
     board_config = dai.BoardConfig()
@@ -269,6 +269,30 @@ def build_oak_pipeline(max_exposure_us=3000, max_iso=1200):
     xout_imu.setStreamName("imu")
     imu.out.link(xout_imu.input)
 
+    if rgb_shadow:
+        # Shadow only: 12MP sensor, centre 640x400 crop in native pixels (fx stays ~2900) so the
+        # bandwidth stays small. Logged for comparison with the mono flow, never used for control.
+        rgb = pipeline.create(dai.node.ColorCamera)
+        rgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)
+        rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_4_K)
+        rgb.setFps(10); rgb.setInterleaved(False)   # 10 Hz: enough to compare, keeps the ISP off the mono path
+        if rgb_autofocus:
+            rgb.initialControl.setAutoFocusMode(dai.CameraControl.AutoFocusMode.CONTINUOUS_VIDEO)  # bench only
+        else:
+            rgb.initialControl.setManualFocus(0)              # infinity, as in flight
+        rgb.initialControl.setAutoExposureEnable()
+        rgb.initialControl.setAutoExposureLimit(max_exposure_us)
+        w, h = rgb.getIspSize()
+        fw, fh = 640.0 / w, 400.0 / h
+        manip = pipeline.create(dai.node.ImageManip)
+        manip.initialConfig.setCropRect(0.5 - fw / 2, 0.5 - fh / 2, 0.5 + fw / 2, 0.5 + fh / 2)
+        manip.initialConfig.setFrameType(dai.ImgFrame.Type.GRAY8)
+        manip.setMaxOutputFrameSize(640 * 400 * 3)
+        rgb.isp.link(manip.inputImage)
+        xout_rgb = pipeline.create(dai.node.XLinkOut)
+        xout_rgb.setStreamName("rgb")
+        manip.out.link(xout_rgb.input)
+
     return pipeline
 
 
@@ -290,6 +314,8 @@ def main():
     parser.add_argument("--save-images", action="store_true", default=True, help="Save camera and ArUco detection frames to disk (default: True)")
     parser.add_argument("--port", type=str, default="/dev/ttyTHS1", help="Primary serial/UART port for CUAV (default: /dev/ttyTHS1)")
     parser.add_argument("--no-save-images", dest="save_images", action="store_false", help="Disable saving images")
+    parser.add_argument("--rgb-shadow", action="store_true", default=False, help="Also run LK flow on a centre crop of the RGB camera and log it (shadow only, never sent to the FC)")
+    parser.add_argument("--rgb-af", action="store_true", default=False, help="Bench only: autofocus the RGB shadow camera (flight uses infinity focus)")
     parser.add_argument("--rc-drift-report", action="store_true", help="Enable RC input drift analysis reporting")
     parser.add_argument("--outdoor-gps", action="store_true", default=False, help="Enable automatic GPS switching outdoors if GPS fix is strong")
     args = parser.parse_args()
@@ -347,7 +373,7 @@ def main():
     dist_coeffs = np.zeros((4, 1), dtype=np.float32)
 
     # Connect to OAK-D Pro camera with retry loop (up to 30 seconds for cold boot)
-    pipeline = build_oak_pipeline(args.max_exposure, args.max_iso)
+    pipeline = build_oak_pipeline(args.max_exposure, args.max_iso, args.rgb_shadow, args.rgb_af)
     device = None
     max_retries = 25
     for attempt in range(1, max_retries + 1):
@@ -400,7 +426,16 @@ def main():
         # Queues for 640x400 Mono @ 60 FPS, 640x400 Stereo Depth & 400 Hz IMU (RGB OFF)
         q_mono = device.getOutputQueue(name="mono", maxSize=2, blocking=False)
         q_depth = None  # StereoDepth removed — TF03 LiDAR provides hardware altitude
-        q_rgb = None
+        q_rgb = device.getOutputQueue(name="rgb", maxSize=2, blocking=False) if args.rgb_shadow else None
+        fx_rgb = 2915.0
+        if args.rgb_shadow:
+            try:
+                iw, ih = 3840, 2160
+                K_rgb = np.array(device.readCalibration().getCameraIntrinsics(dai.CameraBoardSocket.CAM_A, iw, ih))
+                fx_rgb = float(K_rgb[0][0])
+                logging.info(f"[+] RGB shadow flow ON: 4K centre crop 640x400, fx={fx_rgb:.0f} (mono fx={focal_length_px:.0f})")
+            except Exception as e:
+                logging.warning(f"[-] RGB shadow: calibration read failed ({e}), using fx={fx_rgb:.0f}")
         q_imu = device.getOutputQueue(name="imu", maxSize=20, blocking=False)
         q_features = device.getOutputQueue(name="features", maxSize=4, blocking=False)
         ft_prev_features = {}  # id -> (x,y) from previous frame
@@ -644,6 +679,17 @@ def main():
         SHADOW_BASELINE_S = 0.08
         lb_tracks = LongBaselineTracks(cx_f, cy_f, baseline_s=SHADOW_BASELINE_S)
         jlk_worker = JetsonLKWorker(cx_f, cy_f)
+        rgb_worker = JetsonLKWorker(320.0, 200.0, max_gap_s=0.30) if args.rgb_shadow else None
+        rgb_win = deque(maxlen=64)
+        rgb_last_logged_t = 0.0
+        rgb_log = None
+        if args.rgb_shadow:
+            try:
+                rgb_log = open(os.path.join(LOG_DIR, "flow_shadow_rgb.csv"), "a", buffering=65536)
+                if rgb_log.tell() == 0:
+                    rgb_log.write("wall,t_frame,armed,airborne,h_opt,heading,fx,vn_sent,ve_sent,vn_R,ve_R,inl_R,span_R,ms_R\n")
+            except Exception:
+                rgb_log = None
         jlk_win = deque(maxlen=64)
         lb_res = None
         aruco_locked = False
@@ -1038,6 +1084,14 @@ def main():
                 corners, ids = None, None
                 aruco_img, t_aruco_frame = None, None
                 lb_res = None
+                if q_rgb is not None:
+                    rgb_pkts = q_rgb.tryGetAll()
+                    if rgb_pkts:
+                        rf = rgb_pkts[-1]
+                        try:
+                            rgb_worker.submit(rf.getCvFrame(), rf.getTimestamp().total_seconds())
+                        except Exception:
+                            pass
                 if mono_f is not None:
                     aruco_worker.submit(mono_f, t_mono_host)
                     jlk_worker.submit(mono_f, t_mono_host)
@@ -1340,6 +1394,32 @@ def main():
                             f"{filtered_vel_north:.4f},{filtered_vel_east:.4f},{raw_vel_north:.4f},{raw_vel_east:.4f},"
                             f"{n_v[0]:.4f},{n_v[1]:.4f},{n_v[2]},{n_v[3]:.4f},{n_v[4]},"
                             f"{j_v[0]:.4f},{j_v[1]:.4f},{j_v[2]},{j_v[3]:.4f},{j_v[4]:.2f}\n")
+                    except Exception:
+                        pass
+
+                if rgb_log is not None and (cuav.is_armed or args.test):
+                    try:
+                        cos_tilt_r = max(0.70, math.cos(math.radians(oak_pitch_deg)) * math.cos(math.radians(oak_roll_deg)))
+                        h_r = max(0.03, current_altitude_m * cos_tilt_r
+                                  + max(0.0, cuav.camera_ground_clearance_m - cuav.lidar_ground_clearance_m))
+                        hdg_r = cuav.get_flow_heading_deg()
+                        hdg_r = yaw_deg if hdg_r is None else hdg_r
+                        for rt0, rt1, rtx, rty, rn, rms in rgb_worker.pop_results():
+                            td = shadow_tilt_delta(rt0, rt1)
+                            if td is not None and rt1 > rt0:
+                                vn_r, ve_r = px_to_ned_velocity(rtx, rty, DEROT_GAIN * td[0], DEROT_GAIN * td[1],
+                                                                fx_rgb, h_r, hdg_r, rt1 - rt0)
+                                rgb_win.append((rt1, vn_r * (rt1 - rt0), ve_r * (rt1 - rt0), rt1 - rt0, rn, rms))
+                        if rgb_win and rgb_win[-1][0] != rgb_last_logged_t:
+                            rgb_last_logged_t = rgb_win[-1][0]
+                            w = [x for x in rgb_win if x[0] > rgb_win[-1][0] - 0.30]
+                            span = sum(x[3] for x in w)
+                            if span > 0.02:
+                                rgb_log.write(
+                                    f"{time.time():.4f},{rgb_win[-1][0]:.4f},{int(cuav.is_armed)},{int(is_airborne)},"
+                                    f"{h_r:.3f},{hdg_r:.2f},{fx_rgb:.1f},{filtered_vel_north:.4f},{filtered_vel_east:.4f},"
+                                    f"{sum(x[1] for x in w)/span:.4f},{sum(x[2] for x in w)/span:.4f},"
+                                    f"{int(np.median([x[4] for x in w]))},{span:.4f},{float(np.median([x[5] for x in w])):.2f}\n")
                     except Exception:
                         pass
 
@@ -1699,6 +1779,10 @@ def main():
         jlk_worker.stop()
         jlk_worker.join(timeout=1.0)
         shadow_log.close()
+        if rgb_worker is not None:
+            rgb_worker.stop(); rgb_worker.join(timeout=1.0)
+        if rgb_log is not None:
+            rgb_log.close()
     except Exception:
         pass
     cuav.close()
