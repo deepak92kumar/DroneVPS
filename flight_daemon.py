@@ -98,6 +98,30 @@ def lidar_weight(lidar_agl_m, full_trust_m=LIDAR_FULL_TRUST_M, fade_top_m=LIDAR_
     return (fade_top_m - float(lidar_agl_m)) / (fade_top_m - full_trust_m)
 
 
+def baro_offset_trusted(lidar_agl_m, lidar_prev_m, dt_s, weight, airborne, armed, max_rate_ms=0.5):
+    """Should this sample be used to learn the barometer offset?
+
+    Flight 33 showed the offset swinging 0.26-1.60 m in fifteen seconds during a climb: the
+    autopilot's height arrives a few times a second while the lidar reading is current, so during
+    a climb their difference is mostly the climb rate, not the terrain. Only learn while the lidar
+    alone carries the height and the drone is holding altitude.
+    """
+    if not (airborne and armed and weight >= 1.0):
+        return False
+    if lidar_prev_m is None or dt_s <= 0.0:
+        return False
+    return abs(float(lidar_agl_m) - float(lidar_prev_m)) / dt_s <= max_rate_ms
+
+
+def height_source_changed(kind, last_kind, weight, last_weight, band=0.25):
+    """Is this height-source change worth a log line? Flight 33 wrote twenty lines flip-flopping
+    between TF03 and TF03+BARO(100%) as the height crossed 55.0 m. Report a kind change only once
+    the blend has actually moved, so the boundary itself stays quiet."""
+    if kind != last_kind and (last_weight is None or abs(weight - last_weight) >= band):
+        return True
+    return last_weight is not None and abs(weight - last_weight) >= band
+
+
 def track_baro_offset(offset, lidar_agl_m, baro_rel_m, trusted, tau_samples=200.0):
     """Learn (lidar AGL - barometer height above home) while the lidar is trusted.
 
@@ -814,7 +838,11 @@ def main():
         tf03_glitch_count = 0
         tf03_glitch_log_t = 0.0
         baro_agl_offset = None                   # lidar AGL - barometer height above home
+        baro_off_prev_h = None                   # lidar height 0.5 s ago, to spot a climb
+        baro_off_prev_t = 0.0
+        baro_off_trust = False
         height_source_last = ""
+        height_weight_last = None
         _vio_fresh = 0
         VIO_FRESH_FRAMES = 5
         # Loop runs at 100 FPS. Every 4th frame = 25 Hz VPE+VSE (~5 kB/s). At 50 Hz (~9.9 kB/s) the
@@ -994,6 +1022,7 @@ def main():
             else:
                 on_ground = (not cuav.is_armed) and (getattr(cuav, 'rel_alt_m', 0.0) <= 0.20)
 
+            height_weight = 1.0      # share of the height taken from the lidar, for the log below
             if on_ground and not is_airborne:
                 current_altitude_m = 0.00
                 height_source = "GROUND_GATE"
@@ -1001,9 +1030,13 @@ def main():
             elif tf03_valid and drone_agl_from_lidar > GROUND_AGL_M:
                 baro_rel = max(0.0, getattr(cuav, 'rel_alt_m', 0.0))
                 w = lidar_weight(drone_agl_from_lidar)
+                if now - baro_off_prev_t >= 0.5:
+                    baro_off_trust = baro_offset_trusted(
+                        drone_agl_from_lidar, baro_off_prev_h, now - baro_off_prev_t,
+                        w, is_airborne, cuav.is_armed)
+                    baro_off_prev_h, baro_off_prev_t = drone_agl_from_lidar, now
                 baro_agl_offset = track_baro_offset(
-                    baro_agl_offset, drone_agl_from_lidar, baro_rel,
-                    trusted=(w >= 1.0 and is_airborne and cuav.is_armed))
+                    baro_agl_offset, drone_agl_from_lidar, baro_rel, trusted=baro_off_trust)
                 baro_agl = None if baro_agl_offset is None else max(0.0, baro_rel + baro_agl_offset)
                 if baro_agl is not None and not lidar_agrees_with_baro(drone_agl_from_lidar, baro_agl):
                     w = 0.0          # lidar spike: the barometer carries the height instead
@@ -1014,9 +1047,11 @@ def main():
                     height_m = w * drone_agl_from_lidar + (1.0 - w) * baro_agl
                     height_source = "BARO_AGL" if w <= 0.0 else f"TF03+BARO({w * 100:.0f}%)"
                 current_altitude_m = float(np.clip(height_m, 0.0, MAX_FLOW_ALT_M))
+                height_weight = w
                 _, is_airborne = ground_state(drone_agl_from_lidar, cuav.is_armed, is_airborne)
             elif cuav.is_connected and cuav.is_armed and getattr(cuav, 'rel_alt_m', 0.0) > 0.18:
                 baro_agl = max(0.0, cuav.rel_alt_m + (baro_agl_offset or 0.0))
+                height_weight = 0.0
                 current_altitude_m = float(np.clip(0.85 * current_altitude_m + 0.15 * baro_agl,
                                                    0.0, MAX_FLOW_ALT_M))
                 height_source = "BARO_REL"
@@ -1025,12 +1060,15 @@ def main():
                 height_source = "HOLD"
                 is_airborne = is_airborne and cuav.is_armed
 
-            # The handover is invisible in the numbers, so say when it happens.
+            # The handover is invisible in the numbers, so say when it happens — but only once the
+            # blend has really moved, or the 55 m boundary alone fills the log.
             _src_kind = height_source.split("(")[0]
-            if is_airborne and _src_kind != height_source_last:
+            if is_airborne and height_source_changed(_src_kind, height_source_last,
+                                                     height_weight, height_weight_last):
                 logging.info(f"[+] Flow height source: {height_source} at {current_altitude_m:.1f} m"
                              f" (lidar {drone_agl_from_lidar:.1f} m, baro offset "
                              f"{'n/a' if baro_agl_offset is None else f'{baro_agl_offset:+.2f} m'})")
+                height_weight_last = height_weight
             height_source_last = _src_kind
 
             if (not was_airborne) and is_airborne:

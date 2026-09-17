@@ -75,3 +75,49 @@ def test_ordinary_lidar_noise_is_accepted():
 
 def test_no_barometer_reference_yet_means_trust_the_lidar():
     assert lidar_agrees_with_baro(20.0, None)
+
+
+# --- learned from flight 33 (17 Sep 2026) -------------------------------------------------
+
+from flight_daemon import baro_offset_trusted, height_source_changed
+
+
+def test_offset_is_not_learned_while_climbing():
+    """Flight 33: the offset swung 0.26-1.60 m in fifteen seconds of climb, because the
+    autopilot's height lags the lidar and the difference becomes the climb rate."""
+    climbing = baro_offset_trusted(lidar_agl_m=57.0, lidar_prev_m=55.0, dt_s=0.5,
+                                   weight=1.0, airborne=True, armed=True)   # 4 m/s
+    assert climbing is False
+
+
+def test_offset_is_learned_while_holding_altitude():
+    holding = baro_offset_trusted(lidar_agl_m=55.1, lidar_prev_m=55.0, dt_s=0.5,
+                                  weight=1.0, airborne=True, armed=True)    # 0.2 m/s
+    assert holding is True
+
+
+def test_offset_is_not_learned_on_the_ground_or_inside_the_fade():
+    assert not baro_offset_trusted(55.0, 55.0, 0.5, 1.0, airborne=False, armed=True)
+    assert not baro_offset_trusted(55.0, 55.0, 0.5, 1.0, airborne=True, armed=False)
+    assert not baro_offset_trusted(60.0, 60.0, 0.5, 0.6, airborne=True, armed=True)
+
+
+def test_offset_needs_a_previous_sample():
+    assert not baro_offset_trusted(55.0, None, 0.5, 1.0, True, True)
+    assert not baro_offset_trusted(55.0, 55.0, 0.0, 1.0, True, True)
+
+
+def test_the_55_m_boundary_no_longer_fills_the_log():
+    """Flight 33 wrote twenty lines flip-flopping between TF03 and TF03+BARO(100%)."""
+    assert not height_source_changed("TF03+BARO", "TF03", 1.0, 1.0)
+    assert not height_source_changed("TF03", "TF03+BARO", 1.0, 1.0)
+    assert not height_source_changed("TF03+BARO", "TF03", 0.99, 1.0)
+
+
+def test_a_real_handover_is_still_reported():
+    assert height_source_changed("TF03+BARO", "TF03", 0.70, 1.0)
+    assert height_source_changed("BARO_AGL", "TF03+BARO", 0.0, 0.5)
+
+
+def test_the_first_sample_is_reported():
+    assert height_source_changed("TF03", "", 1.0, None)
