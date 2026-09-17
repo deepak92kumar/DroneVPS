@@ -79,6 +79,49 @@ def ground_state(agl_m, armed, was_airborne):
     return on_ground, airborne
 
 
+# Height used to scale the flow. The old 50 m ceiling silently under-scaled every velocity above
+# it: at 61.9 m on 17 Sep the drone was told it was at 50 m, so the velocity sent to the EKF was
+# 24 % too small. The TF03's 180 m rating is for 90 % reflectivity; over grass the datasheet gives
+# about 70 m, so the lidar is faded out over 55-70 m and the barometer carries the height above it.
+MAX_FLOW_ALT_M = 120.0
+LIDAR_FULL_TRUST_M = 55.0
+LIDAR_FADE_TOP_M = 70.0
+
+
+def lidar_weight(lidar_agl_m, full_trust_m=LIDAR_FULL_TRUST_M, fade_top_m=LIDAR_FADE_TOP_M):
+    """How much of the height comes from the lidar: 1.0 up to full_trust_m, 0.0 above fade_top_m,
+    linear between, so the handover to the barometer has no step in it."""
+    if lidar_agl_m <= full_trust_m:
+        return 1.0
+    if lidar_agl_m >= fade_top_m:
+        return 0.0
+    return (fade_top_m - float(lidar_agl_m)) / (fade_top_m - full_trust_m)
+
+
+def track_baro_offset(offset, lidar_agl_m, baro_rel_m, trusted, tau_samples=200.0):
+    """Learn (lidar AGL - barometer height above home) while the lidar is trusted.
+
+    The lidar measures the ground below; the barometer measures the takeoff point. Without this
+    offset the handover would step by whatever the terrain has done since takeoff. Learned slowly
+    so a single bad lidar sample cannot move it.
+    """
+    if not trusted:
+        return offset
+    meas = float(lidar_agl_m) - float(baro_rel_m)
+    if offset is None:
+        return meas
+    a = 1.0 / max(1.0, tau_samples)
+    return (1.0 - a) * offset + a * meas
+
+
+def lidar_agrees_with_baro(lidar_agl_m, baro_agl_m, tol_m=8.0, tol_frac=0.15):
+    """Is the lidar reading consistent with the barometer's AGL? Log 29 carried an 81.7 m spike
+    while the drone hovered at 4 m; above the ground gate that spike would set the flow scale."""
+    if baro_agl_m is None:
+        return True
+    return abs(float(lidar_agl_m) - float(baro_agl_m)) <= tol_m + tol_frac * float(baro_agl_m)
+
+
 def flow_confidence(height_m, err_per_m=0.05, err_min=0.1, err_max=0.9):
     """Confidence 0-100 for VISION_POSITION_DELTA, from the flow error measured in flight.
 
@@ -770,6 +813,8 @@ def main():
         tf03_hold_state = {"h": 0.0, "t": 0.0}   # change T: last good TF03 height in flight
         tf03_glitch_count = 0
         tf03_glitch_log_t = 0.0
+        baro_agl_offset = None                   # lidar AGL - barometer height above home
+        height_source_last = ""
         _vio_fresh = 0
         VIO_FRESH_FRAMES = 5
         # Loop runs at 100 FPS. Every 4th frame = 25 Hz VPE+VSE (~5 kB/s). At 50 Hz (~9.9 kB/s) the
@@ -954,17 +999,39 @@ def main():
                 height_source = "GROUND_GATE"
                 is_airborne = False
             elif tf03_valid and drone_agl_from_lidar > GROUND_AGL_M:
-                current_altitude_m = float(np.clip(drone_agl_from_lidar, 0.0, 50.0))
-                height_source = f"TF03({getattr(cuav, 'tf03_msg_type', 'LIDAR')})"
+                baro_rel = max(0.0, getattr(cuav, 'rel_alt_m', 0.0))
+                w = lidar_weight(drone_agl_from_lidar)
+                baro_agl_offset = track_baro_offset(
+                    baro_agl_offset, drone_agl_from_lidar, baro_rel,
+                    trusted=(w >= 1.0 and is_airborne and cuav.is_armed))
+                baro_agl = None if baro_agl_offset is None else max(0.0, baro_rel + baro_agl_offset)
+                if baro_agl is not None and not lidar_agrees_with_baro(drone_agl_from_lidar, baro_agl):
+                    w = 0.0          # lidar spike: the barometer carries the height instead
+                if w >= 1.0 or baro_agl is None:
+                    height_m = drone_agl_from_lidar
+                    height_source = f"TF03({getattr(cuav, 'tf03_msg_type', 'LIDAR')})"
+                else:
+                    height_m = w * drone_agl_from_lidar + (1.0 - w) * baro_agl
+                    height_source = "BARO_AGL" if w <= 0.0 else f"TF03+BARO({w * 100:.0f}%)"
+                current_altitude_m = float(np.clip(height_m, 0.0, MAX_FLOW_ALT_M))
                 _, is_airborne = ground_state(drone_agl_from_lidar, cuav.is_armed, is_airborne)
             elif cuav.is_connected and cuav.is_armed and getattr(cuav, 'rel_alt_m', 0.0) > 0.18:
-                baro_agl = max(0.0, cuav.rel_alt_m)
-                current_altitude_m = float(np.clip(0.85 * current_altitude_m + 0.15 * baro_agl, 0.0, 50.0))
+                baro_agl = max(0.0, cuav.rel_alt_m + (baro_agl_offset or 0.0))
+                current_altitude_m = float(np.clip(0.85 * current_altitude_m + 0.15 * baro_agl,
+                                                   0.0, MAX_FLOW_ALT_M))
                 height_source = "BARO_REL"
                 is_airborne = True
             else:
                 height_source = "HOLD"
                 is_airborne = is_airborne and cuav.is_armed
+
+            # The handover is invisible in the numbers, so say when it happens.
+            _src_kind = height_source.split("(")[0]
+            if is_airborne and _src_kind != height_source_last:
+                logging.info(f"[+] Flow height source: {height_source} at {current_altitude_m:.1f} m"
+                             f" (lidar {drone_agl_from_lidar:.1f} m, baro offset "
+                             f"{'n/a' if baro_agl_offset is None else f'{baro_agl_offset:+.2f} m'})")
+            height_source_last = _src_kind
 
             if (not was_airborne) and is_airborne:
                 dyaw = ((yaw_deg - last_ground_yaw_deg + 180.0) % 360.0) - 180.0
