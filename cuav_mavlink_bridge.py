@@ -494,6 +494,40 @@ class CuavMavlinkClient:
                 _log.error(f"[!] VISION_SPEED_ESTIMATE send failed: {e}")
             return False
 
+    def send_vision_position_delta(self, dt_s, angle_delta, position_delta, confidence):
+        """VISION_POSITION_DELTA (ArduPilot): body-frame deltas over dt_s.
+
+        ArduPilot feeds this to EKF3 writeBodyFrameOdom, which scales the velocity observation error
+        linearly from EK3_VIS_VERR_MIN (at confidence 100) to EK3_VIS_VERR_MAX (at confidence 0).
+        That is the only path where the flow's error can follow the height; VISION_SPEED_ESTIMATE
+        always uses the fixed VISO_VEL_M_NSE, and ODOMETRY's quality only gates the data.
+        Body frame: x forward, y right, z down. angle_delta in radians.
+        """
+        if not self.is_connected or not self.master:
+            return False
+        try:
+            usec = int(time.monotonic() * 1e6)
+            with self._lock:
+                mav_ref = self.master
+            if mav_ref is None:
+                return False
+            mav_ref.mav.srcSystem = 255
+            mav_ref.mav.srcComponent = mavutil.mavlink.MAV_COMP_ID_ONBOARD_COMPUTER
+            mav_ref.mav.vision_position_delta_send(
+                usec,
+                int(max(0.0, dt_s) * 1e6),
+                [float(angle_delta[0]), float(angle_delta[1]), float(angle_delta[2])],
+                [float(position_delta[0]), float(position_delta[1]), float(position_delta[2])],
+                float(confidence),
+            )
+            return True
+        except Exception as e:
+            if not getattr(self, '_vpd_err_logged', False):
+                self._vpd_err_logged = True
+                import logging as _log
+                _log.error(f"[!] VISION_POSITION_DELTA send failed: {e}")
+            return False
+
     def send_landing_target(self, angle_x_rad, angle_y_rad, distance_m, size_x_rad=0.0, size_y_rad=0.0,
                             time_usec=None):
         """MAVLink LANDING_TARGET for ArduPilot precland / precision loiter (PLND_TYPE=1).

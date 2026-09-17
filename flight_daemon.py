@@ -79,6 +79,17 @@ def ground_state(agl_m, armed, was_airborne):
     return on_ground, airborne
 
 
+def flow_confidence(height_m, err_per_m=0.05, err_min=0.1, err_max=0.9):
+    """Confidence 0-100 for VISION_POSITION_DELTA, from the flow error measured in flight.
+
+    ArduPilot maps confidence 100 to EK3_VIS_VERR_MIN (0.1 m/s) and 0 to EK3_VIS_VERR_MAX (0.9),
+    which is the only way to make the EKF's trust follow the height. Flights 26-28 measured roughly
+    0.15 m/s at 3 m, 0.4 at 10 m and 0.9-1.9 at 20 m, i.e. about 0.05 m/s per metre of height.
+    """
+    err = min(max(err_per_m * max(float(height_m), 0.0), err_min), err_max)
+    return max(0.0, min(100.0, 100.0 * (err_max - err) / (err_max - err_min)))
+
+
 def ir_flood_target(on_now, height_m, height_valid=True, off_above_m=2.5, on_below_m=1.8):
     """Should the IR floodlight be on? Decided by height alone.
 
@@ -349,6 +360,7 @@ def main():
     parser.add_argument("--save-images", action="store_true", default=True, help="Save camera and ArUco detection frames to disk (default: True)")
     parser.add_argument("--port", type=str, default="/dev/ttyTHS1", help="Primary serial/UART port for CUAV (default: /dev/ttyTHS1)")
     parser.add_argument("--no-save-images", dest="save_images", action="store_false", help="Disable saving images")
+    parser.add_argument("--vel-delta", action="store_true", default=False, help="Send VISION_POSITION_DELTA (confidence scales the EKF velocity trust with height) instead of VISION_SPEED_ESTIMATE")
     parser.add_argument("--rgb-shadow", action="store_true", default=False, help="Also run LK flow on a centre crop of the RGB camera and log it (shadow only, never sent to the FC)")
     parser.add_argument("--rgb-af", action="store_true", default=False, help="Bench only: autofocus the RGB shadow camera (flight uses infinity focus)")
     parser.add_argument("--rc-drift-report", action="store_true", help="Enable RC input drift analysis reporting")
@@ -546,7 +558,7 @@ def main():
                     pass
                 try:
                     g = packet.gyroscope
-                    gyro_hist.append((g.getTimestamp().total_seconds(), float(g.x), float(g.y)))
+                    gyro_hist.append((g.getTimestamp().total_seconds(), float(g.x), float(g.y), float(g.z)))
                 except Exception:
                     pass
 
@@ -569,10 +581,10 @@ def main():
             return (newest[1], newest[2]), False
 
         def gyro_tilt_delta(t0, t1):
-            """Integrate gyro x/y (rad) over [t0, t1] (host-synced s); None if samples do not cover it."""
+            """Integrate gyro x/y/z (rad) over [t0, t1] (host-synced s); None if samples do not cover it."""
             if t1 <= t0 or len(gyro_hist) < 2 or gyro_hist[0][0] > t0 or gyro_hist[-1][0] < t1:
                 return None
-            sx = sy = 0.0
+            sx = sy = sz = 0.0
             prev = None
             for s in gyro_hist:
                 if prev is not None and prev[0] >= t1:
@@ -586,8 +598,9 @@ def main():
                         k0, k1 = (a0 - ta) / (tb - ta), (a1 - ta) / (tb - ta)
                         sx += 0.5 * ((prev[1] + (s[1] - prev[1]) * k0) + (prev[1] + (s[1] - prev[1]) * k1)) * (a1 - a0)
                         sy += 0.5 * ((prev[2] + (s[2] - prev[2]) * k0) + (prev[2] + (s[2] - prev[2]) * k1)) * (a1 - a0)
+                        sz += 0.5 * ((prev[3] + (s[3] - prev[3]) * k0) + (prev[3] + (s[3] - prev[3]) * k1)) * (a1 - a0)
                 prev = s
-            return sx, sy
+            return sx, sy, sz
 
         def shadow_tilt_delta(t0, t1):
             """(droll, dpitch, source) over [t0, t1] from the live flow's tilt source, else None."""
@@ -752,6 +765,8 @@ def main():
         ir_flood_on = True                # matches the intensity set at startup
         ir_since = 0.0                    # when the opposite state was first wanted
         ir_last_change = 0.0
+        # change V: body-frame deltas accumulated between sends for VISION_POSITION_DELTA
+        delta_acc = {"fwd": 0.0, "right": 0.0, "r": 0.0, "p": 0.0, "y": 0.0, "dt": 0.0}
         tf03_hold_state = {"h": 0.0, "t": 0.0}   # change T: last good TF03 height in flight
         tf03_glitch_count = 0
         tf03_glitch_log_t = 0.0
@@ -1348,6 +1363,13 @@ def main():
 
                                 pos_north += eff_delta_north
                                 pos_east  += eff_delta_east
+                                if args.vel_delta:
+                                    delta_acc["fwd"] += dy_body
+                                    delta_acc["right"] += dx_body
+                                    delta_acc["r"] += _droll
+                                    delta_acc["p"] += _dpitch
+                                    delta_acc["y"] += (_gd[2] if _gd is not None and len(_gd) > 2 else 0.0)
+                                    delta_acc["dt"] += dt
                                 total_traveled += step_dist
                                 live_speed = step_dist / dt
                                 # #region agent log
@@ -1537,6 +1559,9 @@ def main():
 
                         # Airborne + untrusted: send nothing. A fake 0,0 / 0 m/s would be fused as truth.
                         suppress_vio = bool(is_airborne and not trust_vision)
+                        if suppress_vio or _vio_blind:
+                            for _k in delta_acc:
+                                delta_acc[_k] = 0.0
                         sent_p = False
                         sent = False
                         if not suppress_vio:
@@ -1547,7 +1572,21 @@ def main():
                                 yaw_rad=math.radians(yaw_deg),
                                 pos_cov=pos_cov,
                             )
-                            sent = cuav.send_vision_speed(vx=vn, vy=ve, vz=0.0, vel_cov=vel_cov)
+                            if args.vel_delta:
+                                # One velocity path only: both would be fused twice.
+                                if delta_acc["dt"] > 0.005:
+                                    conf = flow_confidence(current_altitude_m)
+                                    sent = cuav.send_vision_position_delta(
+                                        delta_acc["dt"],
+                                        (delta_acc["r"], delta_acc["p"], delta_acc["y"]),
+                                        (delta_acc["fwd"], delta_acc["right"], 0.0),
+                                        conf)
+                                else:
+                                    sent = False
+                                for _k in delta_acc:
+                                    delta_acc[_k] = 0.0
+                            else:
+                                sent = cuav.send_vision_speed(vx=vn, vy=ve, vz=0.0, vel_cov=vel_cov)
                         if sent or sent_p:
                             vio_sent_count += 1
                         if ready_to_fuse and (not getattr(cuav, '_vio_trust_announced', False)):
