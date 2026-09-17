@@ -79,20 +79,19 @@ def ground_state(agl_m, armed, was_airborne):
     return on_ground, airborne
 
 
-def ir_flood_target(on_now, exposure_us, iso, height_m, max_height_m=5.0, height_valid=True):
-    """Should the IR floodlight be on? Daylight is read from the auto-exposure the camera settles at.
+def ir_flood_target(on_now, height_m, height_valid=True, off_above_m=2.5, on_below_m=1.8):
+    """Should the IR floodlight be on? Decided by height alone.
 
-    Bench: indoors the mono camera sits at its 1500 us limit with ISO ~1000; in sunlight it drops to a
-    few hundred us at ISO ~100. The flood only reaches a few metres, so it is pointless high up and in
-    daylight, where it only costs power and heat. Hysteresis keeps it from flickering at dusk.
+    The 700 mA flood reaches a couple of metres, so above ~2.5 m it only costs power and heat, and
+    switching it there changes nothing in the image. Brightness cannot be used to detect daylight
+    here: the camera sits 3.5 cm above ground, so with the flood on it reads its own light (100 us
+    exposure) and with it off it reads the drone's shadow (1500 us) - the rule would oscillate.
     """
-    if exposure_us is None or iso is None:
+    if not height_valid:
         return on_now
-    if height_valid and height_m > max_height_m:
+    if height_m > off_above_m:
         return False
-    if exposure_us < 400.0:                      # bright: sunlight
-        return False
-    if exposure_us >= 1200.0 and iso > 400.0:    # dark: dusk / night / indoors
+    if height_m < on_below_m:
         return True
     return on_now
 
@@ -1627,11 +1626,11 @@ def main():
 
             # Change IR: daylight/height aware floodlight. Only toggled after the condition holds 5 s
             # and at most every 10 s, so the image brightness never jumps mid-manoeuvre.
-            # Frozen while airborne: a brightness step mid-flight would disturb the flow.
-            if exp_hist and (not is_airborne) and (now - ir_last_change) > 10.0:
-                exp_med = float(np.median(exp_hist)); iso_med = float(np.median(iso_hist)) if iso_hist else 0.0
+            if (now - ir_last_change) > 10.0:
+                exp_med = float(np.median(exp_hist)) if exp_hist else 0.0
+                iso_med = float(np.median(iso_hist)) if iso_hist else 0.0
                 ir_height = 0.0 if on_ground else current_altitude_m
-                want_ir = ir_flood_target(ir_flood_on, exp_med, iso_med, ir_height,
+                want_ir = ir_flood_target(ir_flood_on, ir_height,
                                           height_valid=bool(tf03_valid or on_ground))
                 if want_ir == ir_flood_on:
                     ir_since = 0.0
@@ -1644,8 +1643,8 @@ def main():
                             ir_flood_on = want_ir
                             ir_last_change = now
                             ir_since = 0.0
-                            logging.info(f"[+] IR floodlight {'ON' if want_ir else 'OFF'} "
-                                         f"(exposure {exp_med:.0f} us, ISO {iso_med:.0f}, {current_altitude_m:.1f} m)")
+                            logging.info(f"[+] IR floodlight {'ON' if want_ir else 'OFF'} at {ir_height:.1f} m "
+                                         f"(exposure {exp_med:.0f} us, ISO {iso_med:.0f})")
                         except Exception as e:
                             ir_since = 0.0
                             logging.warning(f"[-] IR floodlight switch failed: {e}")
