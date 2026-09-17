@@ -503,10 +503,11 @@ def main():
         imu_att_hist = deque(maxlen=128)
         # Measured on this OAK @100 FPS: IMU lands 1-12 ms after its frame; 15 ms brackets 98.5% of frames.
         IMU_SYNC_WAIT_S = 0.015
-        # Change K: image shift per radian of tilt is ~1.2*f, not f. Log 24 (6-9 m, IMU accel as truth):
-        # with 1.0 the flow read lateral velocity changes 1.6-1.7x too large; 1.2 gave gain 1.05-1.11
-        # and the lowest error. Log 20 debug showed the same ~0.35 residual on both image axes.
-        DEROT_GAIN = 1.2
+        # Derotation scale. 1.2 came from log 24 with FC accelerometers as truth, but that log had
+        # heavy vibration (VibeZ 40+) so the reference was unreliable. Fitting the per-frame residual
+        # against the rotation shift on two later flights gives 0.95-1.06 (log 25) and 0.89/0.96
+        # (log 26, clean 3 m hover, VibeZ 27): 1.2 over-corrects by 20-26 %. Back to 1.0.
+        DEROT_GAIN = 1.0
         # Change F: tilt between frames from integrated gyro. The rotation vector is smoothed and
         # under-reads fast tilt (flight fits: 525-680 px/rad vs f=396). (host ts s, gx, gy) rad/s.
         gyro_hist = deque(maxlen=512)
