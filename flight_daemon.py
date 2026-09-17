@@ -1101,7 +1101,7 @@ def main():
                             flight_record_dir = os.path.join(images_base_dir, datetime.now().strftime(f"{folder_prefix}_%Y%m%d_%H%M%S"))
                             os.makedirs(flight_record_dir, exist_ok=True)
                             logging.info(f"[+] DRONE ARMED: Starting flight recording -> {flight_record_dir}")
-                            logging.info(f"[+] Armed Flight Recording: Saving 2 FPS images to {flight_record_dir}")
+                            logging.info(f"[+] Armed Flight Recording: Saving ~1 FPS images (max 1000) to {flight_record_dir}")
                     else:
                         # Debounce: wait 2.5 seconds of consistent disarm before closing folder
                         if last_armed_state and (now - last_armed_true_time > 2.5):
@@ -1118,7 +1118,9 @@ def main():
                 # Using decoupled AsyncImageLogger so disk I/O NEVER blocks the 30 Hz VIO loop
                 pass
 
-                if flight_record_dir and (frame_count % 15 == 0) and flight_img_seq < 1000:
+                # ~1 image/s: the 1000-image budget then covers a whole flight. At every 15th
+                # frame it ran out after 3 minutes, so the high-altitude part was never recorded.
+                if flight_record_dir and (frame_count % 80 == 0) and flight_img_seq < 1000:
                     flight_img_seq += 1
                     img_path = os.path.join(flight_record_dir, f"frame_{flight_img_seq:05d}.jpg")
                     image_logger.log_image(img_path, mono_f, is_bytes=False)
