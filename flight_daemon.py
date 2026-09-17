@@ -61,6 +61,24 @@ def pick_origin(user_lat, user_lon, default_lat, default_lon):
     return default_lat, default_lon, "DEFAULT"
 
 
+# Ground/airborne thresholds for the analog TF03. On the ground (lens 12.5 cm up) the FC reports
+# ~0.35 m, i.e. 0.22 m AGL: at that range one ADC step is ~10 cm and the sensor is at its 0.1 m
+# minimum, so near-ground readings carry ~0.25 m of uncertainty. The old 0.06/0.18 m thresholds
+# would have called the drone airborne while it stood on the ground.
+GROUND_AGL_M = 0.35
+AIRBORNE_AGL_M = 0.60
+AIRBORNE_HOLD_AGL_M = 0.45
+
+
+def ground_state(agl_m, armed, was_airborne):
+    """(on_ground, is_airborne) from TF03 AGL, with a latch so it does not toggle in the air."""
+    on_ground = agl_m <= GROUND_AGL_M
+    airborne = ((armed and agl_m >= AIRBORNE_AGL_M)
+                or (agl_m >= AIRBORNE_AGL_M + 0.20)
+                or (was_airborne and armed and agl_m >= AIRBORNE_HOLD_AGL_M))
+    return on_ground, airborne
+
+
 def ir_flood_target(on_now, exposure_us, iso, height_m, max_height_m=5.0, height_valid=True):
     """Should the IR floodlight be on? Daylight is read from the auto-exposure the camera settles at.
 
@@ -907,13 +925,12 @@ def main():
                 if now - tf03_glitch_log_t >= 2.0:
                     tf03_glitch_log_t = now
                     logging.warning(f"[!] TF03 dropout in flight: holding {tf03_h:.2f} m ({tf03_glitch_count} samples held)")
-            # Subtract physical mounting clearance (0.11m = 11cm baseline)
+            # Subtract physical mounting clearance (measured 17 Sep: 12.5 cm)
             drone_agl_from_lidar = max(0.0, tf03_h - cuav.lidar_ground_clearance_m)
             was_airborne = is_airborne
 
             if tf03_valid:
-                # Ground threshold: 6cm above landing gear, or disarmed on ground up to 14cm
-                on_ground = (drone_agl_from_lidar <= 0.06) or (not cuav.is_armed and drone_agl_from_lidar <= 0.14)
+                on_ground, _ = ground_state(drone_agl_from_lidar, cuav.is_armed, is_airborne)
             else:
                 on_ground = (not cuav.is_armed) and (getattr(cuav, 'rel_alt_m', 0.0) <= 0.20)
 
@@ -921,11 +938,10 @@ def main():
                 current_altitude_m = 0.00
                 height_source = "GROUND_GATE"
                 is_airborne = False
-            elif tf03_valid and drone_agl_from_lidar > 0.06:
+            elif tf03_valid and drone_agl_from_lidar > GROUND_AGL_M:
                 current_altitude_m = float(np.clip(drone_agl_from_lidar, 0.0, 50.0))
                 height_source = f"TF03({getattr(cuav, 'tf03_msg_type', 'LIDAR')})"
-                # Hysteresis latch: once airborne, stay airborne while armed and >0.10m
-                is_airborne = (cuav.is_armed and current_altitude_m >= 0.18) or (current_altitude_m >= 0.30) or (is_airborne and cuav.is_armed and current_altitude_m >= 0.10)
+                _, is_airborne = ground_state(drone_agl_from_lidar, cuav.is_armed, is_airborne)
             elif cuav.is_connected and cuav.is_armed and getattr(cuav, 'rel_alt_m', 0.0) > 0.18:
                 baro_agl = max(0.0, cuav.rel_alt_m)
                 current_altitude_m = float(np.clip(0.85 * current_altitude_m + 0.15 * baro_agl, 0.0, 50.0))
@@ -1285,7 +1301,7 @@ def main():
                             pure_trans_dy = trans_dy if abs(trans_dy) >= 0.08 else 0.0
 
                             cos_tilt = max(0.70, math.cos(oak_pitch_rad) * math.cos(oak_roll_rad))
-                            cam_lever_m = max(0.0, cuav.camera_ground_clearance_m - cuav.lidar_ground_clearance_m)
+                            cam_lever_m = cuav.camera_ground_clearance_m
                             optical_height_m = max(0.03, current_altitude_m * cos_tilt + cam_lever_m)
                             meter_per_px = optical_height_m / focal_length_px
                             dx_body = -(pure_trans_dx * meter_per_px)
@@ -1392,7 +1408,7 @@ def main():
                     try:
                         cos_tilt_sh = max(0.70, math.cos(math.radians(oak_pitch_deg)) * math.cos(math.radians(oak_roll_deg)))
                         h_sh = max(0.03, current_altitude_m * cos_tilt_sh
-                                   + max(0.0, cuav.camera_ground_clearance_m - cuav.lidar_ground_clearance_m))
+                                   + cuav.camera_ground_clearance_m)
                         hdg_sh = cuav.get_flow_heading_deg()
                         hdg_sh = yaw_deg if hdg_sh is None else hdg_sh
                         n_v = (math.nan, math.nan, 0, 0.0, "")
@@ -1429,7 +1445,7 @@ def main():
                     try:
                         cos_tilt_r = max(0.70, math.cos(math.radians(oak_pitch_deg)) * math.cos(math.radians(oak_roll_deg)))
                         h_r = max(0.03, current_altitude_m * cos_tilt_r
-                                  + max(0.0, cuav.camera_ground_clearance_m - cuav.lidar_ground_clearance_m))
+                                  + cuav.camera_ground_clearance_m)
                         hdg_r = cuav.get_flow_heading_deg()
                         hdg_r = yaw_deg if hdg_r is None else hdg_r
                         for rt0, rt1, rtx, rty, rn, rms in rgb_worker.pop_results():
@@ -1611,7 +1627,8 @@ def main():
 
             # Change IR: daylight/height aware floodlight. Only toggled after the condition holds 5 s
             # and at most every 10 s, so the image brightness never jumps mid-manoeuvre.
-            if exp_hist and (now - ir_last_change) > 10.0:
+            # Frozen while airborne: a brightness step mid-flight would disturb the flow.
+            if exp_hist and (not is_airborne) and (now - ir_last_change) > 10.0:
                 exp_med = float(np.median(exp_hist)); iso_med = float(np.median(iso_hist)) if iso_hist else 0.0
                 ir_height = 0.0 if on_ground else current_altitude_m
                 want_ir = ir_flood_target(ir_flood_on, exp_med, iso_med, ir_height,

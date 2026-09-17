@@ -48,8 +48,8 @@ class CuavMavlinkClient:
 
         # TF03 LiDAR Rangefinder Telemetry & Freshness Tracking
         # LiDAR still on airframe (~11cm). Downward OAK now under battery (~3cm lens-to-floor).
-        self.lidar_ground_clearance_m = 0.11
-        self.camera_ground_clearance_m = 0.03
+        self.lidar_ground_clearance_m = 0.125   # measured 17 Sep: TF03 lens to ground
+        self.camera_ground_clearance_m = 0.035  # measured 17 Sep: camera lens to ground
         self.tf03_h_m = 0.00
         self.tf03_h_age_s = 999.0
         self.tf03_h_valid = False
@@ -556,7 +556,7 @@ class CuavMavlinkClient:
         Returns: (cam_height_m, age_s, is_valid)
         """
         lidar_h, age_s, is_valid = self.get_tf03_height(max_age_s=max_age_s)
-        cam_h = max(self.camera_ground_clearance_m, lidar_h + (self.camera_ground_clearance_m - self.lidar_ground_clearance_m))
+        cam_h = max(self.camera_ground_clearance_m, lidar_h - self.lidar_ground_clearance_m + self.camera_ground_clearance_m)
         return cam_h, age_s, is_valid
 
     def send_distance_sensor(self, distance_m, min_m=0.10, max_m=4.00):
