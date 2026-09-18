@@ -161,6 +161,44 @@ def flow_confidence(height_m, err_per_m=0.05, err_min=0.1, err_max=0.9):
 # field carries fifteen: a nested centre target (45 / 16 / 0) and twelve 1.2 m markers on the grid.
 # ID 15 is the standalone 1.13 m pad - it cannot stay ID 0, because ID 0 is now the 0.12 m marker
 # in the middle of the field target and a single size for both would put the pose out by 9x.
+# Velocity from the long-baseline tracker instead of one frame pair. Measured over 216 856
+# airborne samples (17-18 Sep): below about 30 m the 87 ms baseline cuts the velocity noise by
+# roughly a factor of two, because there the error is mostly fixed per-frame pixel noise and a
+# longer baseline divides it down. Above 40 m it stops helping and then hurts - up there the
+# error is dominated by rotation and timing, which do not shrink with the baseline, while the
+# drone's real motion over 87 ms starts to be blurred away.
+#
+#   height    live      long baseline     gain
+#    5-15 m   1.21 m/s     0.57 m/s       2.14x
+#   20-30 m   2.43 m/s     1.25 m/s       1.95x
+#   30-40 m   2.82 m/s     1.62 m/s       1.74x
+#   40-50 m   3.09 m/s     2.82 m/s       1.09x
+#   50-60 m   3.22 m/s     3.43 m/s       0.94x   - worse
+LB_FULL_M = 30.0
+LB_NONE_M = 40.0
+
+
+def long_baseline_weight(height_m, full_m=LB_FULL_M, none_m=LB_NONE_M):
+    """How much of the velocity comes from the long-baseline tracker, by height."""
+    if height_m <= full_m:
+        return 1.0
+    if height_m >= none_m:
+        return 0.0
+    return (none_m - float(height_m)) / (none_m - full_m)
+
+
+def blend_velocity(live_n, live_e, lb_n, lb_e, weight):
+    """Mix the two velocity estimates. The long-baseline one is dropped whenever it is missing
+    or not finite, so a gap in the tracker can never blank the velocity sent to the autopilot."""
+    if weight <= 0.0 or lb_n is None or lb_e is None:
+        return float(live_n), float(live_e), 0.0
+    if not (math.isfinite(lb_n) and math.isfinite(lb_e)):
+        return float(live_n), float(live_e), 0.0
+    w = max(0.0, min(1.0, float(weight)))
+    return (w * float(lb_n) + (1.0 - w) * float(live_n),
+            w * float(lb_e) + (1.0 - w) * float(live_e), w)
+
+
 MARKER_SIZES_M = {
     45: 3.60, 16: 0.72, 0: 0.12,
     10: 1.20, 18: 1.20, 22: 1.20, 1: 1.20, 2: 1.20, 3: 1.20,
@@ -471,6 +509,9 @@ def main():
     parser.add_argument("--marker-size", type=float, default=0.242,
                         help="Black-square edge in metres for the ID given by --marker-size-id. "
                              "Every other marker uses the built-in table (MARKER_SIZES_M).")
+    parser.add_argument("--lb-velocity", action="store_true",
+                        help="Send the long-baseline (87 ms) flow velocity below 30 m, fading to the "
+                             "single-frame one by 40 m. Measured ~2x less noise low down, none above 40 m.")
     parser.add_argument("--marker-size-id", type=int, default=None,
                         help="Which marker ID --marker-size applies to. Without this the table is used unchanged.")
     parser.add_argument("--no-prec-loiter", dest="prec_loiter", action="store_false", default=True, help="Do not auto-enable ArduPilot Precision Loiter over ArUco #0 in LOITER")
@@ -864,6 +905,8 @@ def main():
         aruco_locked = False
         aruco_cands = []
         aruco_seen_log_t = 0.0
+        lb_vel = None                            # newest long-baseline velocity (vn, ve, t)
+        lb_log_t = 0.0
         aruco_id = None
         is_airborne = False
         last_ground_yaw_deg = 0.0
@@ -1627,6 +1670,7 @@ def main():
                             if span > 0.02:
                                 j_v = (sum(x[1] for x in w) / span, sum(x[2] for x in w) / span,
                                        int(np.median([x[4] for x in w])), span, float(np.median([x[5] for x in w])))
+                                lb_vel = (j_v[0], j_v[1], now)
                         shadow_log.write(
                             f"{time.time():.4f},{(t_frame_host if t_frame_host is not None else math.nan):.4f},"
                             f"{int(cuav.is_armed)},{int(is_airborne)},{int(_vio_blind)},{h_sh:.3f},{hdg_sh:.2f},"
@@ -1704,6 +1748,15 @@ def main():
                                 vel_cov = 1.00
                                 pos_cov = 5.00
                             vn, ve = filtered_vel_north, filtered_vel_east
+                            if args.lb_velocity:
+                                fresh = lb_vel is not None and (now - lb_vel[2]) <= 0.25
+                                vn, ve, lb_w = blend_velocity(
+                                    vn, ve, lb_vel[0] if fresh else None, lb_vel[1] if fresh else None,
+                                    long_baseline_weight(current_altitude_m))
+                                if lb_w > 0.0 and (now - lb_log_t) >= 5.0:
+                                    lb_log_t = now
+                                    logging.info(f"[+] Long-baseline velocity {lb_w * 100:.0f}% "
+                                                 f"at {current_altitude_m:.1f} m")
                             px, py = pos_north, pos_east
                         else:
                             if getattr(cuav, '_vio_trust_announced', False):
