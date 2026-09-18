@@ -157,6 +157,52 @@ def flow_confidence(height_m, err_per_m=0.05, err_min=0.1, err_max=0.9):
     return max(0.0, min(100.0, 100.0 * (err_max - err) / (err_max - err_min)))
 
 
+# Every marker the drone may see, with the width of its black square in metres. The 20 x 20 m
+# field carries fifteen: a nested centre target (45 / 16 / 0) and twelve 1.2 m markers on the grid.
+# ID 15 is the standalone 1.13 m pad - it cannot stay ID 0, because ID 0 is now the 0.12 m marker
+# in the middle of the field target and a single size for both would put the pose out by 9x.
+MARKER_SIZES_M = {
+    45: 3.60, 16: 0.72, 0: 0.12,
+    10: 1.20, 18: 1.20, 22: 1.20, 1: 1.20, 2: 1.20, 3: 1.20,
+    4: 1.20, 5: 1.20, 6: 1.20, 11: 1.20, 12: 1.20, 13: 1.20,
+    15: 1.13,
+}
+MARKER_MIN_PX = 11.0     # flight 30 decoded continuously down to 11.2 px
+
+
+def marker_candidates(ids, corners, sizes=None):
+    """[(id, mean side in px, corners)] for every known marker in the frame, biggest first.
+
+    The daemon used to look only for ID 0 and assume one size for it. On the field target that
+    would read the 0.12 m inner marker as if it were 1.13 m wide.
+    """
+    sizes = MARKER_SIZES_M if sizes is None else sizes
+    if ids is None or corners is None:
+        return []
+    out = []
+    for mid, c in zip(np.asarray(ids).ravel().tolist(), corners):
+        if int(mid) not in sizes:
+            continue
+        q = np.asarray(c, dtype=float).reshape(4, 2)
+        side = float(np.mean([np.linalg.norm(q[i] - q[(i + 1) % 4]) for i in range(4)]))
+        out.append((int(mid), side, q))
+    out.sort(key=lambda r: -r[1])
+    return out
+
+
+def pick_marker(cands, min_px=MARKER_MIN_PX, sizes=None):
+    """The marker to take the pose from: the largest one that is big enough to trust.
+
+    No upper limit is needed. A marker wider than the sensor loses its corners and the detector
+    never returns it, so on the nested target the outer marker simply drops out as the drone
+    descends and the next one down is already the largest left. An upper pixel cap would instead
+    throw away a good detection that the detector had just proved was whole.
+    """
+    sizes = MARKER_SIZES_M if sizes is None else sizes
+    usable = [c for c in cands if c[1] >= min_px]
+    return usable[0] if usable else None
+
+
 def ir_flood_target(on_now, height_m, height_valid=True, off_above_m=2.5, on_below_m=1.8):
     """Should the IR floodlight be on? Decided by height alone.
 
@@ -422,7 +468,11 @@ def main():
                         help="Home/EKF origin altitude MSL in meters (0.0 = auto-read ground baro)")
     parser.add_argument("--max-exposure", type=int, default=1500, help="Max auto exposure microseconds (1.5ms reduces motion blur)")
     parser.add_argument("--max-iso", type=int, default=1200, help="Maximum ISO for auto exposure")
-    parser.add_argument("--marker-size", type=float, default=0.242, help="Outer black-border edge of the printed ArUco marker in meters (measured print: 0.242 m)")
+    parser.add_argument("--marker-size", type=float, default=0.242,
+                        help="Black-square edge in metres for the ID given by --marker-size-id. "
+                             "Every other marker uses the built-in table (MARKER_SIZES_M).")
+    parser.add_argument("--marker-size-id", type=int, default=None,
+                        help="Which marker ID --marker-size applies to. Without this the table is used unchanged.")
     parser.add_argument("--no-prec-loiter", dest="prec_loiter", action="store_false", default=True, help="Do not auto-enable ArduPilot Precision Loiter over ArUco #0 in LOITER")
     parser.add_argument("--save-images", action="store_true", default=True, help="Save camera and ArUco detection frames to disk (default: True)")
     parser.add_argument("--port", type=str, default="/dev/ttyTHS1", help="Primary serial/UART port for CUAV (default: /dev/ttyTHS1)")
@@ -468,13 +518,16 @@ def main():
     aruco_params.cornerRefinementMethod = aruco.CORNER_REFINE_NONE
     aruco_detector = aruco.ArucoDetector(aruco_dict, aruco_params)
     aruco_worker = ArucoWorker(aruco_detector)  # 25 Hz max, newest frame only
-    marker_size_m = float(args.marker_size) # Default 0.25m (25cm) target pad
-    aruco_obj_pts = np.array([
-        [-marker_size_m/2,  marker_size_m/2, 0],
-        [ marker_size_m/2,  marker_size_m/2, 0],
-        [ marker_size_m/2, -marker_size_m/2, 0],
-        [-marker_size_m/2, -marker_size_m/2, 0]
-    ], dtype=np.float32)
+    marker_size_m = float(args.marker_size)
+    marker_sizes = dict(MARKER_SIZES_M)
+    if args.marker_size_id is not None:
+        marker_sizes[int(args.marker_size_id)] = marker_size_m
+        logging.info(f"[+] Marker ID {int(args.marker_size_id)} size overridden to {marker_size_m:.3f} m")
+    logging.info("[+] Marker table: " + ", ".join(f"{k}={v:.2f}m" for k, v in sorted(marker_sizes.items())))
+
+    def _obj_pts(size_m):
+        h = size_m / 2.0
+        return np.array([[-h, h, 0], [h, h, 0], [h, -h, 0], [-h, -h, 0]], dtype=np.float32)
 
     # OV9282 Camera Intrinsics (640x400 default)
     focal_length_px = 396.0
@@ -809,6 +862,9 @@ def main():
         jlk_win = deque(maxlen=64)
         lb_res = None
         aruco_locked = False
+        aruco_cands = []
+        aruco_seen_log_t = 0.0
+        aruco_id = None
         is_airborne = False
         last_ground_yaw_deg = 0.0
         on_ground = True
@@ -1262,28 +1318,38 @@ def main():
                     aruco_worker.submit(mono_f, t_mono_host)
                     jlk_worker.submit(mono_f, t_mono_host)
                 aruco_res = aruco_worker.result_after(aruco_seen_seq)
+                aruco_pick = None
                 if aruco_res is not None:
                     aruco_seen_seq, aruco_img, t_aruco_frame, corners, ids = aruco_res
-                    if ids is not None and 0 in ids:
+                    aruco_cands = marker_candidates(ids, corners, marker_sizes)
+                    aruco_pick = pick_marker(aruco_cands, sizes=marker_sizes)
+                    if aruco_pick is not None:
                         aruco_detect_count += 1
                         last_aruco_lock_time = now
+                    # Every known marker the camera can see, logged whatever we then use it for:
+                    # this is how we learn how high each marker size really decodes.
+                    if aruco_cands and (now - aruco_seen_log_t) >= 2.0:
+                        aruco_seen_log_t = now
+                        seen = " ".join(f"#{m}:{px:.0f}px" for m, px, _ in aruco_cands[:6])
+                        used = f"#{aruco_pick[0]}" if aruco_pick is not None else "none (all below 11 px)"
+                        logging.info(f"[+] Markers at {current_altitude_m:.1f} m: {seen} -> using {used}")
 
                 # Robust Debounce Hold: Keep aruco_locked TRUE for 0.6s after detection
                 # This completely eliminates the locked/unlocked flickering on RC!
                 aruco_locked = (now - last_aruco_lock_time <= 0.6)
-                if ids is not None and 0 in ids:
-                    idx = list(ids.ravel()).index(0)
-                    m_corners = corners[idx].reshape(4, 2)
+                if aruco_pick is not None:
+                    aruco_id, aruco_side_px, m_corners = aruco_pick
+                    aruco_obj_pts = _obj_pts(marker_sizes[aruco_id])
 
                     # Save annotated detection image when ArUco is locked (visual confirmation during flight)
                     if flight_record_dir and (aruco_detect_count % 5 == 1) and flight_img_seq < 1000:
                         flight_img_seq += 1
                         annotated = cv2.cvtColor(aruco_img, cv2.COLOR_GRAY2BGR)
                         cv2.polylines(annotated, [m_corners.astype(np.int32)], True, (0, 255, 0), 2)
-                        cv2.putText(annotated, f"ArUco #0 Locked ({aruco_detect_count})",
+                        cv2.putText(annotated, f"ArUco #{aruco_id} Locked ({aruco_detect_count})",
                                     (int(m_corners[0][0]), max(20, int(m_corners[0][1]) - 8)),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
-                        aruco_img_path = os.path.join(flight_record_dir, f"aruco_{flight_img_seq:05d}_ID0.jpg")
+                        aruco_img_path = os.path.join(flight_record_dir, f"aruco_{flight_img_seq:05d}_ID{aruco_id}.jpg")
                         image_logger.log_image(aruco_img_path, annotated, is_bytes=False)
 
                     sides = [float(np.linalg.norm(m_corners[i] - m_corners[(i + 1) % 4])) for i in range(4)]
