@@ -199,6 +199,73 @@ def blend_velocity(live_n, live_e, lb_n, lb_e, weight):
             w * float(lb_e) + (1.0 - w) * float(live_e), w)
 
 
+# Camera watchdog. On 18 Sep (flight 36) the OAK dropped off the USB bus at 25 m. The main loop
+# blocked inside the camera call, so the daemon simply went quiet: vision stopped, and the pilot
+# learned of it only nine seconds later, from the autopilot's EKF failsafe. A separate thread
+# watches for frames and tells the pilot within a second. It only warns - it never touches
+# the flight mode.
+CAMERA_STALL_S = 1.0
+CAMERA_REPEAT_S = 5.0
+
+
+def camera_watch_step(state, now, last_frame_t, armed,
+                      stall_s=CAMERA_STALL_S, repeat_s=CAMERA_REPEAT_S):
+    """What the camera watchdog should announce now: ("lost", age_s), ("back", age_s) or None.
+
+    state holds whether a loss is being reported and when it was last said. Only while armed:
+    on the ground a paused camera is harmless and a warning would just be noise.
+    """
+    if last_frame_t is None:
+        return None
+    age = now - last_frame_t
+    if state.get("lost"):
+        if age < stall_s:
+            state["lost"] = False
+            return ("back", age)
+        if armed and now - state.get("said", 0.0) >= repeat_s:
+            state["said"] = now
+            return ("lost", age)
+        return None
+    if armed and age >= stall_s:
+        state["lost"] = True
+        state["said"] = now
+        return ("lost", age)
+    return None
+
+
+class CameraWatchdog(threading.Thread):
+    """Warns the pilot when frames stop arriving, from outside the (possibly stuck) main loop."""
+
+    def __init__(self, cuav, frame_clock):
+        super().__init__(daemon=True)
+        self.cuav = cuav
+        self.frame_clock = frame_clock      # one-element list, main loop writes the last frame time
+        self.state = {}
+        self.running = True
+        self.start()
+
+    def run(self):
+        while self.running:
+            try:
+                msg = camera_watch_step(self.state, time.monotonic(), self.frame_clock[0],
+                                        bool(getattr(self.cuav, "is_armed", False)))
+                if msg is not None:
+                    kind, age = msg
+                    if kind == "lost":
+                        text = f">>> CAMERA LOST {age:.0f}s - TAKE ALT_HOLD"
+                        logging.error(f"[!] Camera stalled: no frame for {age:.1f} s")
+                        self.cuav.send_statustext(text, severity=2)
+                    else:
+                        logging.warning("[+] Camera frames flowing again")
+                        self.cuav.send_statustext(">>> CAMERA BACK", severity=4)
+            except Exception:
+                pass
+            time.sleep(0.2)
+
+    def stop(self):
+        self.running = False
+
+
 MARKER_SIZES_M = {
     45: 3.60, 16: 0.72, 0: 0.12,
     10: 1.20, 18: 1.20, 22: 1.20, 1: 1.20, 2: 1.20, 3: 1.20,
@@ -559,6 +626,8 @@ def main():
     aruco_params.cornerRefinementMethod = aruco.CORNER_REFINE_NONE
     aruco_detector = aruco.ArucoDetector(aruco_dict, aruco_params)
     aruco_worker = ArucoWorker(aruco_detector)  # 25 Hz max, newest frame only
+    camera_frame_clock = [None]                 # time of the newest frame, for the watchdog
+    camera_watchdog = CameraWatchdog(cuav, camera_frame_clock)
     marker_size_m = float(args.marker_size)
     marker_sizes = dict(MARKER_SIZES_M)
     if args.marker_size_id is not None:
@@ -1249,6 +1318,7 @@ def main():
                 frame_count += 1
                 total_skipped_frames += ft_skipped
                 t_host_rx = time.monotonic()
+                camera_frame_clock[0] = t_host_rx
                 t_frame_host = None
                 try:
                     t_frame_host = in_ft.getTimestamp().total_seconds()
@@ -2109,6 +2179,7 @@ def main():
         pass
 
     image_logger.stop()
+    camera_watchdog.stop()
     aruco_worker.stop()
     aruco_worker.join(timeout=1.0)  # exiting while detectMarkers runs aborts the interpreter
     try:
