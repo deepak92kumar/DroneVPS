@@ -37,6 +37,11 @@ class CuavMavlinkClient:
         self.pitch_deg = 0.0
         self.yaw_deg = 0.0
         self.rel_alt_m = 0.0
+        # The EKF's own horizontal position (from GLOBAL_POSITION_INT), in metres north/east of the
+        # first position received. Only differences are used, so the reference point does not matter.
+        self.ekf_ne = None
+        self.ekf_ne_time = 0.0
+        self._gpi_ref = None
         self.baro_alt = 0.0
         self.lidar_alt_m = 0.15
         self.climb_rate = 0.0
@@ -264,6 +269,14 @@ class CuavMavlinkClient:
                             self.yaw_deg = msg.hdg / 100.0
                         if msg.lat != 0 and msg.lon != 0:
                             self.origin_set = True
+                            if self._gpi_ref is None:
+                                self._gpi_ref = (msg.lat, msg.lon)
+                            # ArduPilot's own scaling: 1e-7 deg of latitude = 0.011131884502145034 m.
+                            _k = 0.011131884502145034
+                            self.ekf_ne = ((msg.lat - self._gpi_ref[0]) * _k,
+                                           (msg.lon - self._gpi_ref[1]) * _k
+                                           * math.cos(math.radians(self._gpi_ref[0] * 1e-7)))
+                            self.ekf_ne_time = time.time()
                         else:
                             # Lat/Lon is 0 -> Autopilot lacks global origin! Auto-inject every 2.0s until locked
                             now_t = time.time()

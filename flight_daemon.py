@@ -339,22 +339,67 @@ def marker_pos_err_m(height_m):
 FLOW_VEL_OFF_H_M = 35.0
 FLOW_VEL_ON_H_M = 33.0           # hysteresis: back on below this
 FLOW_VEL_OFF_HOLD_S = 1.0        # the marker must have held this long before the velocity stops
+# Flight 42A: 8 s after the velocity stopped the drone really moved 10 m in 3 s. The EKF, on
+# position and IMU alone, saw 3 m, then rejected the (correct) marker position as an outlier and
+# dead-reckoned to -4.8 m/s until it reset itself 8 s later and the drone lurched +25/-27 deg.
+# So the EKF's own position is watched against what is sent: while the velocity is off, a gap
+# growing past max(1.5 m, 4 % of height) brings the velocity back at once (it was 2.9 m 8 s
+# before the reset in 42A; in 42B it stayed under that at 35-55 m). The gap is measured
+# against its value when the velocity stopped, so a constant offset between frames is ignored.
+FLOW_VEL_GAP_MIN_M = 1.5
+FLOW_VEL_GAP_PER_M = 0.04
+FLOW_VEL_CALM_S = 3.0            # the gap must have been steady this long before the velocity stops
+FLOW_VEL_EKF_FRESH_S = 0.5
+FLOW_VEL_REF_TAU_S = 2.0
+FLOW_VEL_GAP_LOCKOUT_S = 10.0    # after the EKF has drifted once, keep the velocity on this long
 
 
-def flow_velocity_wanted(st, now, height_m, marker_holds, off_h=FLOW_VEL_OFF_H_M, on_h=FLOW_VEL_ON_H_M,
-                         hold_s=FLOW_VEL_OFF_HOLD_S):
-    """True when the flow velocity should be sent. Off only above off_h after the marker has held the
-    position for hold_s; back on below on_h, or at once when the marker stops holding it."""
-    if not marker_holds:
-        st["off"] = False
-        st["since"] = None
+def flow_vel_gap_limit(height_m):
+    return max(FLOW_VEL_GAP_MIN_M, FLOW_VEL_GAP_PER_M * max(0.0, height_m))
+
+
+def flow_velocity_wanted(st, now, height_m, marker_holds, ekf_gap=None, off_h=FLOW_VEL_OFF_H_M,
+                         on_h=FLOW_VEL_ON_H_M, hold_s=FLOW_VEL_OFF_HOLD_S, calm_s=FLOW_VEL_CALM_S):
+    """True when the flow velocity should be sent.
+
+    ekf_gap: (north, east) of the EKF's own position minus the position sent, or None when the EKF
+    position is not fresh - then the velocity is always sent. It stops only above off_h after the
+    marker has held for hold_s and the gap has been steady for calm_s, and comes back below on_h,
+    the moment the marker stops holding, or when the gap moves more than flow_vel_gap_limit(h)
+    from where it was when the velocity stopped. st["why"] says why it last came back."""
+    lim = flow_vel_gap_limit(height_m)
+    if not marker_holds or ekf_gap is None:
+        if st.get("off"):
+            st["why"] = "marker lost" if not marker_holds else "no EKF position"
+        st.update(off=False, since=None, ref=None, calm=None)
         return True
+    gn, ge = float(ekf_gap[0]), float(ekf_gap[1])
     if st.get("since") is None:
         st["since"] = now
-    if height_m >= off_h and now - st["since"] >= hold_s:
-        st["off"] = True
-    elif height_m < on_h:
-        st["off"] = False
+    if st.get("off"):
+        b = st["base"]
+        if math.hypot(gn - b[0], ge - b[1]) > lim:
+            st.update(off=False, why=f"EKF off by {math.hypot(gn - b[0], ge - b[1]):.1f} m",
+                      ref=(gn, ge), calm=None, t=now, lock_until=now + FLOW_VEL_GAP_LOCKOUT_S)
+        elif height_m < on_h:
+            st.update(off=False, why="below", ref=(gn, ge), calm=None, t=now)
+        return not st["off"]
+    # Velocity on: follow the gap slowly and wait for it to be steady.
+    dt = max(0.0, now - st.get("t", now))
+    st["t"] = now
+    if st.get("ref") is None:
+        st["ref"] = (gn, ge)
+    else:
+        a = min(1.0, dt / FLOW_VEL_REF_TAU_S)
+        st["ref"] = (st["ref"][0] + a * (gn - st["ref"][0]), st["ref"][1] + a * (ge - st["ref"][1]))
+    steady = math.hypot(gn - st["ref"][0], ge - st["ref"][1]) < 0.5 * lim
+    if not steady:
+        st["calm"] = None
+    elif st.get("calm") is None:
+        st["calm"] = now
+    if (height_m >= off_h and now - st["since"] >= hold_s and now >= st.get("lock_until", 0.0)
+            and st.get("calm") is not None and now - st["calm"] >= calm_s):
+        st.update(off=True, base=st["ref"])
     return not st.get("off", False)
 
 
@@ -2175,13 +2220,20 @@ def main():
                                 if args.marker_vel_off and args.marker_pos:
                                     _holds = (trust_vision and (latched or ready_to_fuse)
                                               and now - mk2_drive_t <= MARKER_FRESH_S)
-                                    _want_v = flow_velocity_wanted(fv_state, now, current_altitude_m, _holds)
+                                    _gap = None
+                                    _en = getattr(cuav, 'ekf_ne', None)
+                                    if (_en is not None and now - getattr(cuav, 'ekf_ne_time', 0.0)
+                                            <= FLOW_VEL_EKF_FRESH_S):
+                                        _gap = (_en[0] - px, _en[1] - py)
+                                    _want_v = flow_velocity_wanted(fv_state, now, current_altitude_m,
+                                                                   _holds, _gap)
                                     if _want_v != fv_sending:
                                         fv_sending = _want_v
                                         _msg = (f">>> FLOW VEL {'ON' if _want_v else 'OFF'} "
                                                 f"{current_altitude_m:.0f}m")
                                         logging.info(f"[+] Flow velocity {'resumed' if _want_v else 'stopped'} at "
-                                                     f"{current_altitude_m:.1f} m (marker holds={_holds})")
+                                                     f"{current_altitude_m:.1f} m (marker holds={_holds}"
+                                                     f"{', ' + fv_state.get('why', '') if _want_v else ''})")
                                         cuav.send_statustext(_msg, severity=6 if _want_v else 5)
                                 if _want_v:
                                     sent = cuav.send_vision_speed(vx=vn, vy=ve, vz=0.0, vel_cov=vel_cov)
