@@ -329,6 +329,35 @@ def marker_pos_err_m(height_m):
     return max(MARKER_POS_ERR_M, MARKER_POS_ERR_PER_M * max(0.0, height_m))
 
 
+# Flight 41: with the marker holding the position the drone still swung above 40 m, because the
+# flow velocity was off by 1.4 m/s rms at 30-40 m and 2.3 m/s at 40-55 m while the EKF is told
+# 0.7 m/s (VISO_VEL_M_NSE; the message covariance is ignored). At 50 m one pixel is 13 cm, so the
+# flow cannot resolve velocity there. Above this height, while the marker holds the position, the
+# flow velocity is not sent and the EKF runs on the marker position and its IMU - as with a GPS.
+# EKF3 (PosVelFusion/Control) only sets velTimeout on loss of position aiding, so stopping and
+# resuming the velocity causes no velocity reset while the marker position keeps fusing.
+FLOW_VEL_OFF_H_M = 35.0
+FLOW_VEL_ON_H_M = 33.0           # hysteresis: back on below this
+FLOW_VEL_OFF_HOLD_S = 1.0        # the marker must have held this long before the velocity stops
+
+
+def flow_velocity_wanted(st, now, height_m, marker_holds, off_h=FLOW_VEL_OFF_H_M, on_h=FLOW_VEL_ON_H_M,
+                         hold_s=FLOW_VEL_OFF_HOLD_S):
+    """True when the flow velocity should be sent. Off only above off_h after the marker has held the
+    position for hold_s; back on below on_h, or at once when the marker stops holding it."""
+    if not marker_holds:
+        st["off"] = False
+        st["since"] = None
+        return True
+    if st.get("since") is None:
+        st["since"] = now
+    if height_m >= off_h and now - st["since"] >= hold_s:
+        st["off"] = True
+    elif height_m < on_h:
+        st["off"] = False
+    return not st.get("off", False)
+
+
 def marker_fix_usable(mid, height_m, marker_down_m, roll_deg, pitch_deg, confirmed, airborne, armed,
                       min_h=MARKER_POS_MIN_H_M, max_h=MARKER_POS_MAX_H_M, tol=MARKER_POS_HEIGHT_TOL,
                       max_tilt=MARKER_POS_MAX_TILT_DEG):
@@ -745,7 +774,10 @@ def main():
                              "Every other marker uses the built-in table (MARKER_SIZES_M).")
     parser.add_argument("--marker-pos", action="store_true",
                         help="Marker map stage 2: let the centre marker (IDs 45/16/0) hold the position "
-                             "sent to the EKF between 2 and 15 m.")
+                             "sent to the EKF between 2 and 100 m.")
+    parser.add_argument("--marker-vel-off", action="store_true",
+                        help="With --marker-pos: above 35 m, while the marker holds the position, do not "
+                             "send the flow velocity (it is off by 2 m/s up there).")
     parser.add_argument("--lb-velocity", action="store_true",
                         help="Send the long-baseline (87 ms) flow velocity below 30 m, fading to the "
                              "single-frame one by 40 m. Measured ~2x less noise low down, none above 40 m.")
@@ -1145,6 +1177,8 @@ def main():
         mk2_send_t = None
         mk2_drive_t = -1e9
         mk2_last_why = ""
+        fv_state = {}                # --marker-vel-off hysteresis
+        fv_sending = True
         mk2_why_log_t = 0.0
         stage2_log = None
         if args.marker_pos:
@@ -2137,7 +2171,20 @@ def main():
                                 for _k in delta_acc:
                                     delta_acc[_k] = 0.0
                             else:
-                                sent = cuav.send_vision_speed(vx=vn, vy=ve, vz=0.0, vel_cov=vel_cov)
+                                _want_v = True
+                                if args.marker_vel_off and args.marker_pos:
+                                    _holds = (trust_vision and (latched or ready_to_fuse)
+                                              and now - mk2_drive_t <= MARKER_FRESH_S)
+                                    _want_v = flow_velocity_wanted(fv_state, now, current_altitude_m, _holds)
+                                    if _want_v != fv_sending:
+                                        fv_sending = _want_v
+                                        _msg = (f">>> FLOW VEL {'ON' if _want_v else 'OFF'} "
+                                                f"{current_altitude_m:.0f}m")
+                                        logging.info(f"[+] Flow velocity {'resumed' if _want_v else 'stopped'} at "
+                                                     f"{current_altitude_m:.1f} m (marker holds={_holds})")
+                                        cuav.send_statustext(_msg, severity=6 if _want_v else 5)
+                                if _want_v:
+                                    sent = cuav.send_vision_speed(vx=vn, vy=ve, vz=0.0, vel_cov=vel_cov)
                         if sent or sent_p:
                             vio_sent_count += 1
                         if ready_to_fuse and (not getattr(cuav, '_vio_trust_announced', False)):
