@@ -14,6 +14,7 @@ import time
 import math
 import glob
 import signal
+import fcntl
 import logging
 import argparse
 import threading
@@ -495,6 +496,41 @@ class ArucoWorker(threading.Thread):
     def stop(self):
         self.running = False
 
+# Only one daemon may talk to the camera and the autopilot. In flight 37 (19 Sep) two ran at once:
+# one flying and sending the real position, the other gated on the ground and sending "position
+# 0,0, not moving" - 7 495 vision messages of it. The autopilot fused both, its two EKF cores took
+# turns believing each (24 lane switches in four minutes), and it ended in an EKF failsafe.
+# An exclusive lock makes a second copy exit at once, whoever starts it. The kernel drops the
+# lock when the holder dies, even on SIGKILL, so a crash can never leave it stuck.
+LOCK_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "flight_logs", ".flight_daemon.lock")
+
+
+def acquire_single_instance_lock(path=LOCK_PATH):
+    """An open file holding an exclusive lock for this process's life, or None if another has it."""
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o666)
+    except OSError:
+        return None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None
+    os.ftruncate(fd, 0)
+    os.write(fd, f"{os.getpid()}\n".encode())
+    return fd
+
+
+def lock_holder(path=LOCK_PATH):
+    """PID written by whoever holds the lock, for the message a second copy prints."""
+    try:
+        with open(path) as fh:
+            return fh.read().strip() or "?"
+    except OSError:
+        return "?"
+
+
 def setup_logging(test_mode=False):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_file = os.path.join(LOG_DIR, f"flight_{timestamp}.log")
@@ -623,7 +659,15 @@ def main():
     parser.add_argument("--outdoor-gps", action="store_true", default=False, help="Enable automatic GPS switching outdoors if GPS fix is strong")
     args = parser.parse_args()
 
+    instance_lock = acquire_single_instance_lock()
+    if instance_lock is None:
+        msg = (f"flight_daemon already running (PID {lock_holder()}); this copy is exiting so that "
+               f"only one daemon talks to the camera and the autopilot.")
+        print(msg, file=sys.stderr)
+        sys.exit(0)
+
     setup_logging(test_mode=args.test)
+    logging.info(f"[+] Single-instance lock held (PID {os.getpid()})")
 
     # Base directory for saved flight recordings
     images_base_dir = IMAGES_DIR  # NVMe SSD path
