@@ -266,6 +266,37 @@ class CameraWatchdog(threading.Thread):
         self.running = False
 
 
+def marker_offset_ned(tvec, roll_rad, pitch_rad, yaw_rad):
+    """Where the drone is relative to a marker, in metres north and east, from the PnP translation.
+
+    The camera looks straight down: +x right, +y toward the tail, +z down the optical axis. The
+    old code turned that into north/east with the yaw alone. That is fine for a level drone but
+    not for a swinging one: at 26 m a 10 degree roll shifts the marker h*sin(10 deg) = 4.5 m
+    across the image, and yaw-only maths reads that as the drone having moved 4.5 m. The full attitude is used
+    here so a tilt is recognised as a tilt.
+    """
+    tx, ty, tz = (float(v) for v in np.asarray(tvec).ravel()[:3])
+    m_body = np.array([-ty, tx, tz])              # marker in body axes: forward, right, down
+    cr, sr = math.cos(roll_rad), math.sin(roll_rad)
+    cp, sp = math.cos(pitch_rad), math.sin(pitch_rad)
+    cy, sy = math.cos(yaw_rad), math.sin(yaw_rad)
+    r_nb = np.array([
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+        [-sp,     cp * sr,                cp * cr],
+    ])
+    m_ned = r_nb @ m_body                         # marker relative to the drone, north-east-down
+    return -float(m_ned[0]), -float(m_ned[1])     # the drone relative to the marker
+
+
+def marker_offset_yaw_only(tvec, yaw_rad):
+    """The offset as the daemon has always computed it, kept for side-by-side logging."""
+    tx, ty = float(np.asarray(tvec).ravel()[0]), float(np.asarray(tvec).ravel()[1])
+    fwd, right = ty, -tx
+    c, s = math.cos(yaw_rad), math.sin(yaw_rad)
+    return fwd * c - right * s, fwd * s + right * c
+
+
 MARKER_SIZES_M = {
     45: 3.60, 16: 0.72, 0: 0.12,
     10: 1.20, 18: 1.20, 22: 1.20, 1: 1.20, 2: 1.20, 3: 1.20,
@@ -949,6 +980,17 @@ def main():
         except Exception:
             shadow_log = None
 
+        # Stage 1 of the marker map: the absolute position the marker gives, logged beside the
+        # integrated flow position it would replace. Nothing here is sent to the autopilot.
+        marker_log = None
+        try:
+            marker_log = open(os.path.join(LOG_DIR, "marker_shadow.csv"), "a", buffering=1)  # line-buffered: <=25 Hz, and a crash must not take the last seconds with it
+            if marker_log.tell() == 0:
+                marker_log.write("wall,t_frame,airborne,h,id,px,t_z,roll,pitch,yaw,"
+                                 "flow_n,flow_e,mk_n,mk_e,mk_n_yawonly,mk_e_yawonly\n")
+        except Exception:
+            marker_log = None
+
         frame_count = 0
         vio_sent_count = 0
         aruco_detect_count = 0
@@ -1476,18 +1518,23 @@ def main():
                         t_x, t_y, t_z = float(tvec[0]), float(tvec[1]), float(tvec[2])
                         # Rotate body camera offset to Earth NED frame using yaw heading
                         yaw_rad = math.radians(yaw_deg)
-                        cos_yaw = math.cos(yaw_rad)
-                        sin_yaw = math.sin(yaw_rad)
-                        # Correct Coordinate Frame:
-                        # In downward camera:
-                        # +Y_cam is towards tail -> if marker is at +Y_cam, drone is forward (+X_body)
-                        # -X_cam is towards port -> if marker is at -X_cam, drone is right (+Y_body)
-                        body_forward_m = t_y
-                        body_right_m = -t_x
-                        pad_offset_north = body_forward_m * cos_yaw - body_right_m * sin_yaw
-                        pad_offset_east = body_forward_m * sin_yaw + body_right_m * cos_yaw
+                        # Full attitude, not yaw alone: a swinging drone would otherwise see its
+                        # own tilt as metres of movement (4.5 m at 26 m for 10 degrees of roll).
+                        pad_offset_north, pad_offset_east = marker_offset_ned(
+                            tvec, math.radians(roll_deg), math.radians(pitch_deg), yaw_rad)
                         last_aruco_lock_time = now
                         last_aruco_offset = (pad_offset_north, pad_offset_east)
+                        if marker_log is not None and (cuav.is_armed or args.test):
+                            try:
+                                yn, ye = marker_offset_yaw_only(tvec, yaw_rad)
+                                marker_log.write(
+                                    f"{time.time():.4f},{(t_aruco_frame if t_aruco_frame is not None else math.nan):.4f},"
+                                    f"{int(is_airborne)},{current_altitude_m:.3f},{aruco_id},{aruco_side_px:.1f},"
+                                    f"{t_z:.3f},{roll_deg:.2f},{pitch_deg:.2f},{yaw_deg:.2f},"
+                                    f"{pos_north:.4f},{pos_east:.4f},"
+                                    f"{pad_offset_north:.4f},{pad_offset_east:.4f},{yn:.4f},{ye:.4f}\n")
+                            except Exception:
+                                pass
                         last_aruco_z = t_z
                         # Line of sight from the undistorted PnP translation. Camera frame: +x right,
                         # +y toward tail, +z down (image axes validated against EKF velocity).
@@ -2190,6 +2237,11 @@ def main():
             rgb_worker.stop(); rgb_worker.join(timeout=1.0)
         if rgb_log is not None:
             rgb_log.close()
+    except Exception:
+        pass
+    try:
+        if marker_log is not None:
+            marker_log.close()
     except Exception:
         pass
     cuav.close()
