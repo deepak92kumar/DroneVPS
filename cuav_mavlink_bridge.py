@@ -40,6 +40,7 @@ class CuavMavlinkClient:
         # The EKF's own horizontal position (from GLOBAL_POSITION_INT), in metres north/east of the
         # first position received. Only differences are used, so the reference point does not matter.
         self.ekf_ne = None
+        self.ekf_status_time = 0.0
         self.ekf_ne_time = 0.0
         self._gpi_ref = None
         self.baro_alt = 0.0
@@ -330,6 +331,7 @@ class CuavMavlinkClient:
                             self.yaw_deg = float(hud_hdg)
                     elif t == 'EKF_STATUS_REPORT':
                         self.ekf_horiz_var = msg.pos_horiz_variance
+                        self.ekf_status_time = time.time()
                         self.ekf_vel_var = msg.velocity_variance
                         self.ekf_status_flags = msg.flags
                     elif t == 'PARAM_VALUE':

@@ -342,49 +342,65 @@ FLOW_VEL_OFF_HOLD_S = 1.0        # the marker must have held this long before th
 # Flight 42A: 8 s after the velocity stopped the drone really moved 10 m in 3 s. The EKF, on
 # position and IMU alone, saw 3 m, then rejected the (correct) marker position as an outlier and
 # dead-reckoned to -4.8 m/s until it reset itself 8 s later and the drone lurched +25/-27 deg.
-# So the EKF's own position is watched against what is sent: while the velocity is off, a gap
-# growing past max(1.5 m, 4 % of height) brings the velocity back at once (it was 2.9 m 8 s
-# before the reset in 42A; in 42B it stayed under that at 35-55 m). The gap is measured
-# against its value when the velocity stopped, so a constant offset between frames is ignored.
-FLOW_VEL_GAP_MIN_M = 1.5
-FLOW_VEL_GAP_PER_M = 0.04
-FLOW_VEL_CALM_S = 3.0            # the gap must have been steady this long before the velocity stops
-FLOW_VEL_EKF_FRESH_S = 0.5
+# So the EKF is watched while the velocity is off, and the velocity comes back when it is in
+# trouble. The trigger is the EKF's own position test ratio (EKF_STATUS_REPORT
+# pos_horiz_variance = sqrt(test ratio); it rejects at 1.0): 0.8 or more. In 42A that fired at
+# 240.8 s, before the rejection began and 9 s before the reset. Flight 43 showed that a plain
+# position gap of max(1.5 m, 4 % h) also fires on ordinary climbs and stick moves (it brought
+# the 2 m/s-wrong flow velocity back at 46 m and 90 m), so the gap is now only a backstop at
+# max(3 m, 6 % h), measured against its value when the velocity stopped.
+FLOW_VEL_SP_ON = 0.8
+FLOW_VEL_SP_CALM = 0.5           # the velocity only stops while the test ratio is below this
+FLOW_VEL_GAP_MIN_M = 3.0
+FLOW_VEL_GAP_PER_M = 0.06
+FLOW_VEL_CALM_S = 3.0            # the EKF must have been steady this long before the velocity stops
+FLOW_VEL_EKF_FRESH_S = 0.5       # GLOBAL_POSITION_INT, 10 Hz
+FLOW_VEL_STATUS_FRESH_S = 1.0    # EKF_STATUS_REPORT, 5 Hz
 FLOW_VEL_REF_TAU_S = 2.0
-FLOW_VEL_GAP_LOCKOUT_S = 10.0    # after the EKF has drifted once, keep the velocity on this long
+FLOW_VEL_GAP_LOCKOUT_S = 10.0    # after the EKF has been in trouble once, keep the velocity on this long
 
 
 def flow_vel_gap_limit(height_m):
     return max(FLOW_VEL_GAP_MIN_M, FLOW_VEL_GAP_PER_M * max(0.0, height_m))
 
 
-def flow_velocity_wanted(st, now, height_m, marker_holds, ekf_gap=None, off_h=FLOW_VEL_OFF_H_M,
-                         on_h=FLOW_VEL_ON_H_M, hold_s=FLOW_VEL_OFF_HOLD_S, calm_s=FLOW_VEL_CALM_S):
+def flow_velocity_wanted(st, now, height_m, marker_holds, ekf_gap=None, ekf_sp=None,
+                         off_h=FLOW_VEL_OFF_H_M, on_h=FLOW_VEL_ON_H_M, hold_s=FLOW_VEL_OFF_HOLD_S,
+                         calm_s=FLOW_VEL_CALM_S):
     """True when the flow velocity should be sent.
 
-    ekf_gap: (north, east) of the EKF's own position minus the position sent, or None when the EKF
-    position is not fresh - then the velocity is always sent. It stops only above off_h after the
-    marker has held for hold_s and the gap has been steady for calm_s, and comes back below on_h,
-    the moment the marker stops holding, or when the gap moves more than flow_vel_gap_limit(h)
-    from where it was when the velocity stopped. st["why"] says why it last came back."""
+    ekf_gap: (north, east) of the EKF's own position minus the position sent; ekf_sp: the EKF's
+    horizontal position test ratio (sqrt). Either None means it is not fresh - then the velocity
+    is always sent. It stops only above off_h after the marker has held for hold_s and the EKF
+    has been steady (test ratio under FLOW_VEL_SP_CALM, gap not moving) for calm_s, and comes
+    back below on_h, the moment the marker stops holding, when the test ratio reaches
+    FLOW_VEL_SP_ON, or when the gap moves more than flow_vel_gap_limit(h) from where it was
+    when the velocity stopped. st["why"] says why it last came back."""
     lim = flow_vel_gap_limit(height_m)
-    if not marker_holds or ekf_gap is None:
+    if not marker_holds or ekf_gap is None or ekf_sp is None:
         if st.get("off"):
-            st["why"] = "marker lost" if not marker_holds else "no EKF position"
+            st["why"] = "marker lost" if not marker_holds else "no EKF status"
         st.update(off=False, since=None, ref=None, calm=None)
         return True
     gn, ge = float(ekf_gap[0]), float(ekf_gap[1])
+    sp = float(ekf_sp)
     if st.get("since") is None:
         st["since"] = now
     if st.get("off"):
         b = st["base"]
-        if math.hypot(gn - b[0], ge - b[1]) > lim:
-            st.update(off=False, why=f"EKF off by {math.hypot(gn - b[0], ge - b[1]):.1f} m",
-                      ref=(gn, ge), calm=None, t=now, lock_until=now + FLOW_VEL_GAP_LOCKOUT_S)
+        moved = math.hypot(gn - b[0], ge - b[1])
+        why = None
+        if sp >= FLOW_VEL_SP_ON:
+            why = f"EKF test ratio {sp:.2f}"
+        elif moved > lim:
+            why = f"EKF off by {moved:.1f} m"
+        if why is not None:
+            st.update(off=False, why=why, ref=(gn, ge), calm=None, t=now,
+                      lock_until=now + FLOW_VEL_GAP_LOCKOUT_S)
         elif height_m < on_h:
             st.update(off=False, why="below", ref=(gn, ge), calm=None, t=now)
         return not st["off"]
-    # Velocity on: follow the gap slowly and wait for it to be steady.
+    # Velocity on: follow the gap slowly and wait for the EKF to be steady.
     dt = max(0.0, now - st.get("t", now))
     st["t"] = now
     if st.get("ref") is None:
@@ -392,7 +408,8 @@ def flow_velocity_wanted(st, now, height_m, marker_holds, ekf_gap=None, off_h=FL
     else:
         a = min(1.0, dt / FLOW_VEL_REF_TAU_S)
         st["ref"] = (st["ref"][0] + a * (gn - st["ref"][0]), st["ref"][1] + a * (ge - st["ref"][1]))
-    steady = math.hypot(gn - st["ref"][0], ge - st["ref"][1]) < 0.5 * lim
+    steady = (sp < FLOW_VEL_SP_CALM
+              and math.hypot(gn - st["ref"][0], ge - st["ref"][1]) < 0.5 * lim)
     if not steady:
         st["calm"] = None
     elif st.get("calm") is None:
@@ -2225,8 +2242,11 @@ def main():
                                     if (_en is not None and now - getattr(cuav, 'ekf_ne_time', 0.0)
                                             <= FLOW_VEL_EKF_FRESH_S):
                                         _gap = (_en[0] - px, _en[1] - py)
+                                    _sp = None
+                                    if now - getattr(cuav, 'ekf_status_time', 0.0) <= FLOW_VEL_STATUS_FRESH_S:
+                                        _sp = float(getattr(cuav, 'ekf_horiz_var', 0.0))
                                     _want_v = flow_velocity_wanted(fv_state, now, current_altitude_m,
-                                                                   _holds, _gap)
+                                                                   _holds, _gap, _sp)
                                     if _want_v != fv_sending:
                                         fv_sending = _want_v
                                         _msg = (f">>> FLOW VEL {'ON' if _want_v else 'OFF'} "
