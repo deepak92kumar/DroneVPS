@@ -355,6 +355,12 @@ def marker_fix_step(st, flow_n, flow_e, mk, dt, rate=MARKER_CORR_RATE_MS,
     st: dict, empty on the first call. mk: (north, east) of the drone relative to the marker, or
     None when there is no usable fix. Returns (north, east, how).
     """
+    if st.get("anchor") is None and mk is None:
+        # Until the marker has locked once, change nothing at all: send the flow exactly as the
+        # daemon always has, resets and all.
+        st["sent"] = (float(flow_n), float(flow_e))
+        st["flow"] = (float(flow_n), float(flow_e))
+        return float(flow_n), float(flow_e), "flow"
     if st.get("sent") is None:
         st["sent"] = (float(flow_n), float(flow_e))
         st["flow"] = (float(flow_n), float(flow_e))

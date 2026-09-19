@@ -130,3 +130,11 @@ def test_unconfirmed_or_not_flying_is_refused():
 
 def test_steep_tilt_is_refused():
     assert not good(roll_deg=30.0)[0]
+
+
+def test_before_the_marker_locks_nothing_changes_even_through_a_flow_reset():
+    """With --marker-pos on and no marker ever seen, the daemon must behave exactly as before."""
+    st = {}
+    for f in [(0.0, 0.0), (5.0, 1.0), (9.0, 2.0), (0.0, 0.0), (0.4, 0.1)]:   # includes a reset to 0
+        n, e, how = run(st, f, None)
+        assert (n, e) == (float(f[0]), float(f[1])) and how == "flow"
