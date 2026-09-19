@@ -276,6 +276,13 @@ def marker_offset_ned(tvec, roll_rad, pitch_rad, yaw_rad):
     across the image, and yaw-only maths reads that as the drone having moved 4.5 m. The full attitude is used
     here so a tilt is recognised as a tilt.
     """
+    m_ned = marker_ned(tvec, roll_rad, pitch_rad, yaw_rad)
+    return -m_ned[0], -m_ned[1]                   # the drone relative to the marker
+
+
+def marker_ned(tvec, roll_rad, pitch_rad, yaw_rad):
+    """The marker relative to the drone, north-east-down, in metres. Down is the drone's height
+    above the marker, which lets the pose be checked against the lidar."""
     tx, ty, tz = (float(v) for v in np.asarray(tvec).ravel()[:3])
     m_body = np.array([-ty, tx, tz])              # marker in body axes: forward, right, down
     cr, sr = math.cos(roll_rad), math.sin(roll_rad)
@@ -286,8 +293,8 @@ def marker_offset_ned(tvec, roll_rad, pitch_rad, yaw_rad):
         [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
         [-sp,     cp * sr,                cp * cr],
     ])
-    m_ned = r_nb @ m_body                         # marker relative to the drone, north-east-down
-    return -float(m_ned[0]), -float(m_ned[1])     # the drone relative to the marker
+    m = r_nb @ m_body
+    return float(m[0]), float(m[1]), float(m[2])
 
 
 def marker_offset_yaw_only(tvec, yaw_rad):
@@ -296,6 +303,85 @@ def marker_offset_yaw_only(tvec, yaw_rad):
     fwd, right = ty, -tx
     c, s = math.cos(yaw_rad), math.sin(yaw_rad)
     return fwd * c - right * s, fwd * s + right * c
+
+
+# Marker map, stage 2: let the marker hold the position the EKF is given. Flight 37 measured the
+# flow position wandering 5-6 m from the marker at 35-42 m while the marker itself jittered only
+# 33 cm. Only the nested centre target is used - its three markers share one point on the ground;
+# the twelve distributed ones sit elsewhere and need the full map before they can be mixed in.
+MARKER_POS_IDS = frozenset({45, 16, 0})
+MARKER_POS_MIN_H_M = 2.0
+MARKER_POS_MAX_H_M = 15.0        # first flights: stay where a surprise is recoverable
+MARKER_POS_HEIGHT_TOL = 0.25     # the pose's height must agree with the lidar to 25 %
+MARKER_POS_MAX_TILT_DEG = 25.0
+MARKER_CORR_RATE_MS = 4.0        # fastest the marker may move the sent position (m/s)
+MARKER_REANCHOR_M = 6.0          # a disagreement larger than this is not corrected, only re-anchored
+FLOW_RESET_JUMP_M = 3.0          # a flow step larger than this is a reset, not motion
+MARKER_POS_ERR_M = 0.5           # position error declared to the EKF while the marker holds it
+MARKER_FRESH_S = 0.5
+
+
+def marker_fix_usable(mid, height_m, marker_down_m, roll_deg, pitch_deg, confirmed, airborne, armed,
+                      min_h=MARKER_POS_MIN_H_M, max_h=MARKER_POS_MAX_H_M, tol=MARKER_POS_HEIGHT_TOL,
+                      max_tilt=MARKER_POS_MAX_TILT_DEG):
+    """(ok, reason). Every condition is one that, if false, has a known way of making the pose wrong."""
+    if mid not in MARKER_POS_IDS:
+        return False, "not a centre marker"
+    if not (airborne and armed):
+        return False, "not flying"
+    if not confirmed:
+        return False, "not confirmed"
+    if not (min_h <= height_m <= max_h):
+        return False, f"height {height_m:.1f} m outside {min_h:.0f}-{max_h:.0f} m"
+    if abs(roll_deg) > max_tilt or abs(pitch_deg) > max_tilt:
+        return False, "tilt"
+    if height_m <= 0 or abs(marker_down_m - height_m) > tol * height_m:
+        return False, f"pose height {marker_down_m:.1f} m vs lidar {height_m:.1f} m"
+    return True, ""
+
+
+def marker_fix_step(st, flow_n, flow_e, mk, dt, rate=MARKER_CORR_RATE_MS,
+                    reanchor=MARKER_REANCHOR_M, reset_jump=FLOW_RESET_JUMP_M):
+    """One update of the horizontal position sent to the EKF once the marker has taken part.
+
+    The sent position is its own integrator: it moves with the flow between marker fixes, and each
+    fix pulls it toward where the marker says the drone is. Three things make it safe to switch on
+    in the air:
+      * the first fix sets an anchor so that nothing moves - no jump when the marker locks;
+      * a single fix can move it by at most rate*dt, so one bad detection costs centimetres;
+      * a flow reset (the daemon zeroes its integral in several places) is absorbed, and a
+        disagreement bigger than `reanchor` is re-anchored rather than chased.
+
+    st: dict, empty on the first call. mk: (north, east) of the drone relative to the marker, or
+    None when there is no usable fix. Returns (north, east, how).
+    """
+    if st.get("sent") is None:
+        st["sent"] = (float(flow_n), float(flow_e))
+        st["flow"] = (float(flow_n), float(flow_e))
+    dfn, dfe = flow_n - st["flow"][0], flow_e - st["flow"][1]
+    st["flow"] = (float(flow_n), float(flow_e))
+    if math.hypot(dfn, dfe) > reset_jump:
+        dfn = dfe = 0.0                                  # the flow was reset, not moved
+    sn, se = st["sent"][0] + dfn, st["sent"][1] + dfe
+    how = "flow"
+    if mk is not None:
+        if st.get("anchor") is None:
+            st["anchor"] = (sn - mk[0], se - mk[1])
+            how = "anchor"
+        else:
+            en = mk[0] + st["anchor"][0] - sn
+            ee = mk[1] + st["anchor"][1] - se
+            err = math.hypot(en, ee)
+            if err > reanchor:
+                st["anchor"] = (sn - mk[0], se - mk[1])
+                how = "reanchor"
+            else:
+                lim = rate * max(dt, 0.0)
+                k = 1.0 if err <= lim or err == 0.0 else lim / err
+                sn, se = sn + k * en, se + k * ee
+                how = "marker"
+    st["sent"] = (sn, se)
+    return sn, se, how
 
 
 MARKER_SIZES_M = {
@@ -643,6 +729,9 @@ def main():
     parser.add_argument("--marker-size", type=float, default=0.242,
                         help="Black-square edge in metres for the ID given by --marker-size-id. "
                              "Every other marker uses the built-in table (MARKER_SIZES_M).")
+    parser.add_argument("--marker-pos", action="store_true",
+                        help="Marker map stage 2: let the centre marker (IDs 45/16/0) hold the position "
+                             "sent to the EKF between 2 and 15 m.")
     parser.add_argument("--lb-velocity", action="store_true",
                         help="Send the long-baseline (87 ms) flow velocity below 30 m, fading to the "
                              "single-frame one by 40 m. Measured ~2x less noise low down, none above 40 m.")
@@ -1035,6 +1124,23 @@ def main():
         except Exception:
             marker_log = None
 
+        # Stage 2: the marker holds the position sent to the EKF (behind --marker-pos).
+        mk2_state = {}
+        mk2_fix = None               # (north, east, time) of the drone relative to the centre marker
+        mk2_used_t = -1.0
+        mk2_send_t = None
+        mk2_drive_t = -1e9
+        mk2_last_why = ""
+        mk2_why_log_t = 0.0
+        stage2_log = None
+        if args.marker_pos:
+            try:
+                stage2_log = open(os.path.join(LOG_DIR, "marker_stage2.csv"), "a", buffering=1)
+                if stage2_log.tell() == 0:
+                    stage2_log.write("wall,h,flow_n,flow_e,sent_n,sent_e,how,marker_holds,perr\n")
+            except Exception:
+                stage2_log = None
+
         frame_count = 0
         vio_sent_count = 0
         aruco_detect_count = 0
@@ -1325,6 +1431,11 @@ def main():
                 height_weight_last = height_weight
             height_source_last = _src_kind
 
+            if not is_airborne and (mk2_state or mk2_fix is not None):
+                mk2_state.clear()                    # landed: next flight anchors afresh
+                mk2_fix = None
+                mk2_drive_t = -1e9
+
             if (not was_airborne) and is_airborne:
                 dyaw = ((yaw_deg - last_ground_yaw_deg + 180.0) % 360.0) - 180.0
                 if abs(dyaw) >= 20.0:
@@ -1589,6 +1700,18 @@ def main():
                         last_aruco_size_rad = math.atan2(side_px, focal_length_px)
                         aruco_los_dist = float(np.linalg.norm(tvec))
                         aruco_hits.append(now)
+                        if args.marker_pos:
+                            _conf = sum(1 for t in aruco_hits if now - t <= 0.5) >= ARUCO_CONFIRM_HITS
+                            _down = marker_ned(tvec, math.radians(roll_deg), math.radians(pitch_deg),
+                                               yaw_rad)[2]
+                            _ok, _why = marker_fix_usable(aruco_id, current_altitude_m, _down, roll_deg,
+                                                          pitch_deg, _conf, is_airborne, cuav.is_armed)
+                            if _ok:
+                                mk2_fix = (pad_offset_north, pad_offset_east, now)
+                            elif _why != mk2_last_why and (now - mk2_why_log_t) >= 3.0:
+                                mk2_why_log_t = now
+                                logging.info(f"[-] Marker position not used: {_why}")
+                            mk2_last_why = _why
                         # Send only this fresh detection (never re-send stale angles), and only after the
                         # marker was seen repeatedly (rejects single-frame false positives).
                         if (cuav.is_connected and t_z > 0.08
@@ -1919,6 +2042,32 @@ def main():
                                     logging.info(f"[+] Long-baseline velocity {lb_w * 100:.0f}% "
                                                  f"at {current_altitude_m:.1f} m")
                             px, py = pos_north, pos_east
+                            if args.marker_pos:
+                                _fresh = mk2_fix is not None and mk2_fix[2] > mk2_used_t
+                                _mk = (mk2_fix[0], mk2_fix[1]) if _fresh else None
+                                if _fresh:
+                                    mk2_used_t = mk2_fix[2]
+                                _dt = 0.04 if mk2_send_t is None else max(0.0, min(0.2, now - mk2_send_t))
+                                mk2_send_t = now
+                                px, py, _how = marker_fix_step(mk2_state, pos_north, pos_east, _mk, _dt)
+                                if _how in ("anchor", "marker"):
+                                    mk2_drive_t = now
+                                if _how in ("anchor", "reanchor"):
+                                    logging.info(f"[+] Marker position {_how} at {current_altitude_m:.1f} m "
+                                                 f"(correction {math.hypot(px - pos_north, py - pos_east):.2f} m)")
+                                    if _how == "anchor":
+                                        cuav.send_statustext(">>> MARKER POS ON", severity=6)
+                                if (latched or ready_to_fuse) and now - mk2_drive_t <= MARKER_FRESH_S:
+                                    # Tighten only a trusted estimate; never promote an untrusted one.
+                                    pos_cov = MARKER_POS_ERR_M ** 2 / 3.0      # PErr = sqrt(3 * cov)
+                                if stage2_log is not None and cuav.is_armed:
+                                    try:
+                                        stage2_log.write(
+                                            f"{time.time():.4f},{current_altitude_m:.3f},{pos_north:.4f},{pos_east:.4f},"
+                                            f"{px:.4f},{py:.4f},{_how},{int(now - mk2_drive_t <= MARKER_FRESH_S)},"
+                                            f"{math.sqrt(3.0 * pos_cov):.3f}\n")
+                                    except Exception:
+                                        pass
                         else:
                             if getattr(cuav, '_vio_trust_announced', False):
                                 cuav._vio_trust_announced = False
@@ -2286,6 +2435,8 @@ def main():
     try:
         if marker_log is not None:
             marker_log.close()
+        if stage2_log is not None:
+            stage2_log.close()
     except Exception:
         pass
     cuav.close()
