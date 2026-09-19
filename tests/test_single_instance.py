@@ -53,3 +53,33 @@ def test_the_holder_writes_its_pid():
         with open(path) as fh:
             assert fh.read().strip() == str(os.getpid())
         os.close(held)
+
+
+# --- a crash must announce itself --------------------------------------------------------
+
+from flight_daemon import announce_crash
+
+
+class _FC:
+    def __init__(self, connected=True, armed=True):
+        self.is_connected, self.is_armed, self.sent = connected, armed, []
+
+    def send_statustext(self, text, severity=6):
+        self.sent.append((severity, text))
+        return True
+
+
+def test_a_crash_in_flight_tells_the_pilot():
+    fc = _FC()
+    assert announce_crash(fc) is True
+    assert fc.sent and fc.sent[0][0] == 2 and "CRASHED" in fc.sent[0][1]
+
+
+def test_a_crash_on_the_ground_stays_quiet():
+    fc = _FC(armed=False)
+    assert announce_crash(fc) is False and fc.sent == []
+
+
+def test_no_link_no_message_and_no_second_crash():
+    assert announce_crash(None) is False
+    assert announce_crash(_FC(connected=False)) is False

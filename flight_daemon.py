@@ -2297,5 +2297,22 @@ def main():
         pass
     logging.info("[+] Navigation Daemon exited cleanly.")
 
+def announce_crash(cuav):
+    """Tell the pilot the daemon is dying. The camera watchdog lives in this same process and dies
+    with it, so without this a crash in flight is silent until the EKF failsafe - nine seconds in
+    flight 36. Returns True if the message went out."""
+    try:
+        if cuav is not None and cuav.is_connected and getattr(cuav, "is_armed", False):
+            return bool(cuav.send_statustext(">>> VIO CRASHED - TAKE ALT_HOLD", severity=2))
+    except Exception:
+        pass
+    return False
+
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        announce_crash(_cuav_ref)
+        logging.exception("[!] flight_daemon crashed")
+        raise
