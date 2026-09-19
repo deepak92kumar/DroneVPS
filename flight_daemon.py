@@ -832,17 +832,17 @@ def main():
         aruco_notify = {"state": "lost", "sent": "lost", "since": 0.0, "held": 0.0, "last_tx": 0.0}
 
         def aruco_notice(now_t, hits, st, can_send):
-            """Track ArUco #0 LOCK/LOST and return the state to announce ("locked"/"lost") or None.
+            """Track the marker LOCK/LOST and return the state to announce ("locked"/"lost") or None.
             LOCK = >= ARUCO_CONFIRM_HITS valid detections within 0.5 s (same gate as LANDING_TARGET).
             LOST = no valid detection for ARUCO_LOST_S. Announcements are >= ARUCO_NOTIFY_GAP_S apart;
             a change during that gap (or while the FC link is down) is announced afterwards."""
             last_hit = hits[-1] if hits else None
             if st["state"] == "lost" and sum(1 for t in hits if now_t - t <= 0.5) >= ARUCO_CONFIRM_HITS:
                 st["state"], st["since"] = "locked", now_t
-                logging.info("[+] ArUco #0 LOCK")
+                logging.info(f"[+] ArUco #{aruco_id} LOCK")
             elif st["state"] == "locked" and (last_hit is None or now_t - last_hit > ARUCO_LOST_S):
                 st["state"], st["held"], st["since"] = "lost", now_t - st["since"], now_t
-                logging.info(f"[-] ArUco #0 LOST (held {st['held']:.1f} s)")
+                logging.info(f"[-] ArUco #{aruco_id} LOST (held {st['held']:.1f} s)")
             if (not can_send) or st["state"] == st["sent"] or now_t - st["last_tx"] < ARUCO_NOTIFY_GAP_S:
                 return None
             st["sent"], st["last_tx"] = st["state"], now_t
@@ -1933,7 +1933,7 @@ def main():
                 tf03_log = f"TF03_H={tf03_h:.2f}m (V:{tf03_volt:.3f}V) {stereo_str} [{height_source}]"
                 cam_str = (f"Exp:{np.median(exp_hist):.0f}us ISO:{np.median(iso_hist) if iso_hist else 0:.0f} "
                            f"IR:{'ON' if ir_flood_on else 'OFF'}") if exp_hist else "Exp:n/a"
-                aruco_badge = f"[ARUCO#0 LOCKED dN:{last_aruco_offset[0]:+.2f}m dE:{last_aruco_offset[1]:+.2f}m]" if (now - last_aruco_lock_time <= 1.0) else "[ARUCO: SEARCHING]"
+                aruco_badge = f"[ARUCO#{aruco_id} LOCKED dN:{last_aruco_offset[0]:+.2f}m dE:{last_aruco_offset[1]:+.2f}m]" if (now - last_aruco_lock_time <= 1.0) else "[ARUCO: SEARCHING]"
                 vel_status = f"Vel: N:{filtered_vel_north:+.2f} E:{filtered_vel_east:+.2f}m/s"
                 logging.info(
                     f"[VIO {fps:.1f} FPS | Drops:{total_dropped_frames} Skip:{total_skipped_frames}] Pos: N:{pos_north:+05.2f}m E:{pos_east:+05.2f}m Z:{current_altitude_m:04.2f}m (Yaw:{yaw_deg:+.1f}°) | "
@@ -1977,9 +1977,9 @@ def main():
             if cuav.is_connected:
                 if aruco_event == "locked":
                     off_m = math.hypot(last_aruco_offset[0], last_aruco_offset[1])
-                    cuav.send_statustext(f">>> ARUCO LOCK #0 | z{last_aruco_z:.1f}m off{off_m:.2f}m", severity=6)
+                    cuav.send_statustext(f">>> ARUCO LOCK #{aruco_id} | z{last_aruco_z:.1f}m off{off_m:.2f}m", severity=6)
                 elif aruco_event == "lost":
-                    cuav.send_statustext(f">>> ARUCO LOST #0 | held {aruco_notify['held']:.0f}s", severity=4)
+                    cuav.send_statustext(f">>> ARUCO LOST #{aruco_id} | held {aruco_notify['held']:.0f}s", severity=4)
 
                 # Precision Loiter over ArUco #0: only in LOITER, airborne, with a confirmed marker.
                 # ArduPilot itself falls back to normal LOITER on stick input (>0.5 m/s^2) or 2 s target loss.
@@ -1996,7 +1996,7 @@ def main():
                         cuav._prec_loiter_cmd_t = now
                         if not prec_on:
                             cuav._prec_loiter_on = True
-                            logging.info("[+] Precision Loiter ON (ArUco #0 confirmed in LOITER)")
+                            logging.info(f"[+] Precision Loiter ON (ArUco #{aruco_id} confirmed in LOITER)")
                             cuav.send_statustext(">>> PREC LOITER ON | PAD #0", severity=6)
                 elif prec_on and ((not in_loiter) or (not is_airborne) or marker_lost or pl_too_high):
                     if cuav.set_precision_loiter(False):
@@ -2030,7 +2030,7 @@ def main():
                     if rc_page == 0:
                         # Page 1: 3D Position, Target Tracking & Altitude
                         if has_aruco:
-                            rc_msg = f"PAD#0 N:{last_aruco_offset[0]:+.2f} E:{last_aruco_offset[1]:+.2f} | {fps_val}FPS"
+                            rc_msg = f"PAD#{aruco_id} N:{last_aruco_offset[0]:+.2f} E:{last_aruco_offset[1]:+.2f} | {fps_val}FPS"
                         elif on_ground:
                             rc_msg = f"VIO GND Z:0.00m | {fps_val}FPS"
                         else:
