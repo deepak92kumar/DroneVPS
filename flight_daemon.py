@@ -440,7 +440,7 @@ def marker_fix_usable(mid, height_m, marker_down_m, roll_deg, pitch_deg, confirm
 
 
 def marker_fix_step(st, flow_n, flow_e, mk, dt, rate=MARKER_CORR_RATE_MS,
-                    reanchor=MARKER_REANCHOR_M, reset_jump=FLOW_RESET_JUMP_M):
+                    reanchor=MARKER_REANCHOR_M, reset_jump=FLOW_RESET_JUMP_M, reanchor_now=False):
     """One update of the horizontal position sent to the EKF once the marker has taken part.
 
     The sent position is its own integrator: it moves with the flow between marker fixes, and each
@@ -452,7 +452,9 @@ def marker_fix_step(st, flow_n, flow_e, mk, dt, rate=MARKER_CORR_RATE_MS,
         disagreement bigger than `reanchor` is re-anchored rather than chased.
 
     st: dict, empty on the first call. mk: (north, east) of the drone relative to the marker, or
-    None when there is no usable fix. Returns (north, east, how).
+    None when there is no usable fix. reanchor_now: the fix comes from a different camera than the
+    last one; re-anchor on it so the small calibration difference between the two is not chased.
+    Returns (north, east, how).
     """
     if st.get("anchor") is None and mk is None:
         # Until the marker has locked once, change nothing at all: send the flow exactly as the
@@ -477,7 +479,7 @@ def marker_fix_step(st, flow_n, flow_e, mk, dt, rate=MARKER_CORR_RATE_MS,
             en = mk[0] + st["anchor"][0] - sn
             ee = mk[1] + st["anchor"][1] - se
             err = math.hypot(en, ee)
-            if err > reanchor:
+            if err > reanchor or reanchor_now:
                 st["anchor"] = (sn - mk[0], se - mk[1])
                 how = "reanchor"
             else:
@@ -633,6 +635,67 @@ class AsyncImageLogger(threading.Thread):
         self.running = False
 
 
+# Marker camera (--marker-cam): RGB centre crop, used for the marker position from MARKER_CAM_MIN_H_M up.
+MARKER_CAM_FPS = 10
+MARKER_CAM_ISP_NUM, MARKER_CAM_ISP_DEN = 2, 3     # 3840x2160 -> 2560x1440
+MARKER_CAM_ISP_W, MARKER_CAM_ISP_H = 2560, 1440
+MARKER_CAM_W, MARKER_CAM_H = 1280, 800
+MARKER_CAM_MIN_H_M = 20.0
+MARKER_CAM_PROC_H_M = 15.0        # frames are not even decoded below this (ground test: -10 % flow fps)
+MARKER_CAM_DETECT_HZ = 10.0
+MARKER_CAM_FRESH_S = 1.0          # hysteresis: switching source re-anchors, so do it rarely
+MARKER_ATT_MAX_AGE_S = 0.15       # attitude history must reach this close to the frame time
+
+
+def crop_intrinsics(K, x0, y0):
+    """Camera matrix of a crop starting at pixel (x0, y0) of the image K belongs to."""
+    Kc = np.array(K, dtype=np.float64).copy()
+    Kc[0, 2] -= x0
+    Kc[1, 2] -= y0
+    return Kc
+
+
+def to_flow_camera_frame(tvec, R, t_m):
+    """A point in the marker camera's frame, expressed in the flow camera's (CAM_B) frame.
+
+    R, t_m: the EEPROM extrinsics from the marker camera to CAM_B (translation in metres). On
+    this unit that is 3.7 cm and 0.70 deg, of which 0.49 deg is tilt (0.37 about x, 0.33 about
+    y) - 0.8 m at 95 m if it were ignored; the rest turns about the optical axis."""
+    v = np.asarray(tvec, dtype=np.float64).ravel()[:3]
+    return np.asarray(R, dtype=np.float64) @ v + np.asarray(t_m, dtype=np.float64).ravel()[:3]
+
+
+def attitude_at_time(hist, t, max_age=MARKER_ATT_MAX_AGE_S):
+    """(roll, pitch, yaw) deg at monotonic time t, interpolated from [(t, roll, pitch, yaw)].
+
+    The marker camera's frames are ~60 ms old when they arrive and ~85 ms by the time the pose is
+    solved; at 10 deg/s of swing the current attitude would be ~0.8 deg off, 1.3 m at 95 m.
+    None when the history does not reach t (then the caller falls back to the current attitude)."""
+    if not hist:
+        return None
+    if t <= hist[0][0]:
+        return tuple(hist[0][1:4]) if hist[0][0] - t <= max_age else None
+    if t >= hist[-1][0]:
+        return tuple(hist[-1][1:4]) if t - hist[-1][0] <= max_age else None
+    for i in range(len(hist) - 1, 0, -1):
+        t0, r0, p0, y0 = hist[i - 1]
+        t1, r1, p1, y1 = hist[i]
+        if t0 <= t <= t1:
+            if t1 - t0 > max_age:
+                return None
+            a = 0.0 if t1 <= t0 else (t - t0) / (t1 - t0)
+            dy = (y1 - y0 + 180.0) % 360.0 - 180.0
+            return r0 + a * (r1 - r0), p0 + a * (p1 - p0), y0 + a * dy
+    return None
+
+
+def centre_marker_pick(cands, min_px=None):
+    """The largest centre-target marker (45/16/0) big enough to trust, or None."""
+    min_px = MARKER_MIN_PX if min_px is None else min_px
+    usable = [c for c in cands if c[0] in MARKER_POS_IDS and c[1] >= min_px]
+    return usable[0] if usable else None
+
+
 class ArucoWorker(threading.Thread):
     """
     ArUco detection off the flow loop. detectMarkers takes ~17 ms on the Orin Nano; run inline at
@@ -741,7 +804,8 @@ def setup_logging(test_mode=False):
     logging.info("=" * 65)
     return log_file
 
-def build_oak_pipeline(max_exposure_us=3000, max_iso=1200, rgb_shadow=False, rgb_autofocus=False):
+def build_oak_pipeline(max_exposure_us=3000, max_iso=1200, rgb_shadow=False, rgb_autofocus=False,
+                       marker_cam=False):
     pipeline = dai.Pipeline()
 
     board_config = dai.BoardConfig()
@@ -776,6 +840,35 @@ def build_oak_pipeline(max_exposure_us=3000, max_iso=1200, rgb_shadow=False, rgb
     feature_tracker.outputFeatures.link(xout_ft.input)
 
 
+
+    if marker_cam and not rgb_shadow:
+        # Marker camera: the 12 MP RGB sensor (CAM_A), ISP-scaled to 2560x1440 (fx ~1943) and the
+        # centre 1280x800 sent as grey at 10 fps. On the ground (19 Sep) the second mono could not
+        # be used: a different resolution crashes the device and a different frame rate drags the
+        # flow camera down with it (both monos are hardware-synced). The RGB sensor is separate;
+        # the flow loop kept 95-97 fps with it at 10 fps (90-92 at 15 fps). ID 45 is ~74 px here
+        # at 95 m vs 14 px on the 640x400 mono.
+        rgb_m = pipeline.create(dai.node.ColorCamera)
+        rgb_m.setBoardSocket(dai.CameraBoardSocket.CAM_A)
+        rgb_m.setResolution(dai.ColorCameraProperties.SensorResolution.THE_4_K)
+        rgb_m.setIspScale(MARKER_CAM_ISP_NUM, MARKER_CAM_ISP_DEN)
+        rgb_m.setFps(MARKER_CAM_FPS)
+        rgb_m.setInterleaved(False)
+        rgb_m.initialControl.setManualFocus(0)              # infinity
+        rgb_m.initialControl.setAutoExposureEnable()
+        rgb_m.initialControl.setAutoExposureLimit(max_exposure_us)
+        iw, ih = rgb_m.getIspSize()
+        fw, fh = MARKER_CAM_W / iw, MARKER_CAM_H / ih
+        manip_m = pipeline.create(dai.node.ImageManip)
+        manip_m.initialConfig.setCropRect(0.5 - fw / 2, 0.5 - fh / 2, 0.5 + fw / 2, 0.5 + fh / 2)
+        manip_m.initialConfig.setFrameType(dai.ImgFrame.Type.GRAY8)
+        manip_m.setMaxOutputFrameSize(MARKER_CAM_W * MARKER_CAM_H * 3)
+        manip_m.inputImage.setBlocking(False)
+        manip_m.inputImage.setQueueSize(1)
+        rgb_m.isp.link(manip_m.inputImage)
+        xout_hi = pipeline.create(dai.node.XLinkOut)
+        xout_hi.setStreamName("mono_hi")
+        manip_m.out.link(xout_hi.input)
 
     pipeline.setXLinkChunkSize(0)
 
@@ -837,6 +930,9 @@ def main():
     parser.add_argument("--marker-pos", action="store_true",
                         help="Marker map stage 2: let the centre marker (IDs 45/16/0) hold the position "
                              "sent to the EKF between 2 and 100 m.")
+    parser.add_argument("--marker-cam", action="store_true",
+                        help="Use the RGB camera (1280x800 centre crop, fx ~1943) for the centre marker's "
+                             "position above 20 m. The flow camera is unchanged.")
     parser.add_argument("--marker-vel-off", action="store_true",
                         help="With --marker-pos: above 35 m, while the marker holds the position, do not "
                              "send the flow velocity (it is off by 2 m/s up there).")
@@ -898,6 +994,10 @@ def main():
     aruco_params.cornerRefinementMethod = aruco.CORNER_REFINE_NONE
     aruco_detector = aruco.ArucoDetector(aruco_dict, aruco_params)
     aruco_worker = ArucoWorker(aruco_detector)  # 25 Hz max, newest frame only
+    # Marker camera frames get their own detector and thread (~21 ms each at 1280x800).
+    hi_worker = (ArucoWorker(aruco.ArucoDetector(aruco_dict, aruco_params),
+                             min_interval_s=1.0 / MARKER_CAM_DETECT_HZ)
+                 if args.marker_cam else None)
     camera_frame_clock = [None]                 # time of the newest frame, for the watchdog
     camera_watchdog = CameraWatchdog(cuav, camera_frame_clock)
     marker_size_m = float(args.marker_size)
@@ -922,7 +1022,11 @@ def main():
     dist_coeffs = np.zeros((4, 1), dtype=np.float32)
 
     # Connect to OAK-D Pro camera with retry loop (up to 30 seconds for cold boot)
-    pipeline = build_oak_pipeline(args.max_exposure, args.max_iso, args.rgb_shadow, args.rgb_af)
+    if args.marker_cam and args.rgb_shadow:
+        logging.warning("[!] --marker-cam and --rgb-shadow both need the RGB camera: marker camera OFF")
+        args.marker_cam = False
+    pipeline = build_oak_pipeline(args.max_exposure, args.max_iso, args.rgb_shadow, args.rgb_af,
+                                  marker_cam=args.marker_cam)
     device = None
     max_retries = 25
     for attempt in range(1, max_retries + 1):
@@ -985,6 +1089,28 @@ def main():
                 logging.info(f"[+] RGB shadow flow ON: 4K centre crop 640x400, fx={fx_rgb:.0f} (mono fx={focal_length_px:.0f})")
             except Exception as e:
                 logging.warning(f"[-] RGB shadow: calibration read failed ({e}), using fx={fx_rgb:.0f}")
+        q_hi = None
+        K_hi = dist_hi = R_hi = t_hi = None
+        if args.marker_cam:
+            try:
+                _cal = device.readCalibration()
+                _Ka = np.array(_cal.getCameraIntrinsics(dai.CameraBoardSocket.CAM_A,
+                                                        MARKER_CAM_ISP_W, MARKER_CAM_ISP_H))
+                K_hi = crop_intrinsics(_Ka, (MARKER_CAM_ISP_W - MARKER_CAM_W) / 2.0,
+                                       (MARKER_CAM_ISP_H - MARKER_CAM_H) / 2.0).astype(np.float32)
+                dist_hi = np.array(_cal.getDistortionCoefficients(dai.CameraBoardSocket.CAM_A),
+                                   dtype=np.float32).reshape(-1, 1)
+                _E = np.array(_cal.getCameraExtrinsics(dai.CameraBoardSocket.CAM_A,
+                                                       dai.CameraBoardSocket.CAM_B))
+                R_hi, t_hi = _E[:3, :3], _E[:3, 3] / 100.0          # EEPROM translation is in cm
+                _ang = math.degrees(math.acos(max(-1.0, min(1.0, (np.trace(R_hi) - 1.0) / 2.0))))
+                q_hi = device.getOutputQueue(name="mono_hi", maxSize=2, blocking=False)
+                logging.info(f"[+] Marker camera ON: RGB {MARKER_CAM_W}x{MARKER_CAM_H} crop @ {MARKER_CAM_FPS} fps, "
+                             f"fx={K_hi[0, 0]:.0f} cx={K_hi[0, 2]:.0f} cy={K_hi[1, 2]:.0f}; to CAM_B "
+                             f"{np.linalg.norm(t_hi) * 100:.1f} cm, {_ang:.2f} deg; used above {MARKER_CAM_MIN_H_M:.0f} m")
+            except Exception as e:
+                logging.error(f"[!] Marker camera calibration failed ({e}): marker camera OFF")
+                q_hi = None
         q_imu = device.getOutputQueue(name="imu", maxSize=20, blocking=False)
         q_features = device.getOutputQueue(name="features", maxSize=4, blocking=False)
         ft_prev_features = {}  # id -> (x,y) from previous frame
@@ -1242,6 +1368,23 @@ def main():
         fv_state = {}                # --marker-vel-off hysteresis
         fv_sending = True
         mk2_why_log_t = 0.0
+        # Marker camera state (--marker-cam).
+        hi_seen_seq = 0
+        hi_hits = deque(maxlen=64)
+        hi_fix_t = -1e9              # time of the last usable marker-camera fix
+        hi_img_seq = 0
+        hi_img_t = 0.0
+        hi_log_t = 0.0
+        mk2_src_last = None
+        hi_log = None
+        if args.marker_cam:
+            try:
+                hi_log = open(os.path.join(LOG_DIR, "marker_hi.csv"), "a", buffering=1)
+                if hi_log.tell() == 0:
+                    hi_log.write("wall,t_frame,age_ms,airborne,h,id,px,tx,ty,tz,roll_f,pitch_f,yaw_f,att_src,"
+                                 "roll_now,pitch_now,mk_n,mk_e,down,used,lo_n,lo_e\n")
+            except Exception:
+                hi_log = None
         stage2_log = None
         if args.marker_pos:
             try:
@@ -1544,6 +1687,7 @@ def main():
             if not is_airborne and (mk2_state or mk2_fix is not None):
                 mk2_state.clear()                    # landed: next flight anchors afresh
                 mk2_fix = None
+                mk2_src_last = None
                 mk2_drive_t = -1e9
 
             if (not was_airborne) and is_airborne:
@@ -1682,7 +1826,7 @@ def main():
                             flight_record_dir = os.path.join(images_base_dir, datetime.now().strftime(f"{folder_prefix}_%Y%m%d_%H%M%S"))
                             os.makedirs(flight_record_dir, exist_ok=True)
                             logging.info(f"[+] DRONE ARMED: Starting flight recording -> {flight_record_dir}")
-                            logging.info(f"[+] Armed Flight Recording: Saving ~1 FPS images (max 1000) to {flight_record_dir}")
+                            logging.info(f"[+] Armed Flight Recording: Saving ~1 FPS images (max 3000) to {flight_record_dir}")
                     else:
                         # Debounce: wait 2.5 seconds of consistent disarm before closing folder
                         if last_armed_state and (now - last_armed_true_time > 2.5):
@@ -1699,9 +1843,9 @@ def main():
                 # Using decoupled AsyncImageLogger so disk I/O NEVER blocks the 30 Hz VIO loop
                 pass
 
-                # ~1 image/s: the 1000-image budget then covers a whole flight. At every 15th
+                # ~1 image/s: the 3000-image budget then covers a whole flight (1000 ran out at ~55 m on 19 Sep). At every 15th
                 # frame it ran out after 3 minutes, so the high-altitude part was never recorded.
-                if flight_record_dir and (frame_count % 80 == 0) and flight_img_seq < 1000:
+                if flight_record_dir and (frame_count % 80 == 0) and flight_img_seq < 3000:
                     flight_img_seq += 1
                     img_path = os.path.join(flight_record_dir, f"frame_{flight_img_seq:05d}.jpg")
                     image_logger.log_image(img_path, mono_f, is_bytes=False)
@@ -1762,7 +1906,7 @@ def main():
                     aruco_obj_pts = _obj_pts(marker_sizes[aruco_id])
 
                     # Save annotated detection image when ArUco is locked (visual confirmation during flight)
-                    if flight_record_dir and (aruco_detect_count % 5 == 1) and flight_img_seq < 1000:
+                    if flight_record_dir and (aruco_detect_count % 5 == 1) and flight_img_seq < 3000:
                         flight_img_seq += 1
                         annotated = cv2.cvtColor(aruco_img, cv2.COLOR_GRAY2BGR)
                         cv2.polylines(annotated, [m_corners.astype(np.int32)], True, (0, 255, 0), 2)
@@ -1816,8 +1960,10 @@ def main():
                                                yaw_rad)[2]
                             _ok, _why = marker_fix_usable(aruco_id, current_altitude_m, _down, roll_deg,
                                                           pitch_deg, _conf, is_airborne, cuav.is_armed)
-                            if _ok:
-                                mk2_fix = (pad_offset_north, pad_offset_east, now)
+                            _hi_active = (now - hi_fix_t <= MARKER_CAM_FRESH_S
+                                          and current_altitude_m >= MARKER_CAM_MIN_H_M)
+                            if _ok and not _hi_active:
+                                mk2_fix = (pad_offset_north, pad_offset_east, now, "lo")
                             elif _why != mk2_last_why and (now - mk2_why_log_t) >= 3.0:
                                 mk2_why_log_t = now
                                 logging.info(f"[-] Marker position not used: {_why}")
@@ -1838,6 +1984,69 @@ def main():
                         if not tf03_valid and height_source in ["HOLD", "BARO_REL"]:
                             current_altitude_m = float(np.clip(0.80 * current_altitude_m + 0.20 * aruco_agl, 0.00, 15.00))
                             height_source = "ARUCO_Z"
+
+                # 4b. Marker camera (RGB crop): the centre marker's position above MARKER_CAM_MIN_H_M.
+                if q_hi is not None:
+                    try:
+                        _hp = q_hi.tryGetAll()             # always drain, so the queue never backs up
+                        if _hp and (current_altitude_m >= MARKER_CAM_PROC_H_M or args.test):
+                            hi_worker.submit(_hp[-1].getCvFrame(), _hp[-1].getTimestamp().total_seconds())
+                    except Exception:
+                        pass
+                    _hr = hi_worker.result_after(hi_seen_seq)
+                    if _hr is not None:
+                        hi_seen_seq, _himg, _ht, _hc, _hids = _hr
+                        _hpick = centre_marker_pick(marker_candidates(_hids, _hc, marker_sizes))
+                        if _hpick is not None:
+                            _hid, _hpx, _hcor = _hpick
+                            _hsides = [float(np.linalg.norm(_hcor[i] - _hcor[(i + 1) % 4])) for i in range(4)]
+                            _hok = False
+                            if min(_hsides) >= 8.0 and max(_hsides) <= 2.5 * min(_hsides):
+                                _hok, _hrv, _htv = cv2.solvePnP(_obj_pts(marker_sizes[_hid]),
+                                                                _hcor.astype(np.float32), K_hi, dist_hi,
+                                                                flags=cv2.SOLVEPNP_IPPE_SQUARE)
+                            if _hok:
+                                _tb = to_flow_camera_frame(_htv, R_hi, t_hi)
+                                _att = attitude_at_time(getattr(cuav, 'att_hist', None), _ht)
+                                _asrc = "frame"
+                                if _att is None:
+                                    _att, _asrc = (roll_deg, pitch_deg, yaw_deg), "now"
+                                _mn, _me, _md = marker_ned(_tb, math.radians(_att[0]), math.radians(_att[1]),
+                                                           math.radians(_att[2]))
+                                _hn, _he = -_mn, -_me
+                                hi_hits.append(now)
+                                _hconf = sum(1 for t in hi_hits if now - t <= 0.5) >= ARUCO_CONFIRM_HITS
+                                _hu, _hwhy = marker_fix_usable(_hid, current_altitude_m, _md, _att[0], _att[1],
+                                                               _hconf, is_airborne, cuav.is_armed)
+                                _used = bool(args.marker_pos and _hu and current_altitude_m >= MARKER_CAM_MIN_H_M)
+                                if _used:
+                                    mk2_fix = (_hn, _he, now, "hi")
+                                    hi_fix_t = now
+                                if now - hi_log_t >= 5.0:
+                                    hi_log_t = now
+                                    logging.info(f"[+] Marker camera #{_hid}: {_hpx:.0f}px at {current_altitude_m:.1f} m "
+                                                 f"(attitude {_asrc}, {'used' if _used else 'not used: ' + (_hwhy or 'below ' + str(int(MARKER_CAM_MIN_H_M)) + ' m')})")
+                                if hi_log is not None and (cuav.is_armed or args.test):
+                                    try:
+                                        _lo_fresh = now - last_aruco_lock_time <= 0.2
+                                        hi_log.write(
+                                            f"{time.time():.4f},{_ht:.4f},{(time.monotonic() - _ht) * 1000:.0f},{int(is_airborne)},"
+                                            f"{current_altitude_m:.3f},{_hid},{_hpx:.1f},{_tb[0]:.3f},{_tb[1]:.3f},{_tb[2]:.3f},"
+                                            f"{_att[0]:.2f},{_att[1]:.2f},{_att[2]:.2f},{_asrc},{roll_deg:.2f},{pitch_deg:.2f},"
+                                            f"{_hn:.4f},{_he:.4f},{_md:.3f},{int(_used)},"
+                                            f"{last_aruco_offset[0] if _lo_fresh else math.nan:.4f},"
+                                            f"{last_aruco_offset[1] if _lo_fresh else math.nan:.4f}\n")
+                                    except Exception:
+                                        pass
+                                if flight_record_dir and now - hi_img_t >= 1.0 and hi_img_seq < 1500:
+                                    hi_img_t = now
+                                    hi_img_seq += 1
+                                    _ann = cv2.cvtColor(_himg, cv2.COLOR_GRAY2BGR)
+                                    cv2.polylines(_ann, [_hcor.astype(np.int32)], True, (0, 255, 0), 2)
+                                    cv2.putText(_ann, f"HI #{_hid} {_hpx:.0f}px h{current_altitude_m:.0f}m",
+                                                (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
+                                    image_logger.log_image(os.path.join(flight_record_dir, f"hi_{hi_img_seq:05d}_ID{_hid}.jpg"),
+                                                           _ann, is_bytes=False)
 
                 # 5. OAK-D Myriad-X FeatureTracker Optical Flow (Zero Jetson CPU!)
                 if in_ft is not None:
@@ -2159,7 +2368,14 @@ def main():
                                     mk2_used_t = mk2_fix[2]
                                 _dt = 0.04 if mk2_send_t is None else max(0.0, min(0.2, now - mk2_send_t))
                                 mk2_send_t = now
-                                px, py, _how = marker_fix_step(mk2_state, pos_north, pos_east, _mk, _dt)
+                                _switch = bool(_fresh and mk2_src_last is not None and mk2_fix[3] != mk2_src_last)
+                                if _fresh:
+                                    mk2_src_last = mk2_fix[3]
+                                px, py, _how = marker_fix_step(mk2_state, pos_north, pos_east, _mk, _dt,
+                                                               reanchor_now=_switch)
+                                if _switch:
+                                    logging.info(f"[+] Marker position source -> {'marker camera' if mk2_src_last == 'hi' else 'flow camera'} "
+                                                 f"at {current_altitude_m:.1f} m")
                                 if _how in ("anchor", "marker"):
                                     mk2_drive_t = now
                                 if _how in ("anchor", "reanchor"):
@@ -2555,6 +2771,8 @@ def main():
     image_logger.stop()
     camera_watchdog.stop()
     aruco_worker.stop()
+    if hi_worker is not None:
+        hi_worker.stop()
     aruco_worker.join(timeout=1.0)  # exiting while detectMarkers runs aborts the interpreter
     try:
         jlk_worker.stop()

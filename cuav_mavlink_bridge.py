@@ -89,6 +89,9 @@ class CuavMavlinkClient:
         self._last_hb_send = 0.0
 
         self.last_attitude_time = 0.0
+        # (monotonic receive time, roll, pitch, yaw) deg - lets a late camera frame get the attitude
+        # of its own moment (the marker camera's frames are ~60 ms old on arrival).
+        self.att_hist = deque(maxlen=100)
         self.attitude_count = 0
         # Heading for rotating optical flow into NED. Integrated from FC body rates so it is not
         # the EKF's own yaw fed straight back (that loop froze EKF yaw in flights 18/19), and
@@ -262,6 +265,7 @@ class CuavMavlinkClient:
                         self.yaw_deg = msg.yaw * 57.2958
                         self.last_attitude_time = time.time()
                         self.attitude_count += 1
+                        self.att_hist.append((time.monotonic(), self.roll_deg, self.pitch_deg, self.yaw_deg))
                         self._update_flow_heading(msg.time_boot_ms, msg.roll, msg.pitch, msg.yaw,
                                                   msg.rollspeed, msg.pitchspeed, msg.yawspeed)
                     elif t == 'GLOBAL_POSITION_INT':
