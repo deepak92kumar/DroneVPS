@@ -311,14 +311,22 @@ def marker_offset_yaw_only(tvec, yaw_rad):
 # the twelve distributed ones sit elsewhere and need the full map before they can be mixed in.
 MARKER_POS_IDS = frozenset({45, 16, 0})
 MARKER_POS_MIN_H_M = 2.0
-MARKER_POS_MAX_H_M = 15.0        # first flights: stay where a surprise is recoverable
+MARKER_POS_MAX_H_M = 100.0       # stage 3: ID 45 (3.6 m) still decodes at 11 px to ~130 m
 MARKER_POS_HEIGHT_TOL = 0.25     # the pose's height must agree with the lidar to 25 %
 MARKER_POS_MAX_TILT_DEG = 25.0
 MARKER_CORR_RATE_MS = 4.0        # fastest the marker may move the sent position (m/s)
 MARKER_REANCHOR_M = 6.0          # a disagreement larger than this is not corrected, only re-anchored
 FLOW_RESET_JUMP_M = 3.0          # a flow step larger than this is a reset, not motion
 MARKER_POS_ERR_M = 0.5           # position error declared to the EKF while the marker holds it
+# Stage 3: above 25 m the error is set by the attitude, not the pixels - 1 deg is 0.017*h metres, and
+# flights 38/39 stepped 2-7 deg at every EKF lane switch. 2 % of height: 1 m at 50 m, 2 m at 100 m.
+MARKER_POS_ERR_PER_M = 0.02
 MARKER_FRESH_S = 0.5
+
+
+def marker_pos_err_m(height_m):
+    """Position error (m) declared to the EKF while the marker holds the position at this height."""
+    return max(MARKER_POS_ERR_M, MARKER_POS_ERR_PER_M * max(0.0, height_m))
 
 
 def marker_fix_usable(mid, height_m, marker_down_m, roll_deg, pitch_deg, confirmed, airborne, armed,
@@ -2065,7 +2073,8 @@ def main():
                                         cuav.send_statustext(">>> MARKER POS ON", severity=6)
                                 if (latched or ready_to_fuse) and now - mk2_drive_t <= MARKER_FRESH_S:
                                     # Tighten only a trusted estimate; never promote an untrusted one.
-                                    pos_cov = MARKER_POS_ERR_M ** 2 / 3.0      # PErr = sqrt(3 * cov)
+                                    # PErr = sqrt(3 * cov); never looser than the flow's own figure.
+                                    pos_cov = min(pos_cov, marker_pos_err_m(current_altitude_m) ** 2 / 3.0)
                                 if stage2_log is not None and cuav.is_armed:
                                     try:
                                         stage2_log.write(

@@ -113,7 +113,7 @@ def test_only_the_centre_target_is_used():
 
 def test_the_height_window():
     assert not good(height_m=1.5, marker_down_m=1.5)[0]
-    assert not good(height_m=20.0, marker_down_m=20.0)[0]
+    assert not good(height_m=110.0, marker_down_m=110.0)[0]
 
 
 def test_a_pose_that_disagrees_with_the_lidar_is_refused():
@@ -138,3 +138,34 @@ def test_before_the_marker_locks_nothing_changes_even_through_a_flow_reset():
     for f in [(0.0, 0.0), (5.0, 1.0), (9.0, 2.0), (0.0, 0.0), (0.4, 0.1)]:   # includes a reset to 0
         n, e, how = run(st, f, None)
         assert (n, e) == (float(f[0]), float(f[1])) and how == "flow"
+
+
+# --- stage 3: above 15 m -----------------------------------------------------------------------
+
+from flight_daemon import MARKER_POS_ERR_M, marker_pos_err_m
+
+
+def test_stage_3_uses_the_marker_up_to_100_m():
+    """Flights 38/39 locked ID 45 continuously at 40-55 m; that is where the flow drifts most."""
+    for h in (20.0, 50.0, 95.0):
+        assert good(height_m=h, marker_down_m=h)[0]
+    assert not good(height_m=110.0, marker_down_m=110.0)[0]
+
+
+def test_declared_error_grows_with_height():
+    """Low down it is exactly stage 2; above 25 m it follows the attitude error (2 % of height)."""
+    assert marker_pos_err_m(5.0) == MARKER_POS_ERR_M and marker_pos_err_m(25.0) == MARKER_POS_ERR_M
+    assert abs(marker_pos_err_m(50.0) - 1.0) < 1e-9 and abs(marker_pos_err_m(100.0) - 2.0) < 1e-9
+
+
+def test_a_jittery_far_marker_still_holds_against_a_drifting_flow():
+    """50 m: the marker jitters 15 cm per frame, the flow drifts 0.8 m/s. The sent position must
+    stay near the marker, not follow the flow."""
+    import random
+    rnd = random.Random(3)
+    st = {}
+    run(st, (0.0, 0.0), (0.0, 0.0))
+    for i in range(1, 500):                               # 20 s
+        flow = (0.8 * i * DT, 0.0)                        # 16 m of flow drift
+        n, e, _ = run(st, flow, (rnd.gauss(0, 0.15), rnd.gauss(0, 0.15)))
+    assert math.hypot(n, e) < 0.6
