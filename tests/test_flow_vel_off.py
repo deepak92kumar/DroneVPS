@@ -88,8 +88,15 @@ def test_a_huge_gap_still_brings_it_back():
 
 
 def test_the_backstop_grows_with_height():
-    assert flow_vel_gap_limit(40.0) == 3.0
-    assert abs(flow_vel_gap_limit(90.0) - 5.4) < 1e-9
+    assert flow_vel_gap_limit(40.0) == 6.0
+    assert abs(flow_vel_gap_limit(90.0) - 9.0) < 1e-9
+
+
+def test_an_ordinary_climb_gap_no_longer_brings_it_back():
+    """Flights 44/46/47 all resumed the velocity on a 3 m gap at 43-51 m while the EKF was fine."""
+    st = {}
+    _, t = run(st, 0.0, 5.0, 45.0)
+    assert flow_velocity_wanted(st, t, 45.0, True, (3.1, 0.0), 0.35) is False
 
 
 def test_after_trouble_it_stays_on_for_a_while():

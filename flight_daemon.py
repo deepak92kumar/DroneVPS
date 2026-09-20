@@ -343,9 +343,12 @@ def flow_shift_since(hist, t, max_age_s=1.0, max_jump_m=3.0):
     """How far the flow says the drone has moved since time t, from [(t, north, east)].
 
     A marker fix describes where the drone was when the frame was taken - 174 ms ago for the
-    marker camera on 20 Sep, 60-80 ms for the flow camera. Feeding that to the EKF as if it were
-    the position now is a lag the position loop has to pay for. Returns (dn, de), or None when
-    the history does not cover t or the flow integrator was reset in between."""
+    marker camera on 20 Sep, 60-80 ms for the flow camera. Carrying it forward removes that lag,
+    but it pays the flow's own noise: flight 47 doubled the step between consecutive fixes at
+    35-50 m (18 -> 36 cm) because the flow velocity is 1.5-2 m/s wrong up there, and the noisier
+    position fed the EKF until the guard brought the flow velocity back and the drone swung. So
+    this is behind --marker-lag-comp, off by default. Returns (dn, de), or None when the history
+    does not cover t or the flow integrator was reset in between."""
     if not hist or t is None:
         return None
     t_new, n_new, e_new = hist[-1]
@@ -390,8 +393,12 @@ FLOW_VEL_OFF_HOLD_S = 1.0        # the marker must have held this long before th
 # max(3 m, 6 % h), measured against its value when the velocity stopped.
 FLOW_VEL_SP_ON = 0.8
 FLOW_VEL_SP_CALM = 0.5           # the velocity only stops while the test ratio is below this
-FLOW_VEL_GAP_MIN_M = 3.0
-FLOW_VEL_GAP_PER_M = 0.06
+# The gap is only a backstop for the case the test ratio somehow misses. At max(3 m, 6 % h) it
+# fired on ordinary climbs at 46 m (flight 44), 51 m (46) and 43 m (47) and each time brought
+# back a flow velocity that is 1.4-2.3 m/s wrong there. In the 42A divergence the test ratio
+# reached 0.8 at 240.8 s while the gap only passed 3 m at 242 s, so the test ratio leads anyway.
+FLOW_VEL_GAP_MIN_M = 6.0
+FLOW_VEL_GAP_PER_M = 0.10
 FLOW_VEL_CALM_S = 3.0            # the EKF must have been steady this long before the velocity stops
 FLOW_VEL_EKF_FRESH_S = 0.5       # GLOBAL_POSITION_INT, 10 Hz
 FLOW_VEL_STATUS_FRESH_S = 1.0    # EKF_STATUS_REPORT, 5 Hz
@@ -994,6 +1001,9 @@ def main():
     parser.add_argument("--marker-cam-focus", type=int, default=MARKER_CAM_FOCUS,
                         help=f"Lens position of the marker camera (0-255, default {MARKER_CAM_FOCUS}). "
                              "0 was out of focus on 20 Sep.")
+    parser.add_argument("--marker-lag-comp", action="store_true",
+                        help="Carry each marker fix forward by the flow movement since its frame. "
+                             "Flight 47: doubles the fix-to-fix step at 35-50 m, so off by default.")
     parser.add_argument("--marker-cam-af-off", action="store_true",
                         help="Do not autofocus the marker camera once at 25 m; keep --marker-cam-focus.")
     parser.add_argument("--marker-vel-off", action="store_true",
@@ -2031,7 +2041,7 @@ def main():
                             _hi_active = (now - hi_fix_t <= MARKER_CAM_FRESH_S
                                           and current_altitude_m >= MARKER_CAM_MIN_H_M)
                             if _ok and not _hi_active:
-                                _sl = flow_shift_since(flow_hist, t_aruco_frame)
+                                _sl = flow_shift_since(flow_hist, t_aruco_frame) if args.marker_lag_comp else None
                                 mk2_fix = ((pad_offset_north + (_sl[0] if _sl else 0.0),
                                             pad_offset_east + (_sl[1] if _sl else 0.0), now, "lo"))
                             elif _why != mk2_last_why and (now - mk2_why_log_t) >= 3.0:
@@ -2114,7 +2124,7 @@ def main():
                                 _mn, _me, _md = marker_ned(_tb, math.radians(_att[0]), math.radians(_att[1]),
                                                            math.radians(_att[2]))
                                 _hn, _he = -_mn, -_me
-                                _sh = flow_shift_since(flow_hist, _ht)
+                                _sh = flow_shift_since(flow_hist, _ht) if args.marker_lag_comp else None
                                 _lagc = _sh is not None
                                 if _lagc:
                                     _hn, _he = _hn + _sh[0], _he + _sh[1]
