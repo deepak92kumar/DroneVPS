@@ -155,3 +155,48 @@ def test_the_relative_heading_is_the_bearing_from_the_nose():
 def test_it_wraps_at_north():
     got, _ = marker_ground_heading(_rvec_for(-20.0), 170.0)
     assert -180.0 < got <= 180.0
+
+
+# --- the marker is laid out fresh each day, so its heading is measured every flight ----------
+
+from flight_daemon import (MARKER_HDG_MAX_TILT_DEG, MARKER_HDG_MIN_N, MARKER_HDG_MIN_PX,
+                           marker_heading_step)
+
+
+def feed(st, heading, n=MARKER_HDG_MIN_N, px=120.0, tilt=2.0, noise=0.0, seed=1):
+    import random
+    rnd = random.Random(seed)
+    out = None
+    for _ in range(n):
+        out = marker_heading_step(st, heading + rnd.gauss(0.0, noise), px, tilt)
+    return out
+
+
+def test_nothing_is_claimed_until_there_are_enough_sightings():
+    st = {}
+    assert feed(st, 12.0, n=MARKER_HDG_MIN_N - 1) is None
+    assert marker_heading_step(st, 12.0, 120.0, 2.0) is not None
+
+
+def test_a_steady_marker_gives_its_heading_back():
+    got = feed({}, 37.0, n=200, noise=1.0)
+    assert abs(got[0] - 37.0) < 0.5 and got[1] < 2.0 and got[2] == 200
+
+
+def test_it_works_across_north():
+    got = feed({}, 179.0, n=200, noise=2.0)
+    assert abs(((got[0] - 179.0 + 180.0) % 360.0) - 180.0) < 1.0
+
+
+def test_a_small_marker_or_a_tilted_drone_is_not_counted():
+    st = {}
+    for _ in range(200):
+        assert marker_heading_step(st, 10.0, MARKER_HDG_MIN_PX - 1, 2.0) is None
+        assert marker_heading_step(st, 10.0, 200.0, MARKER_HDG_MAX_TILT_DEG + 1) is None
+    assert st == {}
+
+
+def test_a_noisy_marker_shows_as_spread():
+    tight = feed({}, 20.0, n=300, noise=0.5)
+    loose = feed({}, 20.0, n=300, noise=5.0, seed=2)
+    assert tight[1] < 1.5 < loose[1]

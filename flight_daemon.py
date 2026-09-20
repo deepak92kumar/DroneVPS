@@ -788,6 +788,30 @@ def marker_ground_heading(rvec, yaw_deg):
     return (yaw_deg + rel + 180.0) % 360.0 - 180.0, rel
 
 
+MARKER_HDG_MIN_PX = 40.0          # below this the corners are too coarse to average a heading from
+MARKER_HDG_MAX_TILT_DEG = 8.0
+MARKER_HDG_MIN_N = 50
+
+
+def marker_heading_step(st, ground_hdg_deg, px, tilt_deg):
+    """Running estimate of the marker's own heading over the ground, as a circular mean.
+
+    The marker is laid out fresh for each day's flying, so its heading is not a constant anyone
+    can write down: it has to be measured every flight. Only clean sightings count - a big marker
+    and a level drone. Returns (heading, spread, n) once there are enough of them, else None."""
+    if px < MARKER_HDG_MIN_PX or tilt_deg > MARKER_HDG_MAX_TILT_DEG or ground_hdg_deg != ground_hdg_deg:
+        return None
+    a = math.radians(ground_hdg_deg)
+    st["s"] = st.get("s", 0.0) + math.sin(a)
+    st["c"] = st.get("c", 0.0) + math.cos(a)
+    st["n"] = st.get("n", 0) + 1
+    if st["n"] < MARKER_HDG_MIN_N:
+        return None
+    r = math.hypot(st["s"], st["c"]) / st["n"]
+    spread = math.degrees(math.sqrt(max(0.0, -2.0 * math.log(max(1e-12, r)))))   # circular sd
+    return math.degrees(math.atan2(st["s"], st["c"])), spread, st["n"]
+
+
 def centre_marker_pick(cands, min_px=None):
     """The largest centre-target marker (45/16/0) big enough to trust, or None."""
     min_px = MARKER_MIN_PX if min_px is None else min_px
@@ -1493,6 +1517,9 @@ def main():
         # Marker camera state (--marker-cam).
         hi_seen_seq = 0
         hi_lens = -1
+        hi_hdg_state = {}
+        hi_hdg_log_t = 0.0
+        hi_hdg_said = False
         flow_hist = deque(maxlen=400)     # (monotonic s, north, east) of the flow integrator
         hi_af_state = "off" if args.marker_cam_af_off else "wait"         # wait -> running -> locked
         hi_af_t = 0.0
@@ -1810,6 +1837,9 @@ def main():
                 height_weight_last = height_weight
             height_source_last = _src_kind
 
+            if not is_airborne and hi_hdg_state:
+                hi_hdg_state.clear()                 # each flight measures the marker afresh
+                hi_hdg_said = False
             if not is_airborne and (mk2_state or mk2_fix is not None):
                 mk2_state.clear()                    # landed: next flight anchors afresh
                 mk2_fix = None
@@ -2186,6 +2216,15 @@ def main():
                                     _mgh, _mrel = marker_ground_heading(_hrv, _att[2])
                                 except Exception:
                                     pass
+                                _hdg = marker_heading_step(hi_hdg_state, _mgh, _hpx,
+                                                           math.hypot(_att[0], _att[1]))
+                                if _hdg is not None and (now - hi_hdg_log_t) >= 15.0:
+                                    hi_hdg_log_t = now
+                                    logging.info(f"[+] Marker heading {_hdg[0]:+.1f} deg over the ground "
+                                                 f"(spread {_hdg[1]:.1f} deg, {_hdg[2]} sightings)")
+                                    if not hi_hdg_said and _hdg[2] >= 150 and _hdg[1] < 3.0:
+                                        hi_hdg_said = True
+                                        cuav.send_statustext(f">>> MARKER HDG {_hdg[0]:+.0f} +-{_hdg[1]:.1f}", severity=6)
                                 _sh = flow_shift_since(flow_hist, _ht) if args.marker_lag_comp else None
                                 _lagc = _sh is not None
                                 if _lagc:
