@@ -315,6 +315,20 @@ MARKER_POS_MAX_H_M = 100.0       # stage 3: ID 45 (3.6 m) still decodes at 11 px
 MARKER_POS_HEIGHT_TOL = 0.25     # the pose's height must agree with the lidar to 25 %
 MARKER_POS_MAX_TILT_DEG = 25.0
 MARKER_CORR_RATE_MS = 4.0        # fastest the marker may move the sent position (m/s)
+# ...but not up high. At 4 m/s the marker can order the position 4 m across in a second, and the
+# loiter controller answers that with a hard lean; every blow-up so far reached 25-30 deg. Above
+# 35 m the marker's own error is tens of centimetres anyway, so there is nothing to chase that
+# fast: the rate fades to MARKER_CORR_RATE_FAR_MS, which drifts back rather than darts back.
+MARKER_CORR_RATE_FAR_MS = 1.0
+MARKER_CORR_FAR_H_M = 60.0
+
+
+def marker_corr_rate_ms(height_m):
+    """How fast the marker may move the sent position at this height (m/s)."""
+    if height_m <= FLOW_VEL_OFF_H_M:
+        return MARKER_CORR_RATE_MS
+    a = min(1.0, (height_m - FLOW_VEL_OFF_H_M) / max(1e-6, MARKER_CORR_FAR_H_M - FLOW_VEL_OFF_H_M))
+    return MARKER_CORR_RATE_MS + a * (MARKER_CORR_RATE_FAR_MS - MARKER_CORR_RATE_MS)
 MARKER_REANCHOR_M = 6.0          # a disagreement larger than this is not corrected, only re-anchored
 FLOW_RESET_JUMP_M = 3.0          # a flow step larger than this is a reset, not motion
 MARKER_POS_ERR_M = 0.5           # position error declared to the EKF while the marker holds it
@@ -2496,6 +2510,7 @@ def main():
                                 if _fresh:
                                     mk2_src_last = mk2_fix[3]
                                 px, py, _how = marker_fix_step(mk2_state, pos_north, pos_east, _mk, _dt,
+                                                               rate=marker_corr_rate_ms(current_altitude_m),
                                                                source=mk2_src_last)
                                 if _switch:
                                     logging.info(f"[+] Marker position source -> {'marker camera' if mk2_src_last == 'hi' else 'flow camera'} "
@@ -2508,9 +2523,13 @@ def main():
                                     if _how == "anchor":
                                         cuav.send_statustext(">>> MARKER POS ON", severity=6)
                                 if (latched or ready_to_fuse) and now - mk2_drive_t <= MARKER_FRESH_S:
-                                    # Tighten only a trusted estimate; never promote an untrusted one.
-                                    # PErr = sqrt(3 * cov); never looser than the flow's own figure.
-                                    pos_cov = min(pos_cov, marker_pos_err_m(current_altitude_m) ** 2 / 3.0)
+                                    # Only a trusted estimate is touched; an untrusted one is never
+                                    # promoted. The figure is the marker's own error, honestly, even
+                                    # where that is looser than the flow's fixed 1.22 m: above ~60 m
+                                    # the marker is good to about 2 % of height and saying so lets the
+                                    # EKF lean on its IMU and answer with a gentle correction instead
+                                    # of chasing every centimetre of attitude noise.
+                                    pos_cov = marker_pos_err_m(current_altitude_m) ** 2 / 3.0
                                 if stage2_log is not None and cuav.is_armed:
                                     try:
                                         stage2_log.write(

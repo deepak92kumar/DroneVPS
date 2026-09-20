@@ -169,3 +169,38 @@ def test_a_jittery_far_marker_still_holds_against_a_drifting_flow():
         flow = (0.8 * i * DT, 0.0)                        # 16 m of flow drift
         n, e, _ = run(st, flow, (rnd.gauss(0, 0.15), rnd.gauss(0, 0.15)))
     assert math.hypot(n, e) < 0.6
+
+
+# --- gentler corrections up high (20 Sep: every blow-up reached 25-30 deg of lean) ------------
+
+from flight_daemon import (MARKER_CORR_RATE_FAR_MS, MARKER_CORR_RATE_MS, marker_corr_rate_ms,
+                           marker_pos_err_m)
+
+
+def test_down_low_the_correction_rate_is_unchanged():
+    assert marker_corr_rate_ms(5.0) == MARKER_CORR_RATE_MS
+    assert marker_corr_rate_ms(35.0) == MARKER_CORR_RATE_MS
+
+
+def test_up_high_the_marker_only_nudges():
+    assert marker_corr_rate_ms(60.0) == MARKER_CORR_RATE_FAR_MS
+    assert marker_corr_rate_ms(90.0) == MARKER_CORR_RATE_FAR_MS
+    assert MARKER_CORR_RATE_FAR_MS < marker_corr_rate_ms(45.0) < MARKER_CORR_RATE_MS
+
+
+def test_one_metre_of_drift_at_80_m_is_corrected_in_about_a_second():
+    """Gentle, not slow: the marker still removes a metre of drift in roughly a second."""
+    st = {}
+    rate = marker_corr_rate_ms(80.0)
+    run(st, (0.0, 0.0), (0.0, 0.0))
+    moved = 0.0
+    for _ in range(25):                      # 1 s at 25 Hz
+        n, e, _ = marker_fix_step(st, 1.0, 0.0, (0.0, 0.0), DT, rate=rate)
+        moved = n
+    assert 0.0 <= moved <= 0.1               # pulled back from 1 m to within 10 cm
+
+
+def test_the_declared_error_is_the_markers_own_even_when_looser():
+    """At 80 m the marker is good to ~1.6 m; the EKF is told that, not a flattering 1.22 m."""
+    assert marker_pos_err_m(80.0) > 1.22            # 1.6 m: looser than the flow's fixed figure
+    assert marker_pos_err_m(30.0) < 1.22            # 0.6 m: tighter, as before, lower down
