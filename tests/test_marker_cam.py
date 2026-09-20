@@ -90,10 +90,30 @@ def test_only_centre_markers_are_picked():
 
 
 def test_switching_camera_does_not_move_the_position():
-    """The two cameras' fixes differ by their calibration (a few cm to dm); do not chase that."""
+    """The two cameras' fixes differ by their calibration (0.11-0.21 m on 20 Sep); do not chase it."""
     st = {}
-    marker_fix_step(st, 0.0, 0.0, (0.0, 0.0), 0.04)
+    marker_fix_step(st, 0.0, 0.0, (0.0, 0.0), 0.04, source="lo")
     for _ in range(20):
-        n0, e0, _ = marker_fix_step(st, 0.0, 0.0, (0.0, 0.0), 0.04)
-    n1, e1, how = marker_fix_step(st, 0.0, 0.0, (0.4, -0.3), 0.04, reanchor_now=True)
-    assert how == "reanchor" and (n1, e1) == (n0, e0)
+        n0, e0, _ = marker_fix_step(st, 0.0, 0.0, (0.0, 0.0), 0.04, source="lo")
+    n1, e1, how = marker_fix_step(st, 0.0, 0.0, (0.4, -0.3), 0.04, source="hi")
+    assert how == "source" and (n1, e1) == (n0, e0)
+
+
+def test_swapping_cameras_over_and_over_does_not_drift():
+    """Flight 45 swapped source 20 times in five minutes. Each camera keeps its own anchor, so
+    the position must come out exactly where it went in."""
+    st = {}
+    marker_fix_step(st, 0.0, 0.0, (0.0, 0.0), 0.04, source="lo")
+    n0, e0, _ = marker_fix_step(st, 0.0, 0.0, (0.0, 0.0), 0.04, source="lo")
+    for i in range(40):
+        src, mk = ("hi", (0.4, -0.3)) if i % 2 else ("lo", (0.0, 0.0))
+        n, e, _ = marker_fix_step(st, 0.0, 0.0, mk, 0.04, source=src)
+    assert abs(n - n0) < 1e-9 and abs(e - e0) < 1e-9
+
+
+def test_each_camera_still_corrects_drift_on_its_own_anchor():
+    st = {}
+    marker_fix_step(st, 0.0, 0.0, (0.0, 0.0), 0.04, source="lo")
+    for i in range(1, 300):
+        n, e, _ = marker_fix_step(st, 2.0 * i / 299, 0.0, (0.4, -0.3), 0.04, source="hi")
+    assert abs(n - 0.0) < 0.05 and abs(e - 0.0) < 0.05        # held at the hi anchor, flow drift gone

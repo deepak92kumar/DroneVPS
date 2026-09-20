@@ -440,7 +440,7 @@ def marker_fix_usable(mid, height_m, marker_down_m, roll_deg, pitch_deg, confirm
 
 
 def marker_fix_step(st, flow_n, flow_e, mk, dt, rate=MARKER_CORR_RATE_MS,
-                    reanchor=MARKER_REANCHOR_M, reset_jump=FLOW_RESET_JUMP_M, reanchor_now=False):
+                    reanchor=MARKER_REANCHOR_M, reset_jump=FLOW_RESET_JUMP_M, source=None):
     """One update of the horizontal position sent to the EKF once the marker has taken part.
 
     The sent position is its own integrator: it moves with the flow between marker fixes, and each
@@ -452,8 +452,9 @@ def marker_fix_step(st, flow_n, flow_e, mk, dt, rate=MARKER_CORR_RATE_MS,
         disagreement bigger than `reanchor` is re-anchored rather than chased.
 
     st: dict, empty on the first call. mk: (north, east) of the drone relative to the marker, or
-    None when there is no usable fix. reanchor_now: the fix comes from a different camera than the
-    last one; re-anchor on it so the small calibration difference between the two is not chased.
+    None when there is no usable fix. source: which camera the fix came from. The two cameras
+    differ by their calibration (0.11-0.21 m on 20 Sep), so each keeps its own anchor: swapping
+    between them then moves nothing and costs nothing, however often it happens.
     Returns (north, east, how).
     """
     if st.get("anchor") is None and mk is None:
@@ -471,16 +472,22 @@ def marker_fix_step(st, flow_n, flow_e, mk, dt, rate=MARKER_CORR_RATE_MS,
         dfn = dfe = 0.0                                  # the flow was reset, not moved
     sn, se = st["sent"][0] + dfn, st["sent"][1] + dfe
     how = "flow"
+    anchors = st.setdefault("anchors", {})
     if mk is not None:
         if st.get("anchor") is None:
-            st["anchor"] = (sn - mk[0], se - mk[1])
+            st["anchor"] = anchors[source] = (sn - mk[0], se - mk[1])
             how = "anchor"
+        elif source not in anchors:
+            # First fix from this camera: anchor it where the position already is.
+            st["anchor"] = anchors[source] = (sn - mk[0], se - mk[1])
+            how = "source"
         else:
+            st["anchor"] = anchors[source]
             en = mk[0] + st["anchor"][0] - sn
             ee = mk[1] + st["anchor"][1] - se
             err = math.hypot(en, ee)
-            if err > reanchor or reanchor_now:
-                st["anchor"] = (sn - mk[0], se - mk[1])
+            if err > reanchor:
+                st["anchor"] = anchors[source] = (sn - mk[0], se - mk[1])
                 how = "reanchor"
             else:
                 lim = rate * max(dt, 0.0)
@@ -637,12 +644,14 @@ class AsyncImageLogger(threading.Thread):
 
 # Marker camera (--marker-cam): RGB centre crop, used for the marker position from MARKER_CAM_MIN_H_M up.
 MARKER_CAM_FPS = 10
+MARKER_CAM_FOCUS = 0              # lens position; 0 was soft on 20 Sep - set from the ground sweep
 MARKER_CAM_ISP_NUM, MARKER_CAM_ISP_DEN = 2, 3     # 3840x2160 -> 2560x1440
 MARKER_CAM_ISP_W, MARKER_CAM_ISP_H = 2560, 1440
 MARKER_CAM_W, MARKER_CAM_H = 1280, 800
 MARKER_CAM_MIN_H_M = 20.0
 MARKER_CAM_PROC_H_M = 15.0        # frames are not even decoded below this (ground test: -10 % flow fps)
 MARKER_CAM_DETECT_HZ = 10.0
+MARKER_CAM_CONFIRM_S = 1.0        # it detects at 10 Hz, so 3 hits need a longer window than the flow camera
 MARKER_CAM_FRESH_S = 1.0          # hysteresis: switching source re-anchors, so do it rarely
 MARKER_ATT_MAX_AGE_S = 0.15       # attitude history must reach this close to the frame time
 
@@ -805,7 +814,7 @@ def setup_logging(test_mode=False):
     return log_file
 
 def build_oak_pipeline(max_exposure_us=3000, max_iso=1200, rgb_shadow=False, rgb_autofocus=False,
-                       marker_cam=False):
+                       marker_cam=False, marker_cam_focus=MARKER_CAM_FOCUS):
     pipeline = dai.Pipeline()
 
     board_config = dai.BoardConfig()
@@ -854,7 +863,10 @@ def build_oak_pipeline(max_exposure_us=3000, max_iso=1200, rgb_shadow=False, rgb
         rgb_m.setIspScale(MARKER_CAM_ISP_NUM, MARKER_CAM_ISP_DEN)
         rgb_m.setFps(MARKER_CAM_FPS)
         rgb_m.setInterleaved(False)
-        rgb_m.initialControl.setManualFocus(0)              # infinity
+        rgb_m.initialControl.setManualFocus(marker_cam_focus)
+        xin_focus = pipeline.create(dai.node.XLinkIn)
+        xin_focus.setStreamName("marker_ctrl")
+        xin_focus.out.link(rgb_m.inputControl)
         rgb_m.initialControl.setAutoExposureEnable()
         rgb_m.initialControl.setAutoExposureLimit(max_exposure_us)
         iw, ih = rgb_m.getIspSize()
@@ -933,6 +945,8 @@ def main():
     parser.add_argument("--marker-cam", action="store_true",
                         help="Use the RGB camera (1280x800 centre crop, fx ~1943) for the centre marker's "
                              "position above 20 m. The flow camera is unchanged.")
+    parser.add_argument("--marker-cam-focus", type=int, default=MARKER_CAM_FOCUS,
+                        help="Lens position of the marker camera (0-255). 0 was out of focus on 20 Sep.")
     parser.add_argument("--marker-vel-off", action="store_true",
                         help="With --marker-pos: above 35 m, while the marker holds the position, do not "
                              "send the flow velocity (it is off by 2 m/s up there).")
@@ -1026,7 +1040,7 @@ def main():
         logging.warning("[!] --marker-cam and --rgb-shadow both need the RGB camera: marker camera OFF")
         args.marker_cam = False
     pipeline = build_oak_pipeline(args.max_exposure, args.max_iso, args.rgb_shadow, args.rgb_af,
-                                  marker_cam=args.marker_cam)
+                                  marker_cam=args.marker_cam, marker_cam_focus=args.marker_cam_focus)
     device = None
     max_retries = 25
     for attempt in range(1, max_retries + 1):
@@ -1370,6 +1384,7 @@ def main():
         mk2_why_log_t = 0.0
         # Marker camera state (--marker-cam).
         hi_seen_seq = 0
+        hi_lens = -1
         hi_hits = deque(maxlen=64)
         hi_fix_t = -1e9              # time of the last usable marker-camera fix
         hi_img_seq = 0
@@ -1382,7 +1397,7 @@ def main():
                 hi_log = open(os.path.join(LOG_DIR, "marker_hi.csv"), "a", buffering=1)
                 if hi_log.tell() == 0:
                     hi_log.write("wall,t_frame,age_ms,airborne,h,id,px,tx,ty,tz,roll_f,pitch_f,yaw_f,att_src,"
-                                 "roll_now,pitch_now,mk_n,mk_e,down,used,lo_n,lo_e\n")
+                                 "roll_now,pitch_now,mk_n,mk_e,down,used,lo_n,lo_e,lens\n")
             except Exception:
                 hi_log = None
         stage2_log = None
@@ -1990,6 +2005,7 @@ def main():
                     try:
                         _hp = q_hi.tryGetAll()             # always drain, so the queue never backs up
                         if _hp and (current_altitude_m >= MARKER_CAM_PROC_H_M or args.test):
+                            hi_lens = _hp[-1].getLensPosition()
                             hi_worker.submit(_hp[-1].getCvFrame(), _hp[-1].getTimestamp().total_seconds())
                     except Exception:
                         pass
@@ -2015,7 +2031,7 @@ def main():
                                                            math.radians(_att[2]))
                                 _hn, _he = -_mn, -_me
                                 hi_hits.append(now)
-                                _hconf = sum(1 for t in hi_hits if now - t <= 0.5) >= ARUCO_CONFIRM_HITS
+                                _hconf = sum(1 for t in hi_hits if now - t <= MARKER_CAM_CONFIRM_S) >= ARUCO_CONFIRM_HITS
                                 _hu, _hwhy = marker_fix_usable(_hid, current_altitude_m, _md, _att[0], _att[1],
                                                                _hconf, is_airborne, cuav.is_armed)
                                 _used = bool(args.marker_pos and _hu and current_altitude_m >= MARKER_CAM_MIN_H_M)
@@ -2035,7 +2051,7 @@ def main():
                                             f"{_att[0]:.2f},{_att[1]:.2f},{_att[2]:.2f},{_asrc},{roll_deg:.2f},{pitch_deg:.2f},"
                                             f"{_hn:.4f},{_he:.4f},{_md:.3f},{int(_used)},"
                                             f"{last_aruco_offset[0] if _lo_fresh else math.nan:.4f},"
-                                            f"{last_aruco_offset[1] if _lo_fresh else math.nan:.4f}\n")
+                                            f"{last_aruco_offset[1] if _lo_fresh else math.nan:.4f},{hi_lens}\n")
                                     except Exception:
                                         pass
                                 if flight_record_dir and now - hi_img_t >= 1.0 and hi_img_seq < 1500:
@@ -2372,13 +2388,13 @@ def main():
                                 if _fresh:
                                     mk2_src_last = mk2_fix[3]
                                 px, py, _how = marker_fix_step(mk2_state, pos_north, pos_east, _mk, _dt,
-                                                               reanchor_now=_switch)
+                                                               source=mk2_src_last)
                                 if _switch:
                                     logging.info(f"[+] Marker position source -> {'marker camera' if mk2_src_last == 'hi' else 'flow camera'} "
                                                  f"at {current_altitude_m:.1f} m")
-                                if _how in ("anchor", "marker"):
+                                if _how in ("anchor", "source", "marker"):
                                     mk2_drive_t = now
-                                if _how in ("anchor", "reanchor"):
+                                if _how in ("anchor", "source", "reanchor"):
                                     logging.info(f"[+] Marker position {_how} at {current_altitude_m:.1f} m "
                                                  f"(correction {math.hypot(px - pos_north, py - pos_east):.2f} m)")
                                     if _how == "anchor":
