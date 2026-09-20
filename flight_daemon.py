@@ -644,7 +644,11 @@ class AsyncImageLogger(threading.Thread):
 
 # Marker camera (--marker-cam): RGB centre crop, used for the marker position from MARKER_CAM_MIN_H_M up.
 MARKER_CAM_FPS = 10
-MARKER_CAM_FOCUS = 0              # lens position; 0 was soft on 20 Sep - set from the ground sweep
+# Lens position. A ground sweep on 20 Sep peaked at 120 on a scene a few metres away, and with
+# this lens (f=4.8 mm, f/2.0, 2.3 um pixels after the 2/3 ISP scale) the hyperfocal distance is
+# about 5 m, so a lens focused there is sharp from ~2.5 m to infinity. Flight 45 flew at lens 0,
+# far off that peak, and its images were soft: no marker was read above 41 m.
+MARKER_CAM_FOCUS = 120
 MARKER_CAM_ISP_NUM, MARKER_CAM_ISP_DEN = 2, 3     # 3840x2160 -> 2560x1440
 MARKER_CAM_ISP_W, MARKER_CAM_ISP_H = 2560, 1440
 MARKER_CAM_W, MARKER_CAM_H = 1280, 800
@@ -652,6 +656,9 @@ MARKER_CAM_MIN_H_M = 20.0
 MARKER_CAM_PROC_H_M = 15.0        # frames are not even decoded below this (ground test: -10 % flow fps)
 MARKER_CAM_DETECT_HZ = 10.0
 MARKER_CAM_CONFIRM_S = 1.0        # it detects at 10 Hz, so 3 hits need a longer window than the flow camera
+MARKER_CAM_AF_H_M = 25.0          # autofocus once at this height (the scene there really is at
+MARKER_CAM_AF_SETTLE_S = 2.5      # infinity and the marker is the only contrast) and lock the result
+MARKER_CAM_AF_MIN, MARKER_CAM_AF_MAX = 90, 150   # outside this the result is not believed
 MARKER_CAM_FRESH_S = 1.0          # hysteresis: switching source re-anchors, so do it rarely
 MARKER_ATT_MAX_AGE_S = 0.15       # attitude history must reach this close to the frame time
 
@@ -946,7 +953,10 @@ def main():
                         help="Use the RGB camera (1280x800 centre crop, fx ~1943) for the centre marker's "
                              "position above 20 m. The flow camera is unchanged.")
     parser.add_argument("--marker-cam-focus", type=int, default=MARKER_CAM_FOCUS,
-                        help="Lens position of the marker camera (0-255). 0 was out of focus on 20 Sep.")
+                        help=f"Lens position of the marker camera (0-255, default {MARKER_CAM_FOCUS}). "
+                             "0 was out of focus on 20 Sep.")
+    parser.add_argument("--marker-cam-af-off", action="store_true",
+                        help="Do not autofocus the marker camera once at 25 m; keep --marker-cam-focus.")
     parser.add_argument("--marker-vel-off", action="store_true",
                         help="With --marker-pos: above 35 m, while the marker holds the position, do not "
                              "send the flow velocity (it is off by 2 m/s up there).")
@@ -1103,7 +1113,7 @@ def main():
                 logging.info(f"[+] RGB shadow flow ON: 4K centre crop 640x400, fx={fx_rgb:.0f} (mono fx={focal_length_px:.0f})")
             except Exception as e:
                 logging.warning(f"[-] RGB shadow: calibration read failed ({e}), using fx={fx_rgb:.0f}")
-        q_hi = None
+        q_hi = q_hi_ctrl = None
         K_hi = dist_hi = R_hi = t_hi = None
         if args.marker_cam:
             try:
@@ -1119,12 +1129,13 @@ def main():
                 R_hi, t_hi = _E[:3, :3], _E[:3, 3] / 100.0          # EEPROM translation is in cm
                 _ang = math.degrees(math.acos(max(-1.0, min(1.0, (np.trace(R_hi) - 1.0) / 2.0))))
                 q_hi = device.getOutputQueue(name="mono_hi", maxSize=2, blocking=False)
+                q_hi_ctrl = device.getInputQueue(name="marker_ctrl")
                 logging.info(f"[+] Marker camera ON: RGB {MARKER_CAM_W}x{MARKER_CAM_H} crop @ {MARKER_CAM_FPS} fps, "
                              f"fx={K_hi[0, 0]:.0f} cx={K_hi[0, 2]:.0f} cy={K_hi[1, 2]:.0f}; to CAM_B "
                              f"{np.linalg.norm(t_hi) * 100:.1f} cm, {_ang:.2f} deg; used above {MARKER_CAM_MIN_H_M:.0f} m")
             except Exception as e:
                 logging.error(f"[!] Marker camera calibration failed ({e}): marker camera OFF")
-                q_hi = None
+                q_hi = q_hi_ctrl = None
         q_imu = device.getOutputQueue(name="imu", maxSize=20, blocking=False)
         q_features = device.getOutputQueue(name="features", maxSize=4, blocking=False)
         ft_prev_features = {}  # id -> (x,y) from previous frame
@@ -1385,6 +1396,8 @@ def main():
         # Marker camera state (--marker-cam).
         hi_seen_seq = 0
         hi_lens = -1
+        hi_af_state = "off" if args.marker_cam_af_off else "wait"         # wait -> running -> locked
+        hi_af_t = 0.0
         hi_hits = deque(maxlen=64)
         hi_fix_t = -1e9              # time of the last usable marker-camera fix
         hi_img_seq = 0
@@ -2001,6 +2014,35 @@ def main():
                             height_source = "ARUCO_Z"
 
                 # 4b. Marker camera (RGB crop): the centre marker's position above MARKER_CAM_MIN_H_M.
+                if q_hi is not None and q_hi_ctrl is not None and hi_af_state in ("wait", "running"):
+                    # No focus pinned: let the camera focus itself once, high up where the marker is
+                    # the only thing in view, then hold that lens position for the rest of the flight.
+                    if hi_af_state == "wait" and current_altitude_m >= MARKER_CAM_AF_H_M and is_airborne:
+                        try:
+                            _c = dai.CameraControl()
+                            _c.setAutoFocusMode(dai.CameraControl.AutoFocusMode.AUTO)
+                            _c.setAutoFocusTrigger()
+                            q_hi_ctrl.send(_c)
+                            hi_af_state, hi_af_t = "running", now
+                            logging.info(f"[+] Marker camera: autofocus triggered at {current_altitude_m:.1f} m")
+                        except Exception as e:
+                            logging.warning(f"[-] Marker camera autofocus failed ({e})")
+                            hi_af_state = "off"
+                    elif hi_af_state == "running" and now - hi_af_t >= MARKER_CAM_AF_SETTLE_S:
+                        _found = int(hi_lens)
+                        _keep = MARKER_CAM_AF_MIN <= _found <= MARKER_CAM_AF_MAX
+                        _lens = _found if _keep else int(args.marker_cam_focus)
+                        try:
+                            _c = dai.CameraControl()
+                            _c.setManualFocus(_lens)
+                            q_hi_ctrl.send(_c)
+                            logging.info(f"[+] Marker camera: autofocus found lens {_found}, "
+                                         + (f"locked (use --marker-cam-focus {_found} next time)" if _keep
+                                            else f"not believed - back to {_lens}"))
+                            cuav.send_statustext(f">>> MARKER CAM FOCUS {_lens}", severity=6)
+                        except Exception as e:
+                            logging.warning(f"[-] Marker camera focus lock failed ({e})")
+                        hi_af_state = "locked"
                 if q_hi is not None:
                     try:
                         _hp = q_hi.tryGetAll()             # always drain, so the queue never backs up
