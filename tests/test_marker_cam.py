@@ -8,8 +8,8 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from flight_daemon import (MARKER_MIN_PX, attitude_at_time, centre_marker_pick, crop_intrinsics,
-                           marker_fix_step, marker_offset_ned, to_flow_camera_frame)
+from flight_daemon import (MARKER_CAM_FRESH_S, MARKER_MIN_PX, attitude_at_time, centre_marker_pick,
+                           crop_intrinsics, marker_fix_step, marker_offset_ned, to_flow_camera_frame)
 
 # Measured on this unit (19 Sep): CAM_A at 2560x1440 and the extrinsics CAM_A -> CAM_B.
 K_ISP = np.array([[1943.4, 0.0, 1301.4], [0.0, 1941.6, 653.1], [0.0, 0.0, 1.0]])
@@ -117,3 +117,9 @@ def test_each_camera_still_corrects_drift_on_its_own_anchor():
     for i in range(1, 300):
         n, e, _ = marker_fix_step(st, 2.0 * i / 299, 0.0, (0.4, -0.3), 0.04, source="hi")
     assert abs(n - 0.0) < 0.05 and abs(e - 0.0) < 0.05        # held at the hi anchor, flow drift gone
+
+
+def test_the_flow_camera_is_not_locked_out_while_the_marker_camera_is_quiet():
+    """Flight 48: the marker camera went quiet for 0.6-5 s at a time and the flow camera saw the
+    marker throughout. A long preference window threw those fixes away and the hover broke."""
+    assert MARKER_CAM_FRESH_S <= 0.3

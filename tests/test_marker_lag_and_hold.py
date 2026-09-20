@@ -6,7 +6,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from flight_daemon import (FLOW_VEL_OFF_H_M, MARKER_FRESH_S, MARKER_HOLD_FAR_S,
-                           MARKER_HOLD_FULL_H_M, flow_shift_since, marker_hold_window_s)
+                           MARKER_HOLD_FULL_H_M, MARKER_HOLD_NEAR_S, flow_shift_since,
+                           marker_hold_window_s)
 
 
 # --- how long a quiet marker still counts as holding the position -----------------------------
@@ -24,7 +25,12 @@ def test_high_up_the_daemon_waits_much_longer():
 
 def test_the_window_grows_smoothly_in_between():
     a, b, c = (marker_hold_window_s(h) for h in (40.0, 50.0, 60.0))
-    assert MARKER_FRESH_S < a < b < c < MARKER_HOLD_FAR_S
+    assert MARKER_HOLD_NEAR_S < a < b < c < MARKER_HOLD_FAR_S
+
+
+def test_it_covers_the_longest_gap_both_cameras_left_in_flight_48():
+    """With both cameras feeding, the longest gap above 35 m in flight 48 was 1.17 s at 40 m."""
+    assert marker_hold_window_s(40.0) > 1.17
 
 
 # --- carrying a fix forward from its own frame ------------------------------------------------

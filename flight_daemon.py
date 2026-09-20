@@ -327,6 +327,7 @@ MARKER_FRESH_S = 0.5
 # restoring it is worse than a gap in the marker fixes. The wait before the velocity returns
 # therefore grows with height; the EKF test-ratio guard still brings it back if the EKF is in
 # real trouble, and a marker lost for good still ends the wait.
+MARKER_HOLD_NEAR_S = 2.0          # ...starting here the moment the flow velocity is switched off
 MARKER_HOLD_FAR_S = 5.0
 MARKER_HOLD_FULL_H_M = 70.0       # full patience at this height, MARKER_FRESH_S at 35 m and below
 
@@ -336,7 +337,7 @@ def marker_hold_window_s(height_m):
     if height_m <= FLOW_VEL_OFF_H_M:
         return MARKER_FRESH_S
     a = min(1.0, (height_m - FLOW_VEL_OFF_H_M) / max(1e-6, MARKER_HOLD_FULL_H_M - FLOW_VEL_OFF_H_M))
-    return MARKER_FRESH_S + a * (MARKER_HOLD_FAR_S - MARKER_FRESH_S)
+    return MARKER_HOLD_NEAR_S + a * (MARKER_HOLD_FAR_S - MARKER_HOLD_NEAR_S)
 
 
 def flow_shift_since(hist, t, max_age_s=1.0, max_jump_m=3.0):
@@ -705,7 +706,13 @@ MARKER_CAM_CONFIRM_S = 1.0        # it detects at 10 Hz, so 3 hits need a longer
 MARKER_CAM_AF_H_M = 25.0          # autofocus once at this height (the scene there really is at
 MARKER_CAM_AF_SETTLE_S = 2.5      # infinity and the marker is the only contrast) and lock the result
 MARKER_CAM_AF_MIN, MARKER_CAM_AF_MAX = 90, 150   # outside this the result is not believed
-MARKER_CAM_FRESH_S = 1.0          # hysteresis: switching source re-anchors, so do it rarely
+# How recently the marker camera must have delivered before its fix is preferred over the flow
+# camera's. This was 1 s, from before each source had its own anchor: in flight 48 the marker
+# camera had 26 gaps longer than 0.6 s (51 s in total) during the first climb, the flow camera
+# saw the marker through every one of them at 23 fixes/s, and all of those were thrown away. The
+# position went undriven, the daemon called the marker lost at 36 m, the flow velocity came back
+# and the drone swung. Swapping source costs nothing now, so this only breaks a tie.
+MARKER_CAM_FRESH_S = 0.2
 MARKER_ATT_MAX_AGE_S = 0.15       # attitude history must reach this close to the frame time
 
 
