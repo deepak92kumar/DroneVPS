@@ -314,21 +314,20 @@ MARKER_POS_MIN_H_M = 2.0
 MARKER_POS_MAX_H_M = 100.0       # stage 3: ID 45 (3.6 m) still decodes at 11 px to ~130 m
 MARKER_POS_HEIGHT_TOL = 0.25     # the pose's height must agree with the lidar to 25 %
 MARKER_POS_MAX_TILT_DEG = 25.0
-MARKER_CORR_RATE_MS = 4.0        # fastest the marker may move the sent position (m/s)
-# ...but not up high. At 4 m/s the marker can order the position 4 m across in a second, and the
-# loiter controller answers that with a hard lean; every blow-up so far reached 25-30 deg. Above
-# 35 m the marker's own error is tens of centimetres anyway, so there is nothing to chase that
-# fast: the rate fades to MARKER_CORR_RATE_FAR_MS, which drifts back rather than darts back.
-MARKER_CORR_RATE_FAR_MS = 1.0
-MARKER_CORR_FAR_H_M = 60.0
+# Fastest the marker may move the sent position (m/s). Fading this to 1 m/s above 60 m was tried
+# on 20 Sep to make the corrections gentler, and it broke the hover above 50 m: the flow position
+# drifts against the marker at about 3 m/s at 50-60 m and 4.8 m/s at 60-80 m, so the limiter
+# saturated (the 90th percentile of the correction sat exactly on the limit), the sent position
+# ran away with the flow and the marker could only re-anchor after 6 m. Gentleness has to come
+# from the error declared to the EKF, not from starving the correction.
+MARKER_CORR_RATE_MS = 4.0
 
 
 def marker_corr_rate_ms(height_m):
     """How fast the marker may move the sent position at this height (m/s)."""
-    if height_m <= FLOW_VEL_OFF_H_M:
-        return MARKER_CORR_RATE_MS
-    a = min(1.0, (height_m - FLOW_VEL_OFF_H_M) / max(1e-6, MARKER_CORR_FAR_H_M - FLOW_VEL_OFF_H_M))
-    return MARKER_CORR_RATE_MS + a * (MARKER_CORR_RATE_FAR_MS - MARKER_CORR_RATE_MS)
+    return MARKER_CORR_RATE_MS
+
+
 MARKER_REANCHOR_M = 6.0          # a disagreement larger than this is not corrected, only re-anchored
 FLOW_RESET_JUMP_M = 3.0          # a flow step larger than this is a reset, not motion
 MARKER_POS_ERR_M = 0.5           # position error declared to the EKF while the marker holds it

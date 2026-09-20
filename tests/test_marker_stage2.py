@@ -173,31 +173,19 @@ def test_a_jittery_far_marker_still_holds_against_a_drifting_flow():
 
 # --- gentler corrections up high (20 Sep: every blow-up reached 25-30 deg of lean) ------------
 
-from flight_daemon import (MARKER_CORR_RATE_FAR_MS, MARKER_CORR_RATE_MS, marker_corr_rate_ms,
-                           marker_pos_err_m)
+from flight_daemon import MARKER_CORR_RATE_MS, marker_corr_rate_ms, marker_pos_err_m
 
 
-def test_down_low_the_correction_rate_is_unchanged():
-    assert marker_corr_rate_ms(5.0) == MARKER_CORR_RATE_MS
-    assert marker_corr_rate_ms(35.0) == MARKER_CORR_RATE_MS
+def test_the_correction_rate_does_not_fade_with_height():
+    """Flight 51: fading it to 1 m/s above 60 m saturated the limiter - the flow drifts against
+    the marker at 3-4.8 m/s up there - and the hover broke above 50 m."""
+    for h in (5.0, 35.0, 60.0, 90.0):
+        assert marker_corr_rate_ms(h) == MARKER_CORR_RATE_MS
 
 
-def test_up_high_the_marker_only_nudges():
-    assert marker_corr_rate_ms(60.0) == MARKER_CORR_RATE_FAR_MS
-    assert marker_corr_rate_ms(90.0) == MARKER_CORR_RATE_FAR_MS
-    assert MARKER_CORR_RATE_FAR_MS < marker_corr_rate_ms(45.0) < MARKER_CORR_RATE_MS
-
-
-def test_one_metre_of_drift_at_80_m_is_corrected_in_about_a_second():
-    """Gentle, not slow: the marker still removes a metre of drift in roughly a second."""
-    st = {}
-    rate = marker_corr_rate_ms(80.0)
-    run(st, (0.0, 0.0), (0.0, 0.0))
-    moved = 0.0
-    for _ in range(25):                      # 1 s at 25 Hz
-        n, e, _ = marker_fix_step(st, 1.0, 0.0, (0.0, 0.0), DT, rate=rate)
-        moved = n
-    assert 0.0 <= moved <= 0.1               # pulled back from 1 m to within 10 cm
+def test_the_marker_can_outrun_the_flow_drift_up_high():
+    """The flow drifted against the marker at up to 4.8 m/s at 60-80 m in flight 51."""
+    assert marker_corr_rate_ms(70.0) > 3.0
 
 
 def test_the_declared_error_is_the_markers_own_even_when_looser():
