@@ -322,6 +322,45 @@ MARKER_POS_ERR_M = 0.5           # position error declared to the EKF while the 
 # flights 38/39 stepped 2-7 deg at every EKF lane switch. 2 % of height: 1 m at 50 m, 2 m at 100 m.
 MARKER_POS_ERR_PER_M = 0.02
 MARKER_FRESH_S = 0.5
+# Flight 46: at 82 m the marker went quiet for half a second, the flow velocity came back, and the
+# drone swung to 28 deg of roll within seconds - the flow velocity is 2-3 m/s wrong up there, so
+# restoring it is worse than a gap in the marker fixes. The wait before the velocity returns
+# therefore grows with height; the EKF test-ratio guard still brings it back if the EKF is in
+# real trouble, and a marker lost for good still ends the wait.
+MARKER_HOLD_FAR_S = 5.0
+MARKER_HOLD_FULL_H_M = 70.0       # full patience at this height, MARKER_FRESH_S at 35 m and below
+
+
+def marker_hold_window_s(height_m):
+    """How long a marker fix keeps counting as 'the marker is holding the position'."""
+    if height_m <= FLOW_VEL_OFF_H_M:
+        return MARKER_FRESH_S
+    a = min(1.0, (height_m - FLOW_VEL_OFF_H_M) / max(1e-6, MARKER_HOLD_FULL_H_M - FLOW_VEL_OFF_H_M))
+    return MARKER_FRESH_S + a * (MARKER_HOLD_FAR_S - MARKER_FRESH_S)
+
+
+def flow_shift_since(hist, t, max_age_s=1.0, max_jump_m=3.0):
+    """How far the flow says the drone has moved since time t, from [(t, north, east)].
+
+    A marker fix describes where the drone was when the frame was taken - 174 ms ago for the
+    marker camera on 20 Sep, 60-80 ms for the flow camera. Feeding that to the EKF as if it were
+    the position now is a lag the position loop has to pay for. Returns (dn, de), or None when
+    the history does not cover t or the flow integrator was reset in between."""
+    if not hist or t is None:
+        return None
+    t_new, n_new, e_new = hist[-1]
+    if t < hist[0][0] or t_new - t > max_age_s or t > t_new:
+        return None
+    for i in range(len(hist) - 1, 0, -1):
+        t0, n0, e0 = hist[i - 1]
+        t1, n1, e1 = hist[i]
+        if t0 <= t <= t1:
+            a = 0.0 if t1 <= t0 else (t - t0) / (t1 - t0)
+            n = n0 + a * (n1 - n0)
+            e = e0 + a * (e1 - e0)
+            dn, de = n_new - n, e_new - e
+            return None if math.hypot(dn, de) > max_jump_m else (dn, de)
+    return None
 
 
 def marker_pos_err_m(height_m):
@@ -1396,6 +1435,7 @@ def main():
         # Marker camera state (--marker-cam).
         hi_seen_seq = 0
         hi_lens = -1
+        flow_hist = deque(maxlen=400)     # (monotonic s, north, east) of the flow integrator
         hi_af_state = "off" if args.marker_cam_af_off else "wait"         # wait -> running -> locked
         hi_af_t = 0.0
         hi_hits = deque(maxlen=64)
@@ -1991,7 +2031,9 @@ def main():
                             _hi_active = (now - hi_fix_t <= MARKER_CAM_FRESH_S
                                           and current_altitude_m >= MARKER_CAM_MIN_H_M)
                             if _ok and not _hi_active:
-                                mk2_fix = (pad_offset_north, pad_offset_east, now, "lo")
+                                _sl = flow_shift_since(flow_hist, t_aruco_frame)
+                                mk2_fix = ((pad_offset_north + (_sl[0] if _sl else 0.0),
+                                            pad_offset_east + (_sl[1] if _sl else 0.0), now, "lo"))
                             elif _why != mk2_last_why and (now - mk2_why_log_t) >= 3.0:
                                 mk2_why_log_t = now
                                 logging.info(f"[-] Marker position not used: {_why}")
@@ -2072,6 +2114,10 @@ def main():
                                 _mn, _me, _md = marker_ned(_tb, math.radians(_att[0]), math.radians(_att[1]),
                                                            math.radians(_att[2]))
                                 _hn, _he = -_mn, -_me
+                                _sh = flow_shift_since(flow_hist, _ht)
+                                _lagc = _sh is not None
+                                if _lagc:
+                                    _hn, _he = _hn + _sh[0], _he + _sh[1]
                                 hi_hits.append(now)
                                 _hconf = sum(1 for t in hi_hits if now - t <= MARKER_CAM_CONFIRM_S) >= ARUCO_CONFIRM_HITS
                                 _hu, _hwhy = marker_fix_usable(_hid, current_altitude_m, _md, _att[0], _att[1],
@@ -2091,7 +2137,7 @@ def main():
                                             f"{time.time():.4f},{_ht:.4f},{(time.monotonic() - _ht) * 1000:.0f},{int(is_airborne)},"
                                             f"{current_altitude_m:.3f},{_hid},{_hpx:.1f},{_tb[0]:.3f},{_tb[1]:.3f},{_tb[2]:.3f},"
                                             f"{_att[0]:.2f},{_att[1]:.2f},{_att[2]:.2f},{_asrc},{roll_deg:.2f},{pitch_deg:.2f},"
-                                            f"{_hn:.4f},{_he:.4f},{_md:.3f},{int(_used)},"
+                                            f"{_hn:.4f},{_he:.4f},{_md:.3f},{int(_used)}{'' if _lagc else '*'},"
                                             f"{last_aruco_offset[0] if _lo_fresh else math.nan:.4f},"
                                             f"{last_aruco_offset[1] if _lo_fresh else math.nan:.4f},{hi_lens}\n")
                                     except Exception:
@@ -2240,6 +2286,9 @@ def main():
 
                                 pos_north += eff_delta_north
                                 pos_east  += eff_delta_east
+                                # Sampled against the camera clock so a marker fix can be carried
+                                # forward from its own frame to now.
+                                flow_hist.append((time.monotonic(), pos_north, pos_east))
                                 if args.vel_delta:
                                     delta_acc["fwd"] += dy_body
                                     delta_acc["right"] += dx_body
@@ -2510,7 +2559,8 @@ def main():
                                 _want_v = True
                                 if args.marker_vel_off and args.marker_pos:
                                     _holds = (trust_vision and (latched or ready_to_fuse)
-                                              and now - mk2_drive_t <= MARKER_FRESH_S)
+                                              and now - mk2_drive_t
+                                              <= marker_hold_window_s(current_altitude_m))
                                     _gap = None
                                     _en = getattr(cuav, 'ekf_ne', None)
                                     if (_en is not None and now - getattr(cuav, 'ekf_ne_time', 0.0)
