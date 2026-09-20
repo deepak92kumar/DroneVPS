@@ -1129,18 +1129,12 @@ def main():
     aruco_detector = aruco.ArucoDetector(aruco_dict, aruco_params)
     aruco_worker = ArucoWorker(aruco_detector)  # 25 Hz max, newest frame only
     # Marker camera frames get their own detector and thread (~21 ms each at 1280x800).
-    # The marker camera gets subpixel corners: it costs nothing measurable (25 vs 27 ms on a
-    # 1280x800 frame) and it is what the heading will rest on - corner noise turns straight into
-    # yaw noise, 0.26 deg of it at 74 px without refinement against 0.06 deg with.
-    hi_params = aruco.DetectorParameters()
-    hi_params.adaptiveThreshWinSizeMin = aruco_params.adaptiveThreshWinSizeMin
-    hi_params.adaptiveThreshWinSizeMax = aruco_params.adaptiveThreshWinSizeMax
-    hi_params.adaptiveThreshWinSizeStep = aruco_params.adaptiveThreshWinSizeStep
-    hi_params.cornerRefinementMethod = aruco.CORNER_REFINE_SUBPIX
-    hi_params.cornerRefinementWinSize = 5
-    hi_params.cornerRefinementMaxIterations = 30
-    hi_params.cornerRefinementMinAccuracy = 0.01
-    hi_worker = (ArucoWorker(aruco.ArucoDetector(aruco_dict, hi_params),
+    # Subpixel corner refinement was tried on the marker camera on 20 Sep and made things worse
+    # in the air: the step between consecutive fixes at 20-30 m doubled, 8 cm to 17 cm, and the
+    # hover lost its edge from 28 m up. A rendered marker says refinement should help; a painted
+    # one on grass, softened by the lens and sheared by the rolling shutter, evidently does not
+    # give the refiner an edge to find. The plain corners are back.
+    hi_worker = (ArucoWorker(aruco.ArucoDetector(aruco_dict, aruco_params),
                              min_interval_s=1.0 / MARKER_CAM_DETECT_HZ)
                  if args.marker_cam else None)
     camera_frame_clock = [None]                 # time of the newest frame, for the watchdog
