@@ -1105,7 +1105,18 @@ def main():
     aruco_detector = aruco.ArucoDetector(aruco_dict, aruco_params)
     aruco_worker = ArucoWorker(aruco_detector)  # 25 Hz max, newest frame only
     # Marker camera frames get their own detector and thread (~21 ms each at 1280x800).
-    hi_worker = (ArucoWorker(aruco.ArucoDetector(aruco_dict, aruco_params),
+    # The marker camera gets subpixel corners: it costs nothing measurable (25 vs 27 ms on a
+    # 1280x800 frame) and it is what the heading will rest on - corner noise turns straight into
+    # yaw noise, 0.26 deg of it at 74 px without refinement against 0.06 deg with.
+    hi_params = aruco.DetectorParameters()
+    hi_params.adaptiveThreshWinSizeMin = aruco_params.adaptiveThreshWinSizeMin
+    hi_params.adaptiveThreshWinSizeMax = aruco_params.adaptiveThreshWinSizeMax
+    hi_params.adaptiveThreshWinSizeStep = aruco_params.adaptiveThreshWinSizeStep
+    hi_params.cornerRefinementMethod = aruco.CORNER_REFINE_SUBPIX
+    hi_params.cornerRefinementWinSize = 5
+    hi_params.cornerRefinementMaxIterations = 30
+    hi_params.cornerRefinementMinAccuracy = 0.01
+    hi_worker = (ArucoWorker(aruco.ArucoDetector(aruco_dict, hi_params),
                              min_interval_s=1.0 / MARKER_CAM_DETECT_HZ)
                  if args.marker_cam else None)
     camera_frame_clock = [None]                 # time of the newest frame, for the watchdog
@@ -1497,7 +1508,7 @@ def main():
                 hi_log = open(os.path.join(LOG_DIR, "marker_hi.csv"), "a", buffering=1)
                 if hi_log.tell() == 0:
                     hi_log.write("wall,t_frame,age_ms,airborne,h,id,px,tx,ty,tz,roll_f,pitch_f,yaw_f,att_src,"
-                                 "roll_now,pitch_now,mk_n,mk_e,down,used,lo_n,lo_e,lens,mrel,mground\n")
+                                 "roll_now,pitch_now,mk_n,mk_e,down,used,lo_n,lo_e,lens,mrel,mground,sideratio,sqerr\n")
             except Exception:
                 hi_log = None
         stage2_log = None
@@ -2147,6 +2158,15 @@ def main():
                         if _hpick is not None:
                             _hid, _hpx, _hcor = _hpick
                             _hsides = [float(np.linalg.norm(_hcor[i] - _hcor[(i + 1) % 4])) for i in range(4)]
+                            # How far the quad is from a square, in degrees of corner angle. A
+                            # painted marker that is not square biases both the pose and the
+                            # heading, so it is measured on every fix rather than guessed at.
+                            _hsq = 0.0
+                            for _i in range(4):
+                                _a = _hcor[(_i - 1) % 4] - _hcor[_i]
+                                _b = _hcor[(_i + 1) % 4] - _hcor[_i]
+                                _c = float(np.dot(_a, _b) / (np.linalg.norm(_a) * np.linalg.norm(_b) + 1e-9))
+                                _hsq = max(_hsq, abs(math.degrees(math.acos(max(-1.0, min(1.0, _c)))) - 90.0))
                             _hok = False
                             if min(_hsides) >= 8.0 and max(_hsides) <= 2.5 * min(_hsides):
                                 _hok, _hrv, _htv = cv2.solvePnP(_obj_pts(marker_sizes[_hid]),
@@ -2192,14 +2212,21 @@ def main():
                                             f"{_hn:.4f},{_he:.4f},{_md:.3f},{int(_used)}{'' if _lagc else '*'},"
                                             f"{last_aruco_offset[0] if _lo_fresh else math.nan:.4f},"
                                             f"{last_aruco_offset[1] if _lo_fresh else math.nan:.4f},{hi_lens},"
-                                            f"{_mrel:.2f},{_mgh:.2f}\n")
+                                            f"{_mrel:.2f},{_mgh:.2f},{max(_hsides) / max(1e-6, min(_hsides)):.4f},"
+                                            f"{_hsq:.2f}\n")
                                     except Exception:
                                         pass
                                 if flight_record_dir and now - hi_img_t >= 1.0 and hi_img_seq < 1500:
                                     hi_img_t = now
                                     hi_img_seq += 1
                                     _ann = cv2.cvtColor(_himg, cv2.COLOR_GRAY2BGR)
-                                    cv2.polylines(_ann, [_hcor.astype(np.int32)], True, (0, 255, 0), 2)
+                                    # Draw the box a little outside the marker: drawn on the
+                                    # border it spoils the very corners these images are kept to
+                                    # check (20 Sep: the saved frames could not answer whether
+                                    # the painted marker is square).
+                                    _ctr = _hcor.mean(axis=0)
+                                    _out = (_ctr + (_hcor - _ctr) * (1.0 + 10.0 / max(8.0, _hpx)))
+                                    cv2.polylines(_ann, [_out.astype(np.int32)], True, (0, 255, 0), 1)
                                     cv2.putText(_ann, f"HI #{_hid} {_hpx:.0f}px h{current_altitude_m:.0f}m",
                                                 (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
                                     image_logger.log_image(os.path.join(flight_record_dir, f"hi_{hi_img_seq:05d}_ID{_hid}.jpg"),
