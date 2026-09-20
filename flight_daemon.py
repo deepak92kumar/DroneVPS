@@ -771,6 +771,23 @@ def attitude_at_time(hist, t, max_age=MARKER_ATT_MAX_AGE_S):
     return None
 
 
+def marker_ground_heading(rvec, yaw_deg):
+    """Heading of the marker's own X axis over the ground in degrees, plus the drone's heading
+    relative to the marker.
+
+    The marker never moves, so the first number should not change through a flight however much
+    the compass drifts. On 20 Sep the compass swung 26 deg above 80 m, the EKF followed it, the
+    drone turned with it, and the position frame ended up 15 deg away from the marker's - which
+    is what sent the hover into a 17 m circle. This is logged first, to see how steady it is
+    before anything is allowed to depend on it."""
+    R, _ = cv2.Rodrigues(np.asarray(rvec, dtype=np.float64).reshape(3, 1))
+    # The marker's X axis in camera axes: +x is right, +y is toward the tail, so forward is -y.
+    # Its bearing clockwise from the nose is atan2(right, forward); add the drone's yaw for the
+    # bearing over the ground.
+    rel = math.degrees(math.atan2(R[0, 0], -R[1, 0]))
+    return (yaw_deg + rel + 180.0) % 360.0 - 180.0, rel
+
+
 def centre_marker_pick(cands, min_px=None):
     """The largest centre-target marker (45/16/0) big enough to trust, or None."""
     min_px = MARKER_MIN_PX if min_px is None else min_px
@@ -1480,7 +1497,7 @@ def main():
                 hi_log = open(os.path.join(LOG_DIR, "marker_hi.csv"), "a", buffering=1)
                 if hi_log.tell() == 0:
                     hi_log.write("wall,t_frame,age_ms,airborne,h,id,px,tx,ty,tz,roll_f,pitch_f,yaw_f,att_src,"
-                                 "roll_now,pitch_now,mk_n,mk_e,down,used,lo_n,lo_e,lens\n")
+                                 "roll_now,pitch_now,mk_n,mk_e,down,used,lo_n,lo_e,lens,mrel,mground\n")
             except Exception:
                 hi_log = None
         stage2_log = None
@@ -2137,6 +2154,7 @@ def main():
                                                                 flags=cv2.SOLVEPNP_IPPE_SQUARE)
                             if _hok:
                                 _tb = to_flow_camera_frame(_htv, R_hi, t_hi)
+                                _mgh = _mrel = float("nan")
                                 _att = attitude_at_time(getattr(cuav, 'att_hist', None), _ht)
                                 _asrc = "frame"
                                 if _att is None:
@@ -2144,6 +2162,10 @@ def main():
                                 _mn, _me, _md = marker_ned(_tb, math.radians(_att[0]), math.radians(_att[1]),
                                                            math.radians(_att[2]))
                                 _hn, _he = -_mn, -_me
+                                try:
+                                    _mgh, _mrel = marker_ground_heading(_hrv, _att[2])
+                                except Exception:
+                                    pass
                                 _sh = flow_shift_since(flow_hist, _ht) if args.marker_lag_comp else None
                                 _lagc = _sh is not None
                                 if _lagc:
@@ -2169,7 +2191,8 @@ def main():
                                             f"{_att[0]:.2f},{_att[1]:.2f},{_att[2]:.2f},{_asrc},{roll_deg:.2f},{pitch_deg:.2f},"
                                             f"{_hn:.4f},{_he:.4f},{_md:.3f},{int(_used)}{'' if _lagc else '*'},"
                                             f"{last_aruco_offset[0] if _lo_fresh else math.nan:.4f},"
-                                            f"{last_aruco_offset[1] if _lo_fresh else math.nan:.4f},{hi_lens}\n")
+                                            f"{last_aruco_offset[1] if _lo_fresh else math.nan:.4f},{hi_lens},"
+                                            f"{_mrel:.2f},{_mgh:.2f}\n")
                                     except Exception:
                                         pass
                                 if flight_record_dir and now - hi_img_t >= 1.0 and hi_img_seq < 1500:

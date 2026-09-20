@@ -123,3 +123,35 @@ def test_the_flow_camera_is_not_locked_out_while_the_marker_camera_is_quiet():
     """Flight 48: the marker camera went quiet for 0.6-5 s at a time and the flow camera saw the
     marker throughout. A long preference window threw those fixes away and the hover broke."""
     assert MARKER_CAM_FRESH_S <= 0.3
+
+
+# --- heading from the marker itself (20 Sep: the compass drifted 26 deg above 80 m) ----------
+
+from flight_daemon import marker_ground_heading
+
+
+def _rvec_for(theta_deg):
+    """Pose of a marker lying on the ground, turned theta in the camera's image plane."""
+    t = math.radians(theta_deg)
+    R = np.array([[math.cos(t), -math.sin(t), 0.0], [math.sin(t), math.cos(t), 0.0], [0.0, 0.0, 1.0]])
+    return cv2.Rodrigues(R)[0]
+
+
+def test_the_markers_ground_heading_does_not_move_when_the_drone_turns():
+    """The marker is painted on the ground: whatever the drone does, its heading is one number."""
+    first, _ = marker_ground_heading(_rvec_for(0.0), 10.0)
+    for turn in (5.0, 20.0, -35.0, 90.0):
+        # the drone turns by `turn`, so the marker turns the other way in the image
+        got, _ = marker_ground_heading(_rvec_for(-turn), 10.0 + turn)
+        assert abs(((got - first + 180.0) % 360.0) - 180.0) < 1e-6
+
+
+def test_the_relative_heading_is_the_bearing_from_the_nose():
+    """A marker whose X axis points 30 deg round from the image x axis is 120 deg off the nose."""
+    _, rel = marker_ground_heading(_rvec_for(30.0), 0.0)
+    assert abs(rel - 120.0) < 1e-6
+
+
+def test_it_wraps_at_north():
+    got, _ = marker_ground_heading(_rvec_for(-20.0), 170.0)
+    assert -180.0 < got <= 180.0
