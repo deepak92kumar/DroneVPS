@@ -121,3 +121,52 @@ def test_a_real_handover_is_still_reported():
 
 def test_the_first_sample_is_reported():
     assert height_source_changed("TF03", "", 1.0, None)
+
+
+# --- flight 54: upward lidar spikes poisoned the height -------------------------------------
+
+from flight_daemon import LIDAR_MAX_RISE_MS, tf03_glitch_hold, track_baro_offset
+
+
+def test_an_upward_spike_is_held_out():
+    """Flight 54 carried a 174 m reading while the drone hovered at 52 m, flagged good."""
+    st = {"h": 52.0, "t": 100.0}
+    h, valid, held = tf03_glitch_hold(st, 174.0, True, airborne=True, armed=True, now=100.05)
+    assert held and valid and h == 52.0
+
+
+def test_a_climb_is_not_mistaken_for_a_spike():
+    st = {"h": 52.0, "t": 100.0}
+    climbed = 52.0 + LIDAR_MAX_RISE_MS * 0.5 * 0.5          # half the allowed rate over 0.5 s
+    h, valid, held = tf03_glitch_hold(st, climbed, True, airborne=True, armed=True, now=100.5)
+    assert not held and h == climbed
+
+
+def test_real_ground_change_gets_through_after_the_hold():
+    """Flying off a rooftop: the height really does step up, and it stays stepped."""
+    st = {"h": 8.0, "t": 100.0}
+    for t in (100.05, 100.2, 100.4):
+        h, _, held = tf03_glitch_hold(st, 30.0, True, True, True, t)
+        assert held and h == 8.0
+    h, _, held = tf03_glitch_hold(st, 30.0, True, True, True, 100.6)
+    assert not held and h == 30.0
+
+
+def test_the_downward_guard_still_works():
+    st = {"h": 40.0, "t": 100.0}
+    h, _, held = tf03_glitch_hold(st, 4.0, True, True, True, 100.05)
+    assert held and h == 40.0
+
+
+def test_a_wild_sample_cannot_drag_the_baro_offset():
+    off = 0.5
+    for _ in range(20):
+        off = track_baro_offset(off, 174.0, 52.0, trusted=True)
+    assert abs(off - 0.5) < 1e-9
+
+
+def test_the_offset_still_learns_ordinary_terrain():
+    off = 0.5
+    for _ in range(400):
+        off = track_baro_offset(off, 54.0, 52.0, trusted=True)
+    assert 1.5 < off < 2.0

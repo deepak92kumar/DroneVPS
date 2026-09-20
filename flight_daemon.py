@@ -123,7 +123,7 @@ def height_source_changed(kind, last_kind, weight, last_weight, band=0.25):
     return last_weight is not None and abs(weight - last_weight) >= band
 
 
-def track_baro_offset(offset, lidar_agl_m, baro_rel_m, trusted, tau_samples=200.0):
+def track_baro_offset(offset, lidar_agl_m, baro_rel_m, trusted, tau_samples=200.0, max_step_m=15.0):
     """Learn (lidar AGL - barometer height above home) while the lidar is trusted.
 
     The lidar measures the ground below; the barometer measures the takeoff point. Without this
@@ -135,6 +135,11 @@ def track_baro_offset(offset, lidar_agl_m, baro_rel_m, trusted, tau_samples=200.
     meas = float(lidar_agl_m) - float(baro_rel_m)
     if offset is None:
         return meas
+    if abs(meas - offset) > max_step_m:
+        # Flight 54: a 174 m lidar spike is worth 18 m of offset in a fifth of a second, because
+        # the filter moves by a share of the error and that error was enormous. Terrain does not
+        # do this; only a bad reading does.
+        return offset
     a = 1.0 / max(1.0, tau_samples)
     return (1.0 - a) * offset + a * meas
 
@@ -617,15 +622,28 @@ def ir_flood_target(on_now, height_m, height_valid=True, off_above_m=2.5, on_bel
     return on_now
 
 
+# A TF03 reading can only rise as fast as the drone climbs. Flight 54 carried five upward spikes
+# of 0.0-0.2 s, one of them to 174 m while the drone hovered at 52 m, all flagged good by the
+# sensor. They went straight through the old filter, which only looked downward, and one of them
+# dragged the barometer offset 18 m out - after which the height was 22 m too high, the flow was
+# scaled by it and the marker's own pose was rejected for disagreeing with it.
+LIDAR_MAX_RISE_MS = 6.0          # the drone climbs at 3 m/s; twice that is generous
+LIDAR_RISE_ALLOW_M = 3.0         # plus a step for terrain
+
+
 def tf03_glitch_hold(state, tf03_h, tf03_valid, airborne, armed, now, hold_s=0.5):
-    """Change T: hold the last good TF03 height through a short dropout in flight.
+    """Change T: hold the last good TF03 height through a short glitch in flight.
 
     Log 24: one bad sample at 4 m (neighbours 3.97/4.05 m) muted vision for 2.5 s and wiped XY.
-    In flight above 1 m, a reading that is invalid or below half the last good height is replaced by
-    the last good height for up to hold_s. state: dict with 'h' and 't'. Returns (h, valid, held).
+    In flight above 1 m, a reading that is invalid, below half the last good height, or above it
+    by more than the drone could have climbed, is replaced by the last good height for up to
+    hold_s. A change that outlasts the hold is accepted, so real ground still gets through.
+    state: dict with 'h' and 't'. Returns (h, valid, held).
     """
     last_h, last_t = state.get("h", 0.0), state.get("t", 0.0)
-    implausible = airborne and last_h > 1.0 and tf03_valid and tf03_h < 0.5 * last_h
+    rise_room = LIDAR_RISE_ALLOW_M + LIDAR_MAX_RISE_MS * max(0.0, now - last_t)
+    implausible = airborne and last_h > 1.0 and tf03_valid and (
+        tf03_h < 0.5 * last_h or tf03_h > last_h + rise_room)
     if tf03_valid and not implausible:
         state["h"], state["t"] = tf03_h, now
         return tf03_h, True, False
