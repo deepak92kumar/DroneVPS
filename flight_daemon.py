@@ -326,14 +326,31 @@ MARKER_POS_MAX_TILT_DEG = 25.0
 # ran away with the flow and the marker could only re-anchor after 6 m. Gentleness has to come
 # from the error declared to the EKF, not from starving the correction.
 MARKER_CORR_RATE_MS = 4.0
+# Flight 58 (21 Sep, 101 m): the flow drifts against the marker at 1.8 m/s at 20-40 m but 2.7 m/s
+# at 80-95 m, and in bursts past 4 m/s. A flat 4 m/s keeps up below ~90 m and loses above it, so
+# the rate follows the height - the thing the drift itself follows.
+MARKER_CORR_RATE_PER_M = 0.10
 
 
 def marker_corr_rate_ms(height_m):
     """How fast the marker may move the sent position at this height (m/s)."""
-    return MARKER_CORR_RATE_MS
+    return max(MARKER_CORR_RATE_MS, MARKER_CORR_RATE_PER_M * float(height_m))
 
 
 MARKER_REANCHOR_M = 6.0          # a disagreement larger than this is not corrected, only re-anchored
+# ...but at height the one that is wrong is the flow, not the marker. Flight 58 re-anchored 22
+# times between 62 and 100 m; each one abandons a real position error (up to 11 m in replay)
+# instead of correcting it, and the drone then holds a place it is not at. The marker's own error
+# up there is ~0.5 m, so a disagreement of many metres is the flow's, and giving up is backwards.
+# The rate limit above is what protects against a bad detection - this second guard only has to
+# catch the gross ones, so it may grow with height.
+MARKER_REANCHOR_PER_M = 0.15
+
+
+def marker_reanchor_m(height_m):
+    """Disagreement above which the marker map is re-anchored instead of corrected (m)."""
+    return max(MARKER_REANCHOR_M, MARKER_REANCHOR_PER_M * float(height_m))
+
 FLOW_RESET_JUMP_M = 3.0          # a flow step larger than this is a reset, not motion
 MARKER_POS_ERR_M = 0.5           # position error declared to the EKF while the marker holds it
 # Stage 3: above 25 m the error is set by the attitude, not the pixels - 1 deg is 0.017*h metres, and
@@ -2611,6 +2628,7 @@ def main():
                                     mk2_src_last = mk2_fix[3]
                                 px, py, _how = marker_fix_step(mk2_state, pos_north, pos_east, _mk, _dt,
                                                                rate=marker_corr_rate_ms(current_altitude_m),
+                                                               reanchor=marker_reanchor_m(current_altitude_m),
                                                                source=mk2_src_last)
                                 if _switch:
                                     logging.info(f"[+] Marker position source -> {'marker camera' if mk2_src_last == 'hi' else 'flow camera'} "

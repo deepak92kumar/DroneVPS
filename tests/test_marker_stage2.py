@@ -173,14 +173,87 @@ def test_a_jittery_far_marker_still_holds_against_a_drifting_flow():
 
 # --- gentler corrections up high (20 Sep: every blow-up reached 25-30 deg of lean) ------------
 
-from flight_daemon import MARKER_CORR_RATE_MS, marker_corr_rate_ms, marker_pos_err_m
+from flight_daemon import (MARKER_CORR_RATE_MS, MARKER_REANCHOR_M, marker_corr_rate_ms,
+                           marker_pos_err_m, marker_reanchor_m)
 
 
 def test_the_correction_rate_does_not_fade_with_height():
     """Flight 51: fading it to 1 m/s above 60 m saturated the limiter - the flow drifts against
-    the marker at 3-4.8 m/s up there - and the hover broke above 50 m."""
+    the marker at 3-4.8 m/s up there - and the hover broke above 50 m. It may rise, never fall."""
     for h in (5.0, 35.0, 60.0, 90.0):
+        assert marker_corr_rate_ms(h) >= MARKER_CORR_RATE_MS
+    heights = [5.0, 20.0, 35.0, 50.0, 70.0, 90.0, 110.0]
+    rates = [marker_corr_rate_ms(h) for h in heights]
+    assert rates == sorted(rates)
+
+
+def test_low_down_nothing_changed():
+    """Below 40 m the drone already held well - that range must be left exactly as it flew."""
+    for h in (5.0, 20.0, 35.0, 39.0):
         assert marker_corr_rate_ms(h) == MARKER_CORR_RATE_MS
+        assert marker_reanchor_m(h) == MARKER_REANCHOR_M
+
+
+def test_the_rate_keeps_up_with_the_flow_drift_at_every_height():
+    """Flight 58 measured the drift at 1.8 m/s (20-40 m), 2.4 (40-60), 2.65 (60-80), 2.69 (80-95),
+    bursting past 4. The correction has to be able to outrun it wherever the drone is."""
+    for h, drift in ((30.0, 1.8), (50.0, 2.4), (70.0, 2.65), (90.0, 2.69), (100.0, 4.0)):
+        assert marker_corr_rate_ms(h) > drift
+
+
+def test_the_reanchor_threshold_grows_with_height():
+    """Flight 58 re-anchored 22 times between 62 and 100 m. Re-anchoring abandons a real position
+    error instead of correcting it, and up there the wrong one is the flow, not the marker."""
+    assert marker_reanchor_m(100.0) > marker_reanchor_m(60.0) > MARKER_REANCHOR_M - 1e-9
+    assert marker_reanchor_m(100.0) >= 15.0
+
+
+def _drift_against_a_still_marker(reanchor, rate, steps=8, step_m=1.5):
+    """The drone hovers over the marker while the flow walks away from it. Returns the 'how' of
+    every update after the anchor."""
+    st = {}
+    marker_fix_step(st, 0.0, 0.0, (0.0, 0.0), DT, rate=rate, reanchor=reanchor, source=None)
+    hows, flow = [], 0.0
+    for _ in range(steps):
+        flow += step_m                                  # under FLOW_RESET_JUMP_M, so it is motion
+        _, _, how = marker_fix_step(st, flow, 0.0, (0.0, 0.0), DT,
+                                    rate=rate, reanchor=reanchor, source=None)
+        hows.append(how)
+    return st, hows
+
+
+def test_a_burst_of_drift_up_high_is_corrected_not_abandoned():
+    """Flight 58: at 90-110 m the flow ran up to 11 m from the marker. The old flat 6 m gave up
+    there - and giving up leaves the drone holding a place it is not at."""
+    _, old_hows = _drift_against_a_still_marker(MARKER_REANCHOR_M, MARKER_CORR_RATE_MS)
+    assert "reanchor" in old_hows                       # what flight 58 did, 22 times
+    _, new_hows = _drift_against_a_still_marker(marker_reanchor_m(100.0),
+                                                marker_corr_rate_ms(100.0))
+    assert "reanchor" not in new_hows                   # now it keeps correcting
+    assert set(new_hows) == {"marker"}
+
+
+def test_after_the_drift_stops_the_marker_pulls_the_position_home():
+    """Chasing is only worth more than re-anchoring if it actually closes the gap."""
+    st, _ = _drift_against_a_still_marker(marker_reanchor_m(100.0), marker_corr_rate_ms(100.0))
+    flow = 8 * 1.5
+    for _ in range(200):                                # flow now still; marker keeps correcting
+        n, e, _ = marker_fix_step(st, flow, 0.0, (0.0, 0.0), DT,
+                                  rate=marker_corr_rate_ms(100.0),
+                                  reanchor=marker_reanchor_m(100.0), source=None)
+    assert abs(n) < 0.1 and abs(e) < 0.1                # back over the marker
+
+
+def test_one_bad_fix_still_costs_only_centimetres_up_high():
+    """The rate limit is what guards against a bad detection, and it still has to bite: a 30 m
+    wild fix at 100 m may not move the sent position by more than one step."""
+    st = {}
+    run(st, (0.0, 0.0), (0.0, 0.0))
+    n, e, _ = marker_fix_step(st, 0.0, 0.0, (30.0, 0.0), DT,
+                              rate=marker_corr_rate_ms(100.0),
+                              reanchor=marker_reanchor_m(100.0), source=None)
+    assert math.hypot(n, e) <= marker_corr_rate_ms(100.0) * DT + 1e-9
+    assert math.hypot(n, e) < 0.5                       # 40 cm at 10 m/s and 25 Hz
 
 
 def test_the_marker_can_outrun_the_flow_drift_up_high():
