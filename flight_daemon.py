@@ -729,12 +729,16 @@ class AsyncImageLogger(threading.Thread):
 
 
 # Marker camera (--marker-cam): RGB centre crop, used for the marker position from MARKER_CAM_MIN_H_M up.
-# 15, not 10: the RGB frame reached the fix 163-172 ms old in every flight logged, and a
-# rolling-shutter sensor shears more the slower it reads out - the marker's skew tracks the
-# drone's turn rate (r = +0.46 over seven flights, 1.045 at 3 deg/s against 1.128 at 6). At 15
-# fps the frame period is 67 ms instead of 100. Measured on the bench: the flow loop is
-# unchanged (94.5 -> 94.4 FPS, no drops), so this costs nothing.
-MARKER_CAM_FPS = 15
+# 30, not 10: the RGB frame reached the fix 163-172 ms old in every flight logged, and a
+# rolling-shutter sensor shears more the slower it reads out - the marker's skew tracked the
+# drone's turn rate (r = +0.46 over seven flights, 1.045 at 3 deg/s against 1.128 at 6 deg/s).
+# 15 fps was flown first and settled the question: skew 1.128 -> 1.046, reprojection error
+# 4.84 -> 1.57 px, frame age 172 -> 147 ms, fixes used 89 % -> 98 %, and the saved frames stopped
+# showing curved marker edges and wavy furrows. 30 fps takes the frame period to 33 ms. Detection
+# stays capped at MARKER_CAM_DETECT_HZ, so the extra frames only make the chosen one fresher;
+# the capture and crop run on the camera's own processor. Measured on the bench with the FC
+# connected: flow loop 99-100 FPS, zero frame drops, latency 13.6 ms - no cost.
+MARKER_CAM_FPS = 30
 # Lens position. A ground sweep on 20 Sep peaked at 120 on a scene a few metres away, and with
 # this lens (f=4.8 mm, f/2.0, 2.3 um pixels after the 2/3 ISP scale) the hyperfocal distance is
 # about 5 m, so a lens focused there is sharp from ~2.5 m to infinity. Flight 45 flew at lens 0,
