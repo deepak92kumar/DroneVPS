@@ -749,14 +749,12 @@ MARKER_CAM_ISP_W, MARKER_CAM_ISP_H = 2560, 1440
 MARKER_CAM_W, MARKER_CAM_H = 1280, 800
 MARKER_CAM_MIN_H_M = 20.0
 MARKER_CAM_PROC_H_M = 15.0        # frames are not even decoded below this (ground test: -10 % flow fps)
-# 20, not 10: at 30 fps a 10 Hz cap throws two frames in three away, and the detection itself
-# is not the limit - detectMarkers on a 1280x800 frame takes 28.6 ms, so the worker could run
-# at 35/s. In flight it only managed 2.9-4.4/s because most frames FAILED to decode, which is
-# what the rolling-shutter shear does to the quad; the share of RGB fixes actually used went
-# 89 % -> 98 % when the frame rate went up. Bench cost of 10 -> 20 Hz, FC connected: system
-# CPU 51.0 % -> 54.7 % of six cores, flow loop 99.9 FPS, zero drops, latency 12.6 ms. The RGB
-# detector has its own worker thread, so this spends idle cores, not the flow loop's.
-MARKER_CAM_DETECT_HZ = 20.0
+# Left at 10. Raising it to 20 with the camera at 30 fps was tried on the bench and taken back
+# out: with the FC connected that run logged 345 dropped frames and five frame-drop events,
+# where 10 Hz runs clean at zero. The detector is not the limit anyway - detectMarkers on a
+# 1280x800 frame takes 28.6 ms - and what actually starved the fixes was frames failing to
+# decode at all, which the higher capture rate already fixed (RGB fixes used 89 % -> 98 %).
+MARKER_CAM_DETECT_HZ = 10.0
 MARKER_CAM_CONFIRM_S = 1.0        # it detects at 10 Hz, so 3 hits need a longer window than the flow camera
 MARKER_CAM_AF_H_M = 25.0          # autofocus once at this height (the scene there really is at
 MARKER_CAM_AF_SETTLE_S = 2.5      # infinity and the marker is the only contrast) and lock the result
