@@ -344,20 +344,9 @@ MARKER_REANCHOR_M = 6.0          # a disagreement larger than this is not correc
 # 101 m, roll rms 4.0-4.3 deg and test ratio 0.10-0.11 from 65 to 95 m.
 FLOW_RESET_JUMP_M = 3.0          # a flow step larger than this is a reset, not motion
 MARKER_POS_ERR_M = 0.5           # position error declared to the EKF while the marker holds it
-# Stage 3 set this at 2 % of height, reasoning that above 25 m the error is attitude-limited and
-# so grows with height. Flight 64 (21 Sep, 100.7 m, marker camera at 30 fps) measured it instead,
-# from consecutive fixes 0.15 s apart - close enough that the drone cannot really have moved:
-#     40-60 m  0.22 m      60-80 m  0.25 m      80-95 m  0.23 m      95-110 m  0.48 m
-# It does not grow with height at all; it is flat at about a quarter of a metre once the camera is
-# giving clean frames. Meanwhile we were declaring 1.05, 1.37 and 1.69 m over those same bands -
-# up to 7.6 times worse than the marker actually is. The EKF weights the measurement by what we
-# claim, so it was holding the marker at arm's length exactly where, with the flow velocity off,
-# the position loop has nothing else to damp it: the innovation above 55 m oscillates +-2.2 m with
-# no bias in any frame (earth, body or marker), which is a lightly damped loop, not an offset.
-# 0.8 % of height keeps roughly three times the measured jitter as margin for the slow errors the
-# jitter cannot see - attitude, lens, paint - and EK3_POSNE_M_NSE (0.5 on this airframe) is the
-# floor underneath it, so this cannot claim more than the EKF is willing to believe.
-MARKER_POS_ERR_PER_M = 0.008
+# Stage 3: above 25 m the error is set by the attitude, not the pixels - 1 deg is 0.017*h metres, and
+# flights 38/39 stepped 2-7 deg at every EKF lane switch. 2 % of height: 1 m at 50 m, 2 m at 100 m.
+MARKER_POS_ERR_PER_M = 0.02
 MARKER_FRESH_S = 0.5
 # Flight 46: at 82 m the marker went quiet for half a second, the flow velocity came back, and the
 # drone swung to 28 deg of roll within seconds - the flow velocity is 2-3 m/s wrong up there, so
