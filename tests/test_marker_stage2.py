@@ -173,95 +173,14 @@ def test_a_jittery_far_marker_still_holds_against_a_drifting_flow():
 
 # --- gentler corrections up high (20 Sep: every blow-up reached 25-30 deg of lean) ------------
 
-from flight_daemon import (MARKER_CORR_RATE_MS, MARKER_REANCHOR_M, marker_corr_rate_ms,
-                           marker_pos_err_m, marker_reanchor_m)
+from flight_daemon import MARKER_CORR_RATE_MS, marker_corr_rate_ms, marker_pos_err_m
 
 
 def test_the_correction_rate_does_not_fade_with_height():
     """Flight 51: fading it to 1 m/s above 60 m saturated the limiter - the flow drifts against
-    the marker at 3-4.8 m/s up there - and the hover broke above 50 m. It may rise, never fall."""
+    the marker at 3-4.8 m/s up there - and the hover broke above 50 m."""
     for h in (5.0, 35.0, 60.0, 90.0):
-        assert marker_corr_rate_ms(h) >= MARKER_CORR_RATE_MS
-    heights = [5.0, 20.0, 35.0, 50.0, 70.0, 90.0, 110.0]
-    rates = [marker_corr_rate_ms(h) for h in heights]
-    assert rates == sorted(rates)
-
-
-def test_low_down_nothing_changed():
-    """Below 40 m the drone already held well - that range must be left exactly as it flew."""
-    for h in (5.0, 20.0, 35.0, 39.0):
         assert marker_corr_rate_ms(h) == MARKER_CORR_RATE_MS
-        assert marker_reanchor_m(h) == MARKER_REANCHOR_M
-
-
-def test_the_rate_keeps_up_with_the_typical_flow_drift_at_every_height():
-    """Flight 58 measured the drift at 1.8 m/s (20-40 m), 2.4 (40-60), 2.65 (60-80), 2.69 (80-95).
-    A flat 4 m/s outruns all of those. The bursts past 4 m/s are what the re-anchor threshold has
-    to absorb - raising the rate instead cost flight 59 its test ratio at 50-65 m."""
-    for h, drift in ((30.0, 1.8), (50.0, 2.4), (70.0, 2.65), (90.0, 2.69)):
-        assert marker_corr_rate_ms(h) > drift
-
-
-def test_the_rate_is_the_same_at_every_height():
-    """Flight 59: 6 m/s at 60 m slewed the sent position faster than the IMU could follow and the
-    EKF position test ratio at 50-65 m went 0.22 -> 0.77. The rate is what the EKF feels."""
-    for h in (5.0, 35.0, 60.0, 90.0, 110.0):
-        assert marker_corr_rate_ms(h) == MARKER_CORR_RATE_MS
-
-
-def test_the_reanchor_threshold_grows_with_height():
-    """Flight 58 re-anchored 22 times between 62 and 100 m. Re-anchoring abandons a real position
-    error instead of correcting it, and up there the wrong one is the flow, not the marker."""
-    assert marker_reanchor_m(100.0) > marker_reanchor_m(60.0) > MARKER_REANCHOR_M - 1e-9
-    assert marker_reanchor_m(100.0) >= 15.0
-
-
-def _drift_against_a_still_marker(reanchor, rate, steps=8, step_m=1.5):
-    """The drone hovers over the marker while the flow walks away from it. Returns the 'how' of
-    every update after the anchor."""
-    st = {}
-    marker_fix_step(st, 0.0, 0.0, (0.0, 0.0), DT, rate=rate, reanchor=reanchor, source=None)
-    hows, flow = [], 0.0
-    for _ in range(steps):
-        flow += step_m                                  # under FLOW_RESET_JUMP_M, so it is motion
-        _, _, how = marker_fix_step(st, flow, 0.0, (0.0, 0.0), DT,
-                                    rate=rate, reanchor=reanchor, source=None)
-        hows.append(how)
-    return st, hows
-
-
-def test_a_burst_of_drift_up_high_is_corrected_not_abandoned():
-    """Flight 58: at 90-110 m the flow ran up to 11 m from the marker. The old flat 6 m gave up
-    there - and giving up leaves the drone holding a place it is not at."""
-    _, old_hows = _drift_against_a_still_marker(MARKER_REANCHOR_M, MARKER_CORR_RATE_MS)
-    assert "reanchor" in old_hows                       # what flight 58 did, 22 times
-    _, new_hows = _drift_against_a_still_marker(marker_reanchor_m(100.0),
-                                                marker_corr_rate_ms(100.0))
-    assert "reanchor" not in new_hows                   # now it keeps correcting
-    assert set(new_hows) == {"marker"}
-
-
-def test_after_the_drift_stops_the_marker_pulls_the_position_home():
-    """Chasing is only worth more than re-anchoring if it actually closes the gap."""
-    st, _ = _drift_against_a_still_marker(marker_reanchor_m(100.0), marker_corr_rate_ms(100.0))
-    flow = 8 * 1.5
-    for _ in range(200):                                # flow now still; marker keeps correcting
-        n, e, _ = marker_fix_step(st, flow, 0.0, (0.0, 0.0), DT,
-                                  rate=marker_corr_rate_ms(100.0),
-                                  reanchor=marker_reanchor_m(100.0), source=None)
-    assert abs(n) < 0.1 and abs(e) < 0.1                # back over the marker
-
-
-def test_one_bad_fix_still_costs_only_centimetres_up_high():
-    """The rate limit is what guards against a bad detection, and it still has to bite: a 30 m
-    wild fix at 100 m may not move the sent position by more than one step."""
-    st = {}
-    run(st, (0.0, 0.0), (0.0, 0.0))
-    n, e, _ = marker_fix_step(st, 0.0, 0.0, (30.0, 0.0), DT,
-                              rate=marker_corr_rate_ms(100.0),
-                              reanchor=marker_reanchor_m(100.0), source=None)
-    assert math.hypot(n, e) <= marker_corr_rate_ms(100.0) * DT + 1e-9
-    assert math.hypot(n, e) < 0.5                       # 40 cm at 10 m/s and 25 Hz
 
 
 def test_the_marker_can_outrun_the_flow_drift_up_high():
@@ -273,3 +192,19 @@ def test_the_declared_error_is_the_markers_own_even_when_looser():
     """At 80 m the marker is good to ~1.6 m; the EKF is told that, not a flattering 1.22 m."""
     assert marker_pos_err_m(80.0) > 1.22            # 1.6 m: looser than the flow's fixed figure
     assert marker_pos_err_m(30.0) < 1.22            # 0.6 m: tighter, as before, lower down
+
+
+def test_the_reanchor_threshold_is_flat_at_every_height():
+    """Flight 60: max(6 m, 0.15*h) let the correction drag the sent position 9.6 m in five seconds
+    at 70-95 m (4.8 m before). The EKF read that sustained one-way pull as a velocity its IMU could
+    not see - test ratio 0.11 -> 1.07 - and failsafed to ALT_HOLD at 72 m. Re-anchoring is what
+    stops the pull; it must not be relaxed with height."""
+    st = {}
+    run(st, (0.0, 0.0), (0.0, 0.0))
+    flow = 0.0
+    hows = []
+    for _ in range(8):
+        flow += 1.5
+        _, _, how = run(st, (flow, 0.0), (0.0, 0.0))
+        hows.append(how)
+    assert "reanchor" in hows            # the pull is cut off, at every height

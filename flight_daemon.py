@@ -326,12 +326,6 @@ MARKER_POS_MAX_TILT_DEG = 25.0
 # ran away with the flow and the marker could only re-anchor after 6 m. Gentleness has to come
 # from the error declared to the EKF, not from starving the correction.
 MARKER_CORR_RATE_MS = 4.0
-# Scaling this with height (0.10*h, so 6 m/s at 60 m) was tried on flight 59 and taken straight
-# back out: the correction then slews at 6.5 m/s where it used to slew at 4.2, and that slew is a
-# velocity the IMU cannot match, so the EKF's position test ratio at 50-65 m went from 0.22 to
-# 0.77 (peak 1.70 -> 6.95) and the guard pulled the flow velocity back at 45-60 m instead of
-# 100 m. The rate is what the EKF feels; leave it where the good flights had it. Only the
-# re-anchor threshold below needed to move.
 
 
 def marker_corr_rate_ms(height_m):
@@ -340,19 +334,14 @@ def marker_corr_rate_ms(height_m):
 
 
 MARKER_REANCHOR_M = 6.0          # a disagreement larger than this is not corrected, only re-anchored
-# ...but at height the one that is wrong is the flow, not the marker. Flight 58 re-anchored 22
-# times between 62 and 100 m; each one abandons a real position error (up to 11 m in replay)
-# instead of correcting it, and the drone then holds a place it is not at. The marker's own error
-# up there is ~0.5 m, so a disagreement of many metres is the flow's, and giving up is backwards.
-# The rate limit above is what protects against a bad detection - this second guard only has to
-# catch the gross ones, so it may grow with height.
-MARKER_REANCHOR_PER_M = 0.15
-
-
-def marker_reanchor_m(height_m):
-    """Disagreement above which the marker map is re-anchored instead of corrected (m)."""
-    return max(MARKER_REANCHOR_M, MARKER_REANCHOR_PER_M * float(height_m))
-
+# Both of these are flat on purpose. Letting them grow with height was tried on 21 Sep and cost
+# two flights. Raising the rate (flight 59) slews the sent position faster than the IMU can
+# follow. Raising the re-anchor threshold (flight 60) is worse in a quieter way: re-anchoring is
+# what stops the correction pulling one way, and without it the position was dragged 9.6 m in
+# five seconds at 70-95 m against 4.8 m before, the test ratio went 0.11 -> 1.07, and the FC
+# dropped to ALT_HOLD on an EKF variance failsafe at 72 m. Giving up on an error is ugly but it
+# is gentler on the EKF than chasing it. Flight 58, with both flat, is still the best flight:
+# 101 m, roll rms 4.0-4.3 deg and test ratio 0.10-0.11 from 65 to 95 m.
 FLOW_RESET_JUMP_M = 3.0          # a flow step larger than this is a reset, not motion
 MARKER_POS_ERR_M = 0.5           # position error declared to the EKF while the marker holds it
 # Stage 3: above 25 m the error is set by the attitude, not the pixels - 1 deg is 0.017*h metres, and
@@ -2630,7 +2619,6 @@ def main():
                                     mk2_src_last = mk2_fix[3]
                                 px, py, _how = marker_fix_step(mk2_state, pos_north, pos_east, _mk, _dt,
                                                                rate=marker_corr_rate_ms(current_altitude_m),
-                                                               reanchor=marker_reanchor_m(current_altitude_m),
                                                                source=mk2_src_last)
                                 if _switch:
                                     logging.info(f"[+] Marker position source -> {'marker camera' if mk2_src_last == 'hi' else 'flow camera'} "
