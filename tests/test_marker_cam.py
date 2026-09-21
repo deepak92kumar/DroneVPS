@@ -220,3 +220,43 @@ def test_the_extrinsic_fix_matches_what_the_two_cameras_disagreed_by():
     moved = R @ nadir - nadir
     assert abs(moved[0] - -0.668) < 0.02                          # the 0.68 m it was out by
     assert abs(moved[1]) < 1e-9                                   # nothing on the nose axis
+
+
+def test_the_way_home_is_the_opposite_of_where_the_drone_is():
+    """The offset is the drone relative to the marker, so flying home is the reverse of it."""
+    from flight_daemon import bearing_home_to_marker as home
+
+    assert home(10.0, 0.0) == "S"          # drone north of the marker -> fly south
+    assert home(-10.0, 0.0) == "N"
+    assert home(0.0, 10.0) == "W"
+    assert home(0.0, -10.0) == "E"
+    assert home(10.0, 10.0) == "SW"
+    assert home(-10.0, -10.0) == "NE"
+
+
+def test_the_far_warning_only_speaks_when_it_has_something_to_say():
+    """Flight 68 climb 1 drifted to 39 m while the RC showed the number and said nothing."""
+    from flight_daemon import marker_far_step, MARKER_FAR_REPEAT_S
+
+    st = {}
+    assert marker_far_step(st, 3.0, 0.0, 0.0, True, True) is None        # close: quiet
+    assert marker_far_step(st, 0.0, 0.0, 1.0, False, True) is None       # on the ground: quiet
+    assert marker_far_step(st, 20.0, 0.0, 2.0, True, False) is None      # no fix: quiet
+
+    first = marker_far_step(st, 20.0, 0.0, 10.0, True, True)
+    assert first is not None and "20m" in first and first.endswith("GO S")
+    assert marker_far_step(st, 20.0, 0.0, 10.5, True, True) is None      # not every loop
+    again = marker_far_step(st, 25.0, 0.0, 10.0 + MARKER_FAR_REPEAT_S + 0.1, True, True)
+    assert again is not None and "25m" in again                          # but it keeps saying it
+
+
+def test_the_far_warning_clears_once_the_drone_is_back():
+    """Hysteresis, so it does not chatter on the threshold while the pilot is flying back."""
+    from flight_daemon import marker_far_step
+
+    st = {}
+    assert marker_far_step(st, 20.0, 0.0, 0.0, True, True) is not None
+    assert marker_far_step(st, 10.0, 0.0, 5.0, True, True) is not None   # 10 m: still warning
+    done = marker_far_step(st, 6.0, 0.0, 10.0, True, True)
+    assert done is not None and "OK" in done
+    assert marker_far_step(st, 6.0, 0.0, 15.0, True, True) is None       # then quiet again

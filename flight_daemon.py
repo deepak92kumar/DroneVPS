@@ -451,6 +451,48 @@ def flow_vel_gap_limit(height_m):
 VEL_MANUAL_MODES = frozenset({"STABILIZE", "ALT_HOLD", "ACRO", "SPORT", "DRIFT", "FLIP", "THROW"})
 
 
+# Warning only, like the camera watchdog: it sends a message and touches nothing else.
+# Flight 68 climb 1 drifted from the marker while the RC quietly showed PAD# going 16 -> 25 -> 30
+# -> 36 -> 39 m; the marker was lost thirteen times and the flow velocity came back ten times.
+# Climb 2, flown straight up over the marker, never lost it once and reached 78 m. The number was
+# always on the screen - it just had to be read. So say it out loud, with the way to fly.
+MARKER_FAR_WARN_M = 12.0          # say it past here
+MARKER_FAR_CLEAR_M = 8.0          # and stop once back inside here (hysteresis)
+MARKER_FAR_REPEAT_S = 4.0         # keep saying it while it lasts
+_COMPASS_8 = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
+
+
+def bearing_home_to_marker(north_m, east_m):
+    """Which way to fly to get back over the marker, as an 8-point compass word.
+
+    north_m/east_m is the drone relative to the marker, so the way home is the opposite."""
+    brg = math.degrees(math.atan2(-float(east_m), -float(north_m))) % 360.0
+    return _COMPASS_8[int((brg + 22.5) // 45) % 8]
+
+
+def marker_far_step(st, north_m, east_m, now, airborne, have_fix,
+                    warn_m=MARKER_FAR_WARN_M, clear_m=MARKER_FAR_CLEAR_M,
+                    repeat_s=MARKER_FAR_REPEAT_S):
+    """The warning to say now, or None. st: dict, empty on the first call."""
+    if not (airborne and have_fix):
+        st.clear()
+        return None
+    d = math.hypot(float(north_m), float(east_m))
+    if st.get("on"):
+        if d <= clear_m:
+            st.clear()
+            return f">>> MARKER OK {d:.0f}m"
+    elif d < warn_m:
+        return None
+    else:
+        st["on"] = True
+        st["said"] = -1e9
+    if now - st.get("said", -1e9) < repeat_s:
+        return None
+    st["said"] = now
+    return f">>> MARKER {d:.0f}m | GO {bearing_home_to_marker(north_m, east_m)}"
+
+
 def flow_velocity_blocked_by_mode(flight_mode, airborne):
     """True when the pilot has taken manual control and the flow velocity must not be sent."""
     return bool(airborne) and str(flight_mode or "").strip().upper() in VEL_MANUAL_MODES
@@ -1499,6 +1541,7 @@ def main():
 
         last_aruco_lock_time = 0.0
         last_aruco_offset = (0.0, 0.0)
+        marker_far_state = {}
         last_aruco_z = 0.0
         last_aruco_ang_x = 0.0
         last_aruco_ang_y = 0.0
@@ -2977,6 +3020,11 @@ def main():
                 prec_on = getattr(cuav, '_prec_loiter_on', False)
                 last_pl_cmd = getattr(cuav, '_prec_loiter_cmd_t', 0.0)
                 marker_lost = (not aruco_hits) or (now - aruco_hits[-1] > 3.0)
+                _far = marker_far_step(marker_far_state, last_aruco_offset[0], last_aruco_offset[1],
+                                       now, is_airborne, now - last_aruco_lock_time <= 2.0)
+                if _far is not None:
+                    logging.info(f"[+] {_far} (h {current_altitude_m:.0f} m)")
+                    cuav.send_statustext(_far, severity=4)
                 if want_precloit and ((not prec_on) or now - last_pl_cmd >= 2.0):
                     if cuav.set_precision_loiter(True):
                         cuav._prec_loiter_cmd_t = now
