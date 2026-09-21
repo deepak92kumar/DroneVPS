@@ -766,6 +766,26 @@ MARKER_CAM_AF_MIN, MARKER_CAM_AF_MAX = 90, 150   # outside this the result is no
 # position went undriven, the daemon called the marker lost at 36 m, the flow velocity came back
 # and the drone swung. Swapping source costs nothing now, so this only breaks a tie.
 MARKER_CAM_FRESH_S = 0.2
+# The EEPROM extrinsics are not quite right, and flight 64 measured by how much. Comparing the
+# two cameras' fixes on the same drone, the difference sits entirely on the drone's RIGHT axis
+# and is a constant ANGLE, not a constant distance - 0.36 m at 40-60 m, 0.49 at 60-80, 0.68 at
+# 80-95, which is h*tan(0.45 deg) all the way up. The nose axis shows nothing (0.01-0.04 m). A
+# per-source anchor absorbs a fixed offset but not one that grows, so an anchor set on the climb
+# is a third of a metre wrong by 90 m. Replaying the same 2549 fixes with this rotation applied
+# leaves +0.02, +0.02 and -0.05 m over those three bands. It is a calibration number measured
+# from flight, not a tuning knob: if it is right the two cameras agree at every height, and the
+# next log says so directly.
+MARKER_CAM_EXTRIN_FIX_DEG = -0.45          # about the marker camera's y axis (the drone's nose)
+
+
+def _extrin_fix(deg):
+    t = math.radians(deg)
+    return np.array([[math.cos(t), 0.0, math.sin(t)],
+                     [0.0, 1.0, 0.0],
+                     [-math.sin(t), 0.0, math.cos(t)]])
+
+
+MARKER_CAM_EXTRIN_FIX = _extrin_fix(MARKER_CAM_EXTRIN_FIX_DEG)
 MARKER_ATT_MAX_AGE_S = 0.15       # attitude history must reach this close to the frame time
 
 
@@ -1282,6 +1302,8 @@ def main():
                 _E = np.array(_cal.getCameraExtrinsics(dai.CameraBoardSocket.CAM_A,
                                                        dai.CameraBoardSocket.CAM_B))
                 R_hi, t_hi = _E[:3, :3], _E[:3, 3] / 100.0          # EEPROM translation is in cm
+                R_hi = MARKER_CAM_EXTRIN_FIX @ R_hi
+                t_hi = MARKER_CAM_EXTRIN_FIX @ t_hi
                 _ang = math.degrees(math.acos(max(-1.0, min(1.0, (np.trace(R_hi) - 1.0) / 2.0))))
                 q_hi = device.getOutputQueue(name="mono_hi", maxSize=2, blocking=False)
                 q_hi_ctrl = device.getInputQueue(name="marker_ctrl")

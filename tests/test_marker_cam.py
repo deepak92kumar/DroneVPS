@@ -200,3 +200,23 @@ def test_a_noisy_marker_shows_as_spread():
     tight = feed({}, 20.0, n=300, noise=0.5)
     loose = feed({}, 20.0, n=300, noise=5.0, seed=2)
     assert tight[1] < 1.5 < loose[1]
+
+
+def test_the_extrinsic_fix_matches_what_the_two_cameras_disagreed_by():
+    """Flight 64: the RGB and flow cameras' fixes differ by 0.36 m at 40-60 m, 0.49 at 60-80 and
+    0.68 at 80-95, entirely on the drone's right axis and nothing on its nose - h*tan(0.45 deg),
+    a fixed angle the EEPROM extrinsics missed. Replaying those fixes with this rotation applied
+    leaves +0.02, +0.02 and -0.05 m."""
+    import numpy as np
+    from flight_daemon import MARKER_CAM_EXTRIN_FIX, MARKER_CAM_EXTRIN_FIX_DEG
+
+    R = np.asarray(MARKER_CAM_EXTRIN_FIX, dtype=float)
+    assert abs(float(np.linalg.det(R)) - 1.0) < 1e-9              # a rotation, not a scaling
+    assert np.allclose(R.T @ R, np.eye(3), atol=1e-9)
+    ang = math.degrees(math.acos(max(-1.0, min(1.0, (np.trace(R) - 1.0) / 2.0))))
+    assert abs(ang - abs(MARKER_CAM_EXTRIN_FIX_DEG)) < 1e-6
+
+    nadir = np.array([0.0, 0.0, 85.0])                            # the marker straight below, 85 m
+    moved = R @ nadir - nadir
+    assert abs(moved[0] - -0.668) < 0.02                          # the 0.68 m it was out by
+    assert abs(moved[1]) < 1e-9                                   # nothing on the nose axis
