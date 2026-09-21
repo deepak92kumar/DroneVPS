@@ -437,6 +437,25 @@ def flow_vel_gap_limit(height_m):
     return max(FLOW_VEL_GAP_MIN_M, FLOW_VEL_GAP_PER_M * max(0.0, height_m))
 
 
+# Modes where the pilot is flying by hand. Flight 67: after an EKF failsafe dropped the drone
+# into ALT_HOLD at 56 m, both lanes' POSITION test ratios recovered within five seconds and the
+# drone was calm - but the VELOCITY ratio kept bouncing 1.03-1.37 against FS_EKF_THRESH of 1.20,
+# because the marker had been lost and the guard had brought the flow velocity back, and up there
+# the flow velocity is 1.4-2.3 m/s wrong. The failsafe needs the variances to stay down to clear,
+# so it never did: "EKF Failsafe Cleared" came at 0.3 m, forty-eight seconds later, on the ground.
+# Until then ArduPilot refuses LOITER, which is exactly what the pilot sees - ALT_HOLD taken by
+# hand, the drone steady again, and no way back into LOITER short of landing.
+# So while the pilot is flying by hand we send no velocity at all. The EKF then has nothing to
+# disagree with, the variance decays and LOITER comes back. Position keeps going, so there is an
+# estimate ready for it. This cannot disturb a position hold: it only applies when none is running.
+VEL_MANUAL_MODES = frozenset({"STABILIZE", "ALT_HOLD", "ACRO", "SPORT", "DRIFT", "FLIP", "THROW"})
+
+
+def flow_velocity_blocked_by_mode(flight_mode, airborne):
+    """True when the pilot has taken manual control and the flow velocity must not be sent."""
+    return bool(airborne) and str(flight_mode or "").strip().upper() in VEL_MANUAL_MODES
+
+
 def flow_velocity_wanted(st, now, height_m, marker_holds, ekf_gap=None, ekf_sp=None,
                          off_h=FLOW_VEL_OFF_H_M, on_h=FLOW_VEL_ON_H_M, hold_s=FLOW_VEL_OFF_HOLD_S,
                          calm_s=FLOW_VEL_CALM_S):
@@ -1569,6 +1588,7 @@ def main():
         mk2_last_why = ""
         fv_state = {}                # --marker-vel-off hysteresis
         fv_sending = True
+        _vel_mode_blocked = False
         mk2_why_log_t = 0.0
         # Marker camera state (--marker-cam).
         hi_seen_seq = 0
@@ -2768,7 +2788,16 @@ def main():
                                                      f"{current_altitude_m:.1f} m (marker holds={_holds}"
                                                      f"{', ' + fv_state.get('why', '') if _want_v else ''})")
                                         cuav.send_statustext(_msg, severity=6 if _want_v else 5)
-                                if _want_v:
+                                _mode_block = flow_velocity_blocked_by_mode(
+                                    getattr(cuav, 'flight_mode', ''), is_airborne)
+                                if _mode_block != _vel_mode_blocked:
+                                    _vel_mode_blocked = _mode_block
+                                    logging.info(
+                                        f"[+] Flow velocity {'held back' if _mode_block else 'allowed'}: "
+                                        f"mode {getattr(cuav, 'flight_mode', '?')} at "
+                                        f"{current_altitude_m:.1f} m"
+                                        f"{' (hand flying - let the EKF variance settle so LOITER comes back)' if _mode_block else ''}")
+                                if _want_v and not _mode_block:
                                     sent = cuav.send_vision_speed(vx=vn, vy=ve, vz=0.0, vel_cov=vel_cov)
                         if sent or sent_p:
                             vio_sent_count += 1

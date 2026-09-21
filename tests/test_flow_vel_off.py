@@ -116,3 +116,34 @@ def test_hysteresis_on_the_way_down():
     assert flow_velocity_wanted(st, t + DT, FLOW_VEL_ON_H_M - 0.1, True, (0.0, 0.0), 0.1) is True
     assert flow_velocity_wanted(st, t + 2 * DT, 34.0, True, (0.0, 0.0), 0.1) is True
     assert FLOW_VEL_ON_H_M < FLOW_VEL_OFF_H_M
+
+
+def test_hand_flying_stops_the_flow_velocity():
+    """Flight 67: an EKF failsafe put the drone in ALT_HOLD at 56 m. Both lanes' POSITION test
+    ratios were back under 0.5 within five seconds and the drone was calm, but the VELOCITY ratio
+    kept bouncing 1.03-1.37 against FS_EKF_THRESH of 1.20 - the marker was lost, the guard had
+    brought the flow velocity back, and up there it is 1.4-2.3 m/s wrong. The failsafe therefore
+    never cleared in the air: it cleared at 0.3 m, forty-eight seconds later. Until it clears
+    ArduPilot refuses LOITER, so the pilot cannot get back into it without landing."""
+    from flight_daemon import flow_velocity_blocked_by_mode
+
+    for mode in ("ALT_HOLD", "alt_hold", " STABILIZE ", "ACRO", "SPORT", "DRIFT"):
+        assert flow_velocity_blocked_by_mode(mode, True) is True
+
+
+def test_a_position_mode_is_never_starved_of_velocity():
+    """The whole point is that this only acts when no position controller is running. LOITER and
+    the autonomous modes must be untouched, or this becomes the sixth change to break a flight."""
+    from flight_daemon import flow_velocity_blocked_by_mode
+
+    for mode in ("LOITER", "POSHOLD", "AUTO", "GUIDED", "RTL", "LAND", "CIRCLE", "BRAKE"):
+        assert flow_velocity_blocked_by_mode(mode, True) is False
+
+
+def test_on_the_ground_it_changes_nothing():
+    """Not airborne is not hand flying, and the takeoff path is left exactly as it was."""
+    from flight_daemon import flow_velocity_blocked_by_mode
+
+    assert flow_velocity_blocked_by_mode("ALT_HOLD", False) is False
+    assert flow_velocity_blocked_by_mode("", True) is False
+    assert flow_velocity_blocked_by_mode(None, True) is False
