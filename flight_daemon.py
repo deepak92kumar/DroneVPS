@@ -326,15 +326,17 @@ MARKER_POS_MAX_TILT_DEG = 25.0
 # ran away with the flow and the marker could only re-anchor after 6 m. Gentleness has to come
 # from the error declared to the EKF, not from starving the correction.
 MARKER_CORR_RATE_MS = 4.0
-# Flight 58 (21 Sep, 101 m): the flow drifts against the marker at 1.8 m/s at 20-40 m but 2.7 m/s
-# at 80-95 m, and in bursts past 4 m/s. A flat 4 m/s keeps up below ~90 m and loses above it, so
-# the rate follows the height - the thing the drift itself follows.
-MARKER_CORR_RATE_PER_M = 0.10
+# Scaling this with height (0.10*h, so 6 m/s at 60 m) was tried on flight 59 and taken straight
+# back out: the correction then slews at 6.5 m/s where it used to slew at 4.2, and that slew is a
+# velocity the IMU cannot match, so the EKF's position test ratio at 50-65 m went from 0.22 to
+# 0.77 (peak 1.70 -> 6.95) and the guard pulled the flow velocity back at 45-60 m instead of
+# 100 m. The rate is what the EKF feels; leave it where the good flights had it. Only the
+# re-anchor threshold below needed to move.
 
 
 def marker_corr_rate_ms(height_m):
     """How fast the marker may move the sent position at this height (m/s)."""
-    return max(MARKER_CORR_RATE_MS, MARKER_CORR_RATE_PER_M * float(height_m))
+    return MARKER_CORR_RATE_MS
 
 
 MARKER_REANCHOR_M = 6.0          # a disagreement larger than this is not corrected, only re-anchored

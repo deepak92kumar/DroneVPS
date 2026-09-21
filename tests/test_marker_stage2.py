@@ -194,11 +194,19 @@ def test_low_down_nothing_changed():
         assert marker_reanchor_m(h) == MARKER_REANCHOR_M
 
 
-def test_the_rate_keeps_up_with_the_flow_drift_at_every_height():
-    """Flight 58 measured the drift at 1.8 m/s (20-40 m), 2.4 (40-60), 2.65 (60-80), 2.69 (80-95),
-    bursting past 4. The correction has to be able to outrun it wherever the drone is."""
-    for h, drift in ((30.0, 1.8), (50.0, 2.4), (70.0, 2.65), (90.0, 2.69), (100.0, 4.0)):
+def test_the_rate_keeps_up_with_the_typical_flow_drift_at_every_height():
+    """Flight 58 measured the drift at 1.8 m/s (20-40 m), 2.4 (40-60), 2.65 (60-80), 2.69 (80-95).
+    A flat 4 m/s outruns all of those. The bursts past 4 m/s are what the re-anchor threshold has
+    to absorb - raising the rate instead cost flight 59 its test ratio at 50-65 m."""
+    for h, drift in ((30.0, 1.8), (50.0, 2.4), (70.0, 2.65), (90.0, 2.69)):
         assert marker_corr_rate_ms(h) > drift
+
+
+def test_the_rate_is_the_same_at_every_height():
+    """Flight 59: 6 m/s at 60 m slewed the sent position faster than the IMU could follow and the
+    EKF position test ratio at 50-65 m went 0.22 -> 0.77. The rate is what the EKF feels."""
+    for h in (5.0, 35.0, 60.0, 90.0, 110.0):
+        assert marker_corr_rate_ms(h) == MARKER_CORR_RATE_MS
 
 
 def test_the_reanchor_threshold_grows_with_height():
