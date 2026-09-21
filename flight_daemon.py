@@ -729,7 +729,12 @@ class AsyncImageLogger(threading.Thread):
 
 
 # Marker camera (--marker-cam): RGB centre crop, used for the marker position from MARKER_CAM_MIN_H_M up.
-MARKER_CAM_FPS = 10
+# 15, not 10: the RGB frame reached the fix 163-172 ms old in every flight logged, and a
+# rolling-shutter sensor shears more the slower it reads out - the marker's skew tracks the
+# drone's turn rate (r = +0.46 over seven flights, 1.045 at 3 deg/s against 1.128 at 6). At 15
+# fps the frame period is 67 ms instead of 100. Measured on the bench: the flow loop is
+# unchanged (94.5 -> 94.4 FPS, no drops), so this costs nothing.
+MARKER_CAM_FPS = 15
 # Lens position. A ground sweep on 20 Sep peaked at 120 on a scene a few metres away, and with
 # this lens (f=4.8 mm, f/2.0, 2.3 um pixels after the 2/3 ISP scale) the hyperfocal distance is
 # about 5 m, so a lens focused there is sharp from ~2.5 m to infinity. Flight 45 flew at lens 0,
