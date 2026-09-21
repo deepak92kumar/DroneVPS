@@ -152,10 +152,16 @@ def test_stage_3_uses_the_marker_up_to_100_m():
     assert not good(height_m=110.0, marker_down_m=110.0)[0]
 
 
-def test_declared_error_grows_with_height():
-    """Low down it is exactly stage 2; above 25 m it follows the attitude error (2 % of height)."""
+def test_declared_error_matches_what_the_marker_measures():
+    """Flight 64 measured the marker's own per-fix scatter from consecutive fixes 0.15 s apart:
+    0.22 m at 40-60 m, 0.25 at 60-80, 0.23 at 80-95 - flat, not growing with height. What we
+    declare has to stay in the same country as that: a few times the jitter for the slow errors
+    the jitter cannot see, never the 1.7 m we used to claim at 85 m."""
     assert marker_pos_err_m(5.0) == MARKER_POS_ERR_M and marker_pos_err_m(25.0) == MARKER_POS_ERR_M
-    assert abs(marker_pos_err_m(50.0) - 1.0) < 1e-9 and abs(marker_pos_err_m(100.0) - 2.0) < 1e-9
+    for h, jitter in ((50.0, 0.22), (70.0, 0.25), (85.0, 0.23), (100.0, 0.48)):
+        declared = marker_pos_err_m(h)
+        assert declared > jitter                      # never flatter than the truth
+        assert declared < 6.0 * jitter                # nor absurdly humble (was 7.6x at 85 m)
 
 
 def test_a_jittery_far_marker_still_holds_against_a_drifting_flow():
@@ -188,10 +194,12 @@ def test_the_marker_can_outrun_the_flow_drift_up_high():
     assert marker_corr_rate_ms(70.0) > 3.0
 
 
-def test_the_declared_error_is_the_markers_own_even_when_looser():
-    """At 80 m the marker is good to ~1.6 m; the EKF is told that, not a flattering 1.22 m."""
-    assert marker_pos_err_m(80.0) > 1.22            # 1.6 m: looser than the flow's fixed figure
-    assert marker_pos_err_m(30.0) < 1.22            # 0.6 m: tighter, as before, lower down
+def test_the_declared_error_never_falls_under_the_ekf_floor():
+    """EK3_POSNE_M_NSE is 0.5 m on this airframe, so claiming less buys nothing and only removes
+    our own margin. The floor stays where stage 2 put it."""
+    for h in (0.0, 30.0, 62.0):
+        assert marker_pos_err_m(h) == MARKER_POS_ERR_M
+    assert marker_pos_err_m(100.0) > MARKER_POS_ERR_M   # above ~62 m it does open up again
 
 
 def test_the_reanchor_threshold_is_flat_at_every_height():
