@@ -1716,12 +1716,21 @@ def main():
                 cuav.set_parameter('FS_EKF_ACTION', 2.0)  # 2 = AltHold if mode needs position (0 = report only)
                 cuav.set_parameter('FS_EKF_THRESH', 1.20)
                 # EK3_*_I_GATE is percent-of-sigma (range 100–1000). Default 500 = 5σ.
+                # The position gate is back at ArduPilot's own default of 500 (5 sigma). Flight 67
+                # showed why 300 was too tight: with the flow velocity off above 35 m the EKF has
+                # no velocity measurement, so its own estimate swings around the position we send
+                # - the innovation bounced between 0.25 and 2.46 m for 75 s at 56 m with the
+                # sticks centred, never trending. Then one swing crossed the gate at t=226.7 s,
+                # and rejection is a trapdoor: free-running on the IMU makes the next innovation
+                # bigger, so it can never come back. 6 -> 13 -> 45 m and an EKF failsafe. At 56 m
+                # a 300 gate is about 3.4 m against a 2.46 m swing; 500 gives 5.6 m. The velocity
+                # gate is left at 300 - nothing measured says to move it.
                 gate_ok = (
                     cuav.set_parameter('EK3_VEL_I_GATE', 300.0)
-                    and cuav.set_parameter('EK3_POS_I_GATE', 300.0)
+                    and cuav.set_parameter('EK3_POS_I_GATE', 500.0)
                 )
                 if not gate_ok:
-                    logging.warning("[!] EK3 VEL/POS I_GATE=300 not confirmed on FC")
+                    logging.warning("[!] EK3 VEL_I_GATE=300 / POS_I_GATE=500 not confirmed on FC")
                 plnd_ok = (
                     cuav.set_parameter('PLND_ENABLED', 1.0)
                     and cuav.set_parameter('PLND_TYPE', 1.0)
