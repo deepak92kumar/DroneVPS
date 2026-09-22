@@ -1730,14 +1730,9 @@ def main():
         height_weight_last = None
         _vio_fresh = 0
         VIO_FRESH_FRAMES = 5
-        # The 100 FPS in the old note was a bench figure. Measured in flight across 13 logs the
-        # loop runs at 68-82 FPS, so every 4th frame reached the FC at 16.6 Hz (BIN 71: median
-        # VISP gap 60 ms), 77 ms old - thin phase margin for a position loop whose wobble has a
-        # 5-6 s period. Every 2nd frame is ~34 Hz in flight and about 6.8 kB/s of the 115200 link,
-        # between the 25 Hz (5 kB/s) that was fine and the 50 Hz (9.9 kB/s) that crowded it. On the
-        # bench the loop does reach ~99 FPS, so a bench run IS that 50 Hz case - if the link holds
-        # there it will hold in the air.
-        VIO_SEND_EVERY_N_FRAMES = 2
+        # Loop runs at 100 FPS. Every 4th frame = 25 Hz VPE+VSE (~5 kB/s). At 50 Hz (~9.9 kB/s) the
+        # 115200 baud link was near full and the FC forwarded it to the RC link (slow param download).
+        VIO_SEND_EVERY_N_FRAMES = 4
         VIO_TRUST_HOLD_S = 2.5  # skip takeoff 1–2s blur before fusing XY
         _vio_clear_since = 0.0
         _dbg_last_yaw = None
