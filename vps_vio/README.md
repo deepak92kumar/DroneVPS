@@ -1,56 +1,79 @@
-# vps_vio — VPS/VIO upgrade (work in progress, NOT wired into flight)
+# vps_vio — VPS/VIO upgrade (code complete, NOT implemented until after demo)
 
 Goal: give this drone a real **Visual-Inertial Odometry** layer so it can hold
 position **without an ArUco marker** at altitude — the way Stride Dynamics' VPS
-does. Full rationale, phases and timeline are in
-`../markers/VPS_Upgrade_Plan.pdf`.
+does. Full rationale, phases and timeline: `../markers/VPS_Upgrade_Plan.pdf`.
 
-## Status: build started, implementation AFTER the demo
+## Status
 
-Nothing in this folder runs in flight or touches the live system. It is isolated
-on purpose:
+The whole pipeline is **written and unit-tested**, but nothing is wired into the
+live system and nothing runs in flight yet. Implementation (bench bring-up, then
+flights) starts **after the demo**.
 
+Isolation guarantees:
 - **No existing file is modified** — not `flight_daemon.py`, not
-  `cuav_mavlink_bridge.py`, not any FC parameter.
-- `phase0_vio_eval.py` **refuses to run while the `drone-vio` daemon is active**
-  (the daemon owns the OAK-D). Bench only.
-- The demo configuration stays frozen at `d75a6be`.
+  `cuav_mavlink_bridge.py` (only imported, unchanged), no FC parameter.
+- The real-hardware entry points **refuse to run while `drone-vio` is active**
+  (they would fight over the OAK-D and the FC serial port).
+- Demo config stays frozen at `d75a6be` on `fix/vio-loiter-runaway`.
+
+## Architecture
+
+```
+VIO source ──▶ vio_frame (VIO world → NED + compass heading align)
+                    │
+                    ▼
+              AnchorFuser  ◀── ArUco fix (absolute, corrects VIO drift)
+                    │
+                    ▼
+     cuav_mavlink_bridge.send_vision_estimate(x, y, 0, …)   [X/Y only]
+                    │
+                    ▼
+        ArduPilot EKF3   (EK3_SRC1_POSXY=6, Z stays on BARO/lidar)
+```
+Z is never sent from VIO — the FC keeps barometer/TF03 for height, exactly like
+Stride's VPS. ArUco is the absolute anchor that cancels VIO drift when a marker
+is visible; the two correction constants stay **flat** (never height-scaled —
+that cost two flights, see memory `d75a29f`).
 
 ## Files
 
 | File | What | Runs now? |
 |------|------|-----------|
-| `vio_frame.py` | Pure math: VIO world pose → ArduPilot NED, + compass heading align. The one piece buildable with no hardware. | yes (pure) |
-| `tests/test_vio_frame.py` | Unit tests for the transform (8, all pass). | yes |
-| `phase0_vio_eval.py` | Bench harness: run VIO on OAK-D, log pose, measure rate + cam-IMU latency. | after demo, daemon stopped |
+| `config.py` | All tunables (FC port, axis map, fusion rates, covariances). | pure |
+| `vio_frame.py` | VIO world pose → NED, compass heading align. | pure |
+| `anchor.py` | `AnchorFuser` — VIO + ArUco drift correction (slew / re-anchor, flat). | pure |
+| `vio_source.py` | `SpectacularAiSource` (OAK-D) + `SyntheticSource` (for tests). | mixed |
+| `vps_node.py` | Full standalone node tying it together; `--dry-run` needs no hardware. | dry-run: yes |
+| `phase0_vio_eval.py` | Bench VIO eval: rate + camera-IMU latency check. | after demo |
+| `tests/` | 21 unit tests (frame 8, anchor 8, node 5), all passing. | yes |
 
-Run the tests:
-```
-python3 vps_vio/tests/test_vio_frame.py
-```
-
-## How it will plug in (Phase 1, later)
-
-The VIO pose feeds the FC through the **existing** bridge method — no new MAVLink
-behaviour:
+## Run
 
 ```
-cuav_mavlink_bridge.CuavMavlinkClient.send_vision_estimate(x, y, z, roll, pitch, yaw, pos_cov)
-   # x,y,z are NED metres from vio_frame.VioToNed.to_ned(...)
-   # ArduPilot already set to EK3_SRC1_POSXY = 6 (ExternalNav) — same as today
+# all tests (no hardware)
+for t in vps_vio/tests/test_*.py; do python3 "$t"; done
+
+# prove the full wiring with synthetic VIO — no camera, no FC, nothing sent
+python3 vps_vio/vps_node.py --dry-run --seconds 6
 ```
 
-Height (Z) stays with the FC's barometer / TF03 lidar — VIO provides **X/Y only**,
-exactly like Stride's VPS. ArUco stays as the absolute anchor that corrects VIO
-drift when a marker is visible.
+## After the demo — bring-up order
 
-## Phase 0 exit criteria (before writing any Phase 1 code)
+1. `sudo systemctl stop drone-vio`  (frees the OAK-D).
+2. `python3 vps_vio/phase0_vio_eval.py` — confirm VIO rate ≥ ~20 Hz and stable
+   camera-IMU latency. **Exit criterion for Phase 0.**
+3. From the eval CSV, measure the VIO→NED axis mapping and replace the
+   **placeholder identity `R`** in `config.py` / `vio_frame.py`.
+4. Confirm SpectacularAI attribute names in `vio_source.py` against the installed
+   version (flagged in code).
+5. Bench `vps_node.py` against the FC (props off), watch VISION_POSITION_ESTIMATE
+   accepted; then low-alt flights, then climb.
+6. Wire the **live ArUco fix** into `node.step(..., marker_world_ned=…)` — the
+   only TODO left; it needs the daemon's detector and is done at bench, post-demo.
 
-1. VIO output rate steady, ≥ ~20 Hz.
-2. Camera–IMU timing sane (low, stable `|wall - vio_time|`).
-3. Axis mapping measured: move the aircraft in known directions, read the CSV,
-   and replace the **placeholder identity `R`** in `vio_frame.py` with the real
-   VIO→NED permutation. (This is flagged in the code — do not skip it.)
+## Known must-verify constants (flagged in code, do not skip)
 
-If SpectacularAI's cam-IMU sync on the OAK-D is not good enough, the backup is
-OpenVINS / VINS-Fusion (same `vio_frame` transform, different engine).
+- `config.R_vio_to_ned` — bench-measured axis map (identity is a placeholder).
+- Heading alignment source — read the FC compass yaw at origin (dry-run uses 0).
+- SpectacularAI pose field names — confirm against installed SDK.
