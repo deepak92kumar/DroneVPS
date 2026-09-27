@@ -105,7 +105,23 @@ def build_pipeline(with_imu: bool, fps: int = FPS,
     return p
 
 
-def make_tracker(rig: vslam.Rig, inertial: bool) -> vslam.Tracker:
+def make_slam_config(map_cache_path: str | None = None) -> "vslam.Tracker.SlamConfig":
+    """SLAM (mapping + loop closure) on top of odometry.
+
+    Loop closure is what bounds drift on an out-and-back mission: the return leg
+    revisits the outbound path, so recognised places pull the estimate back. It
+    needs no external imagery or licence, unlike satellite map matching.
+    """
+    cfg = vslam.Tracker.SlamConfig()
+    cfg.use_gpu = True
+    cfg.enable_reading_internals = True      # so we can read lc_status / metrics
+    if map_cache_path:
+        cfg.map_cache_path = map_cache_path
+    return cfg
+
+
+def make_tracker(rig: vslam.Rig, inertial: bool,
+                 slam_config=None) -> vslam.Tracker:
     cfg = vslam.Tracker.OdometryConfig(
         odometry_mode=(vslam.Tracker.OdometryMode.Inertial if inertial
                        else vslam.Tracker.OdometryMode.Multicamera),
@@ -115,7 +131,7 @@ def make_tracker(rig: vslam.Rig, inertial: bool) -> vslam.Tracker:
         use_motion_model=True,
         use_denoising=False,
     )
-    return vslam.Tracker(rig, cfg)
+    return vslam.Tracker(rig, cfg, slam_config)
 
 
 def td_ns(td) -> int:
