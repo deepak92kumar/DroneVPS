@@ -8,6 +8,9 @@ from __future__ import annotations
 import sys, time, collections
 from pymavlink import mavutil
 
+sys.path.insert(0, __import__('os').path.dirname(__import__('os').path.abspath(__file__)))
+from fc_port import exclusive_fc
+
 
 def main():
     m = mavutil.mavlink_connection("/dev/ttyTHS1", baud=115200)
@@ -50,4 +53,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    with exclusive_fc():
+        main()

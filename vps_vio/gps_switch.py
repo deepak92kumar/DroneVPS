@@ -26,6 +26,9 @@ import argparse, sys, time
 import numpy as np
 from pymavlink import mavutil
 
+sys.path.insert(0, __import__('os').path.dirname(__import__('os').path.abspath(__file__)))
+from fc_port import exclusive_fc
+
 PORT, BAUD = "/dev/ttyTHS1", 115200
 FIX = {0: "no GPS", 1: "no fix", 2: "2D", 3: "3D", 4: "DGPS", 5: "RTK float", 6: "RTK fixed"}
 
@@ -168,4 +171,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    with exclusive_fc():
+        main()
