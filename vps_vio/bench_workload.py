@@ -14,13 +14,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from flow_odom import FlowTracker, frame_shift_px, shift_to_ne, attitude_shift_px
 from map_cache import MapCache
 from map_match_ncc import locate
+from map_fix_worker import MapFixWorker
 
 FLIGHT = "/mnt/ssd/DRONE/flights/auto_20260927_181924"
 MAP = "/home/abc/SSD/DRONE/ap/site_2km.tif"
 FOCAL = 791.72
 
 
-def load(n=80):
+def load(n=300):
     raw = open(os.path.join(FLIGHT, "index.csv"), "rb").read().replace(b"\x00", b"")
     rows = [r for r in csv.DictReader(io.StringIO(raw.decode("utf8", "replace")))
             if r.get("alt_rel_m") and r.get("lat") not in (None, "", "0.0")
@@ -100,6 +101,8 @@ def main():
     ap.add_argument("--seconds", type=float, default=30)
     ap.add_argument("--flow-hz", type=float, default=30)
     ap.add_argument("--fix-hz", type=float, default=1.0)
+    ap.add_argument("--threaded-fix", action="store_true",
+                    help="map fix apne thread par (apne core par)")
     a = ap.parse_args()
 
     print("frames load kar raha hoon...", flush=True)
@@ -148,28 +151,45 @@ def main():
     next_fix = time.time()
     interval = 1.0 / a.flow_hz
     tracker = FlowTracker()
+    worker = MapFixWorker(M, focal_px=FOCAL, radius_m=150.0) if a.threaded_fix else None
     lat_flow = []
+    t_flow_l, t_jpeg_l = [], []
     with Tegra() as teg:
         t_next = time.time()
         k = 0
         prev_r = None
         while time.time() < stop:
-            img, r = data[k % len(data)]
+            # Walk forwards then backwards. Wrapping round to frame 0 every cycle
+            # was a jump cut: the tracker lost every corner and re-detected, which
+            # inflated the measured cost by something that never happens in flight.
+            i = k % (2 * len(data) - 2)
+            img, r = data[i if i < len(data) else 2 * len(data) - 2 - i]
             k += 1
             t0 = time.perf_counter()
+            _tf = time.perf_counter()
             d, nn = tracker.step(img)
+            t_flow_l.append((time.perf_counter() - _tf) * 1000)
             if d is not None and prev_r is not None:
                 d = d - attitude_shift_px(att(prev_r), att(r))
                 shift_to_ne(d, altitude_m=float(r["alt_rel_m"]), focal_px=FOCAL,
                             yaw_deg=float(r["yaw_deg"]))
             n_flow += 1
+            _tj = time.perf_counter()
             cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 92])
+            t_jpeg_l.append((time.perf_counter() - _tj) * 1000)
             prev_r = r
             if time.time() >= next_fix:
-                locate(img, win, wg, altitude_m=float(r["alt_rel_m"]), focal_px=FOCAL,
-                       yaw_deg=float(r["yaw_deg"]), map_gsd_m=M.gsd, window_is_edges=True)
-                n_fix += 1
+                if worker is not None:
+                    worker.submit(img, prior_lon=lon, prior_lat=lat,
+                                  altitude_m=float(r["alt_rel_m"]),
+                                  yaw_deg=float(r["yaw_deg"]))
+                else:
+                    locate(img, win, wg, altitude_m=float(r["alt_rel_m"]), focal_px=FOCAL,
+                           yaw_deg=float(r["yaw_deg"]), map_gsd_m=M.gsd, window_is_edges=True)
+                    n_fix += 1
                 next_fix = time.time() + 1.0 / a.fix_hz
+            if worker is not None and worker.poll() is not None:
+                n_fix += 1
             lat_flow.append((time.perf_counter() - t0) * 1000)
             t_next += interval
             slack = t_next - time.time()
@@ -184,6 +204,17 @@ def main():
     print(f"  per-frame   : median {np.median(lat):.1f} ms, p95 {np.percentile(lat,95):.1f} ms, "
           f"budget {1000/a.flow_hz:.1f} ms")
     print(f"  overruns    : {int((lat > 1000/a.flow_hz).sum())} / {len(lat)}")
+    print(f"  loop breakdown: flow {np.median(t_flow_l):.1f} ms  jpeg {np.median(t_jpeg_l):.1f} ms  "
+          f"baaki {np.median(lat)-np.median(t_flow_l)-np.median(t_jpeg_l):.1f} ms")
+    try:
+        f=[int(open(f"/sys/devices/system/cpu/cpu{i}/cpufreq/scaling_cur_freq").read())//1000
+           for i in range(6)]
+        print(f"  cpu clocks  : {f} MHz")
+    except Exception: pass
+    if worker is not None:
+        print(f"  worker      : {worker.submitted} submitted, {worker.dropped} dropped, "
+              f"{worker.completed} completed")
+        worker.stop()
     for k2, v in s.items():
         print(f"  {k2:16s} {v}")
 

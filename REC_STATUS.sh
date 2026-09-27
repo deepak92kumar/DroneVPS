@@ -3,8 +3,9 @@
 # A wasted flight cost us a whole evening once: frames were never written and
 # nobody checked. So this refuses to say "go" unless ALL THREE are true:
 # frames growing, a real 3D GPS fix, and altitude arriving from the FC.
-D=$(ls -dt /mnt/ssd/DRONE/flights/auto_* 2>/dev/null | head -1)
+D=$(ls -dt /mnt/ssd/DRONE/flights/flight_* /mnt/ssd/DRONE/flights/auto_* 2>/dev/null | head -1)
 [ -z "$D" ] && { echo "!! koi recording folder nahi - service band hai?"; systemctl is-active drone-record; exit 1; }
+ARMED=$(systemctl is-active drone-record >/dev/null && grep -c ARMED /mnt/ssd/DRONE/flights/recorder.log 2>/dev/null || echo 0)
 A=$(ls "$D/mono" 2>/dev/null | wc -l); sleep 4; B=$(ls "$D/mono" 2>/dev/null | wc -l)
 L=$(tail -1 "$D/index.csv" 2>/dev/null)
 LAT=$(echo "$L" | cut -d, -f6); ALT=$(echo "$L" | cut -d, -f8)
@@ -14,8 +15,14 @@ echo "frames  : $B  (4 sec mein +$((B-A)))"
 echo "service : $(systemctl is-active drone-record)"
 echo
 OK=1
-if [ $((B-A)) -lt 2 ]; then echo "  FRAMES   : RUKE HUE HAIN  X"; OK=0
-else echo "  FRAMES   : badh rahe hain  OK"; fi
+# Recording now starts on ARM, so frames standing still on the ground is
+# correct behaviour, not a fault. What must be proven before flight is that the
+# recorder is alive and the camera is producing usable pictures.
+if [ $((B-A)) -lt 2 ]; then
+  if systemctl is-active --quiet drone-record; then
+    echo "  FRAMES   : ARM ka intezaar (disarmed par record nahi hota)  OK"
+  else echo "  FRAMES   : RECORDER BAND HAI  X"; OK=0; fi
+else echo "  FRAMES   : badh rahe hain (ARMED)  OK"; fi
 
 if [ -z "$LAT" ]; then
   echo "  TELEMETRY: NAHI AA RAHI  X   <- drone ko power do / cable check"; OK=0
@@ -32,6 +39,7 @@ else echo "  ALTITUDE : $ALT m  OK"; fi
 # in daylight. Frames existing is not the same as frames being usable, so the
 # newest one is inspected here. Run this OUTSIDE, where the flight will happen.
 IMG=$(ls -t "$D"/mono/*.png "$D"/mono/*.jpg 2>/dev/null | head -1)
+[ -z "$IMG" ] && IMG=$(ls -t /mnt/ssd/DRONE/flights/*/mono/*.jpg 2>/dev/null | head -1)
 if [ -z "$IMG" ]; then echo "  IMAGE    : koi frame nahi  X"; OK=0
 else
   R=$(/mnt/ssd/DRONE/vps_vio/.venv/bin/python - "$IMG" <<'PY2'

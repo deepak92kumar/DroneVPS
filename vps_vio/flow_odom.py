@@ -130,6 +130,10 @@ class FlowTracker:
     only when the population thins takes a step from 60 ms to 31 ms, which is
     the difference between 17 Hz and 32 Hz on one core.
 
+    300 corners, not 1200. Swept over 900 flight frames the drift is flat from
+    150 to 1200 - 6.8, 6.9, 6.8, 6.1 m - while the cost runs 23, 32, 47, 78 ms.
+    Tracking more points buys precision the rest of the chain cannot use.
+
     That is the whole Part 0b answer for this workload: the win was algorithmic,
     not a GPU offload. VPI's CUDA PyrLK does beat OpenCV (16.6 ms against 24 ms
     forward, agreeing to 0.23 px) and is worth taking later, but VPI's Harris
@@ -137,7 +141,7 @@ class FlowTracker:
     move to the GPU as configured.
     """
 
-    def __init__(self, *, max_corners: int = 1200, quality: float = 0.01,
+    def __init__(self, *, max_corners: int = 300, quality: float = 0.01,
                  min_dist: int = 8, min_tracks: int = 30,
                  redetect_below: float = 0.6, redetect_every: int = 30):
         self.max_corners, self.quality, self.min_dist = max_corners, quality, min_dist
