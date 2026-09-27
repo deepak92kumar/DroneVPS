@@ -31,7 +31,7 @@ else echo "  ALTITUDE : $ALT m  OK"; fi
 # The first flight logged 545 frames that were 100% white: indoor exposure used
 # in daylight. Frames existing is not the same as frames being usable, so the
 # newest one is inspected here. Run this OUTSIDE, where the flight will happen.
-IMG=$(ls -t "$D"/mono/*.png 2>/dev/null | head -1)
+IMG=$(ls -t "$D"/mono/*.png "$D"/mono/*.jpg 2>/dev/null | head -1)
 if [ -z "$IMG" ]; then echo "  IMAGE    : koi frame nahi  X"; OK=0
 else
   R=$(/mnt/ssd/DRONE/vps_vio/.venv/bin/python - "$IMG" <<'PY2'

@@ -26,7 +26,7 @@ Fly to 100-150 m, loiter, translate a few hundred metres, come back. Map
 matching needs >= ~80 m, so time spent below that is only useful for VIO.
 """
 from __future__ import annotations
-import argparse, csv, os, sys, threading, time
+import argparse, csv, os, queue, sys, threading, time
 
 import cv2
 import numpy as np
@@ -119,6 +119,10 @@ def main():
     ap.add_argument("--out", required=True, help="output folder")
     ap.add_argument("--seconds", type=float, default=900, help="max duration")
     ap.add_argument("--hz", type=float, default=2.0, help="frames saved per second")
+    # PNG costs 30 ms a frame, which cannot keep up at 30 Hz; JPEG costs 9.5 ms.
+    # Above 5 Hz the format switches automatically unless told otherwise.
+    ap.add_argument("--format", choices=("auto", "png", "jpg"), default="auto")
+    ap.add_argument("--jpeg-quality", type=int, default=92)
     ap.add_argument("--rgb", action="store_true", help="also save the colour camera")
     # Auto-exposure by default. The VIO rig's fixed 4000 us / ISO 800 is an
     # INDOOR setting: outdoors it is several stops over, and the first flight
@@ -132,12 +136,33 @@ def main():
     ap.add_argument("--no-fc", action="store_true", help="skip telemetry entirely")
     a = ap.parse_args()
 
+    ext = a.format if a.format != "auto" else ("jpg" if a.hz > 5 else "png")
+    enc = [cv2.IMWRITE_JPEG_QUALITY, a.jpeg_quality] if ext == "jpg" else []
+
     os.makedirs(a.out, exist_ok=True)
     img_dir = os.path.join(a.out, "mono")
     os.makedirs(img_dir, exist_ok=True)
     if a.rgb:
         rgb_dir = os.path.join(a.out, "rgb")
         os.makedirs(rgb_dir, exist_ok=True)
+
+    # Encoding on the grab loop stalls the camera queue at 30 Hz, so the writes
+    # go to a worker. The queue is bounded: if the disk ever falls behind it is
+    # better to drop frames and say so than to silently lag the telemetry.
+    wq: "queue.Queue" = queue.Queue(maxsize=120)
+    dropped = [0]
+
+    def writer():
+        while True:
+            item = wq.get()
+            if item is None:
+                break
+            path, img = item
+            cv2.imwrite(path, img, enc)
+            wq.task_done()
+
+    wthread = threading.Thread(target=writer, daemon=True)
+    wthread.start()
 
     tel = None
     if not a.no_fc:
@@ -161,6 +186,7 @@ def main():
         # long exposure while the aircraft is moving.
         m.initialControl.setAutoExposureLimit(8000)
         print("  AUTO exposure (limit 8000 us)")
+    print(f"  saving {ext.upper()} at {a.hz:g} Hz")
     xo = p.create(dai.node.XLinkOut); xo.setStreamName("mono"); m.out.link(xo.input)
     if a.rgb:
         c = p.create(dai.node.ColorCamera)
@@ -193,18 +219,26 @@ def main():
         qr = dev.getOutputQueue("rgb", 4, False) if a.rgb else None
 
         n, t0, next_save = 0, time.monotonic(), 0.0
-        interval = 1.0 / max(a.hz, 0.1)
+        # Asking for the camera's own rate means "every frame". Computing the
+        # next deadline from the current time instead of accumulating it drops
+        # roughly a third of the frames when the two rates are equal: a frame
+        # arriving a hair early is skipped and the next one lands a full period
+        # later. That cost 30 Hz -> 20 Hz.
+        interval = 0.0 if a.hz >= oak_rig.FPS - 1 else 1.0 / max(a.hz, 0.1)
         print(f"RECORDING to {a.out} — Ctrl-C to stop. Nothing is sent to the FC.")
         try:
             while time.monotonic() - t0 < a.seconds:
                 fr = qm.get()
                 now = time.monotonic() - t0
-                if now < next_save:
+                if now + 1e-3 < next_save:
                     continue
-                next_save = now + interval
+                next_save = max(next_save + interval, now)
                 img = fr.getCvFrame()
-                name = f"m{n:06d}.png"
-                cv2.imwrite(os.path.join(img_dir, name), img)
+                name = f"m{n:06d}.{ext}"
+                try:
+                    wq.put_nowait((os.path.join(img_dir, name), img))
+                except queue.Full:
+                    dropped[0] += 1
                 rgbname = ""
                 if qr is not None and qr.has():
                     rgbname = f"c{n:06d}.jpg"
@@ -223,13 +257,18 @@ def main():
                     alt = s.get("alt_rel")
                     sat = 100.0 * float((img > 250).mean())
                     warn = "  <<< OVEREXPOSED" if sat > 40 else ""
+                    drop = f"  DROPPED {dropped[0]}" if dropped[0] else ""
                     print(f"  {now:6.1f}s  {n:5d} frames  alt={alt if alt is None else round(alt,1)} m  "
                           f"lat={s.get('lat')}  sats={s.get('sats')}  "
-                          f"white={sat:.0f}%{warn}")
+                          f"white={sat:.0f}%{warn}{drop}")
         except KeyboardInterrupt:
             print("\nstopped by user")
         finally:
+            wq.put(None)
+            wthread.join(timeout=20)
             f.close()
+            if dropped[0]:
+                print(f"  WARNING: {dropped[0]} frames dropped (disk could not keep up)")
             if tel:
                 tel.stop()
             print(f"\nsaved {n} frames to {a.out}")
