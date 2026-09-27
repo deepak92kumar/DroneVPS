@@ -3,16 +3,18 @@
 A source yields VioPose samples: position (VIO world frame, metres), orientation
 quaternion, a timestamp, and a tracking flag. Two implementations:
 
-- SpectacularAiSource: real VIO on the OAK-D (Phase 1+). Imports are lazy so the
-  module loads on any machine for testing the rest of the pipeline.
+- CuVslamSource: real stereo(-inertial) VIO on the OAK-D via cuVSLAM, using the
+  verified rig in oak_rig.py. Imports are lazy so this module loads anywhere.
 - SyntheticSource: scripted motion + injectable drift/noise, so the fusion and
   node logic can be exercised with NO hardware (used by tests and dry-runs).
 
-The exact SpectacularAI field names are per its published API and must be
-confirmed on the bench during Phase 0 (flagged below).
+SpectacularAI was dropped: its free wheels are x86_64-only and non-commercial,
+and ARM builds are commercial-licence-only. cuVSLAM replaced it — see
+oak_rig.py for the measured constants.
 """
 from __future__ import annotations
 from dataclasses import dataclass
+from collections import deque
 import time
 import numpy as np
 
@@ -51,35 +53,126 @@ class SyntheticSource:
         self.t += self.dt
         return p
 
+    def close(self):
+        pass
 
-class SpectacularAiSource:
-    """Real VIO on the OAK-D. Lazy imports; construct only when a camera is free."""
 
-    def __init__(self):
-        self._device = None
-        self._session = None
+class CuVslamSource:
+    """Stereo(-inertial) VIO on the OAK-D Pro via cuVSLAM.
+
+    read() pulls the next hardware-synced stereo pair, registers any IMU samples
+    up to that image timestamp (cuVSLAM requires track and IMU calls to be
+    ordered by timestamp), runs the tracker and returns the pose.
+    """
+
+    def __init__(self, inertial: bool = False, fps: int | None = None,
+                 exposure_us: int | None = None, iso: int | None = None,
+                 max_stereo_skew_ms: float = 5.0):
+        self.inertial = inertial
+        self._fps = fps
+        self._exposure_us = exposure_us
+        self._iso = iso
+        self.max_skew_ms = max_stereo_skew_ms
+        self._dev = None
+        self._tracker = None
+        self._pend_imu: deque = deque()
+        self._last_imu_ts = None
+        self._bufL: dict = {}
+        self._bufR: dict = {}
+        self.dropped = 0          # stereo pairs rejected as unsynced
 
     def open(self):
-        import depthai            # noqa
-        import spectacularAI.depthai
-        pipeline = depthai.Pipeline()
-        vio = spectacularAI.depthai.Pipeline(pipeline)
-        self._device = depthai.Device(pipeline)
-        self._session = vio.startSession(self._device)
+        import depthai as dai
+        import cuvslam as vslam
+        import oak_rig
 
-    def read(self) -> VioPose:
-        out = self._session.waitForOutput()
-        p = out.pose
-        # NOTE (Phase 0 verify): confirm these attribute names against the
-        # installed SpectacularAI version before trusting them in flight.
-        pos = np.array([p.position.x, p.position.y, p.position.z])
-        q = np.array([p.orientation.w, p.orientation.x, p.orientation.y, p.orientation.z])
-        status = str(getattr(out, "status", "TRACKING"))
-        return VioPose(p.time, pos, q, tracking=("TRACKING" in status.upper() or status == ""))
+        vslam.warm_up_gpu()
+        self._dai = dai
+        self._dev = dai.Device()
+        calib = self._dev.readCalibration()
+        rig = oak_rig.build_rig(calib, with_imu=self.inertial)
+        self._tracker = oak_rig.make_tracker(rig, inertial=self.inertial)
+        self._td_ns = oak_rig.td_ns
+        kw = {}
+        if self._fps is not None:
+            kw["fps"] = self._fps
+        if self._exposure_us is not None:
+            kw["exposure_us"] = self._exposure_us
+        if self._iso is not None:
+            kw["iso"] = self._iso
+        self._dev.startPipeline(oak_rig.build_pipeline(with_imu=self.inertial, **kw))
+        self._qL = self._dev.getOutputQueue("left", 8, False)
+        self._qR = self._dev.getOutputQueue("right", 8, False)
+        self._qI = self._dev.getOutputQueue("imu", 300, False) if self.inertial else None
+        return self
+
+    def _drain_imu(self):
+        if self._qI is None:
+            return
+        while self._qI.has():
+            for pk in self._qI.get().packets:
+                a, g = pk.acceleroMeter, pk.gyroscope
+                self._pend_imu.append((self._td_ns(a.getTimestampDevice()),
+                                       [a.x, a.y, a.z], [g.x, g.y, g.z]))
+
+    def _next_pair(self, timeout_s: float):
+        """Return the next hardware-synced stereo pair, or None on timeout."""
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < timeout_s:
+            self._drain_imu()
+            while self._qL.has():
+                f = self._qL.get(); self._bufL[f.getSequenceNum()] = f
+            while self._qR.has():
+                f = self._qR.get(); self._bufR[f.getSequenceNum()] = f
+            common = sorted(set(self._bufL) & set(self._bufR))
+            for seq in common:
+                fl, fr = self._bufL.pop(seq), self._bufR.pop(seq)
+                ts = self._td_ns(fl.getTimestampDevice())
+                if abs(ts - self._td_ns(fr.getTimestampDevice())) / 1e6 > self.max_skew_ms:
+                    self.dropped += 1
+                    continue
+                return ts, fl.getCvFrame(), fr.getCvFrame()
+            # never let one stalled side grow the buffers without bound
+            for b in (self._bufL, self._bufR):
+                while len(b) > 20:
+                    b.pop(sorted(b)[0]); self.dropped += 1
+            time.sleep(0.002)
+        return None
+
+    def read(self, timeout_s: float = 2.0) -> VioPose | None:
+        import cuvslam as vslam
+        got = self._next_pair(timeout_s)
+        if got is None:
+            return None
+        ts, left, right = got
+
+        if self.inertial:
+            # cuVSLAM needs track() and register_imu_measurement() ordered by time
+            while self._pend_imu and self._pend_imu[0][0] <= ts:
+                its, la, av = self._pend_imu.popleft()
+                if self._last_imu_ts is not None and its < self._last_imu_ts:
+                    continue
+                m = vslam.ImuMeasurement()
+                m.timestamp_ns = its
+                m.linear_accelerations = la
+                m.angular_velocities = av
+                self._tracker.register_imu_measurement(0, m)
+                self._last_imu_ts = its
+
+        est, _ = self._tracker.track(ts, [left, right])
+        pose = getattr(est, "world_from_rig", None) if est is not None else None
+        pose = getattr(pose, "pose", pose)
+        if pose is None or not np.all(np.isfinite(pose.translation)):
+            return VioPose(ts / 1e9, np.zeros(3), np.array([1.0, 0, 0, 0]), tracking=False)
+
+        q = np.asarray(pose.rotation, float)          # cuVSLAM gives x, y, z, w
+        quat_wxyz = np.array([q[3], q[0], q[1], q[2]])
+        return VioPose(ts / 1e9, np.asarray(pose.translation, float), quat_wxyz, tracking=True)
 
     def close(self):
         try:
-            if self._device is not None:
-                self._device.close()
+            if self._dev is not None:
+                self._dev.close()
         except Exception:
             pass
+        self._dev = None

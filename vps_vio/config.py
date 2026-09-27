@@ -15,8 +15,20 @@ class VpsConfig:
     fc_port: str = "/dev/ttyTHS1"
     fc_baud: int = 115200
 
-    # --- VIO -> NED axis mapping (Phase-0 bench measured; identity is a PLACEHOLDER) ---
-    R_vio_to_ned: list = field(default_factory=lambda: np.eye(3).tolist())
+    # --- VIO -> BODY axis mapping (MEASURED 27 Sep, no longer a placeholder) ---
+    # Derived from geometry, not from drift-prone motion tests:
+    #   * cam_z is DOWN  - the accelerometer's gravity vector, rotated into the
+    #     camera frame by the IMU->CAM_B extrinsics, lands on cam_z at 99.8%.
+    #   * the drone's nose points at the TOP of the image, and cam_y is image
+    #     DOWN, so body forward = -vio_y.
+    #   * body right = down x forward = +vio_x (right-handed, no measurement needed).
+    # Cross-checked against the one clean motion run: a forward move gave
+    # vio_y = -0.225 with 100% on that axis, exactly as this matrix predicts.
+    # Rows map a VIO vector to [forward, right, down] in the body frame; the
+    # compass supplies body->NED heading at runtime (VioToNed.heading_align_rad).
+    R_vio_to_ned: list = field(default_factory=lambda: [[0.0, -1.0, 0.0],
+                                                        [1.0,  0.0, 0.0],
+                                                        [0.0,  0.0, 1.0]])
 
     # --- ArUco-as-anchor fusion (mirror of marker_fix_step; keep FLAT) ---
     corr_rate_mps: float = 4.0     # max slew speed of the offset correction, m/s. FLAT.

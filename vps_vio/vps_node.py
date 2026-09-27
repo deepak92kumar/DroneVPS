@@ -36,7 +36,7 @@ import numpy as np
 from config import VpsConfig
 from vio_frame import VioToNed, quat_to_yaw
 from anchor import AnchorFuser
-from vio_source import SyntheticSource, SpectacularAiSource
+from vio_source import SyntheticSource, CuVslamSource
 
 log = logging.getLogger("vps_node")
 
@@ -106,7 +106,9 @@ class VpsNode:
         n = 0
         while time.monotonic() - t0 < seconds:
             pose = self.source.read()
-            world = self.step(pose)          # TODO(after demo): pass live marker fix
+            if pose is None:                 # source timed out (no frames)
+                continue
+            world = self.step(pose)          # TODO: pass the live ArUco fix here
             if world is None:
                 continue
             now = time.monotonic() - t0
@@ -119,6 +121,10 @@ class VpsNode:
                                  world[0], world[1], self._rate, self.fuser.reanchor_count)
                 else:
                     self._send(world, pose)
+                    if n % 30 == 0:
+                        log.info("body x=%+.2f y=%+.2f  rate=%.1fHz  reanchors=%d  drops=%d",
+                                 world[0], world[1], self._rate,
+                                 self.fuser.reanchor_count, getattr(self.source, "dropped", 0))
             if dry_run:
                 time.sleep(max(0.0, interval * 0.1))  # don't spin the CPU in dry-run
         log.info("done: %d sends, final offset=%s", n, np.round(self.fuser.offset, 3))
@@ -130,6 +136,9 @@ def main():
                     help="synthetic VIO, no camera, no FC — safe anywhere")
     ap.add_argument("--seconds", type=float, default=30.0)
     ap.add_argument("--force", action="store_true", help="run even if daemon looks active")
+    ap.add_argument("--inertial", action="store_true", help="stereo+IMU (default: stereo only)")
+    ap.add_argument("--send-fc", action="store_true",
+                    help="actually transmit VISION_POSITION_ESTIMATE to the flight controller")
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
 
@@ -146,8 +155,10 @@ def main():
         sys.exit("REFUSING: drone-vio daemon is active (owns OAK-D + FC serial). "
                  "Stop it first: sudo systemctl stop drone-vio")
     from cuav_mavlink_bridge import CuavMavlinkClient  # imported only on the real path
-    bridge = CuavMavlinkClient(preferred_port=cfg.fc_port, baud=cfg.fc_baud)
-    src = SpectacularAiSource(); src.open()
+    bridge = CuavMavlinkClient(preferred_port=cfg.fc_port, baud=cfg.fc_baud) if a.send_fc else None
+    if bridge is None:
+        log.info("FC sending DISABLED (no --send-fc): pose is computed but nothing is transmitted")
+    src = CuVslamSource(inertial=a.inertial); src.open()
     node = VpsNode(cfg, src, bridge=bridge)
     try:
         node.run(a.seconds, dry_run=False)

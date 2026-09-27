@@ -31,12 +31,15 @@ def test_marker_corrects_vio_drift():
     node = VpsNode(cfg, src, bridge=None)
 
     # truth: aircraft is stationary at world origin (0,0). Marker keeps saying so.
+    # Check the magnitude, not one axis: which body axis the VIO drift lands on
+    # depends on the measured mounting rotation R, so an axis-specific assertion
+    # would silently pass for the wrong reason if R changes.
     max_err_with_marker = 0.0
     for i in range(400):                       # 20 s at 20 Hz
         p = src.read()
         world = node.step(p, marker_world_ned=[0.0, 0.0, 0.0])
         if i > 100:                            # after convergence
-            max_err_with_marker = max(max_err_with_marker, abs(world[0]))
+            max_err_with_marker = max(max_err_with_marker, float(np.linalg.norm(world)))
     # with the marker anchoring, the reported world position stays bounded despite
     # VIO drifting ~0.5 m/s. Without correction it would be ~10 m by now.
     assert max_err_with_marker < 1.0, max_err_with_marker
@@ -50,7 +53,8 @@ def test_no_marker_lets_drift_through():
     world = None
     for _ in range(400):
         world = node.step(src.read())          # no marker
-    assert abs(world[0]) > 5.0                  # ~10 m of uncorrected drift
+    # magnitude, not a fixed axis — see note in test_marker_corrects_vio_drift
+    assert float(np.linalg.norm(world)) > 5.0   # ~10 m of uncorrected drift
 
 
 def test_untracked_pose_ignored():
