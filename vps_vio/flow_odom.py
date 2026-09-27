@@ -119,3 +119,80 @@ def shift_to_ne(dpx: np.ndarray, *, altitude_m: float, focal_px: float,
     north = fwd * np.cos(t) - right * np.sin(t)
     east = fwd * np.sin(t) + right * np.cos(t)
     return float(north), float(east)
+
+
+class FlowTracker:
+    """Keeps its corners between frames instead of finding them again each time.
+
+    Re-detecting every frame was 30 ms of the 60 ms a flow step cost, and it
+    buys nothing: tracked over real flight frames, 707 of 714 corners were still
+    alive after 59 frames - two seconds at 30 Hz. Detecting once and re-seeding
+    only when the population thins takes a step from 60 ms to 31 ms, which is
+    the difference between 17 Hz and 32 Hz on one core.
+
+    That is the whole Part 0b answer for this workload: the win was algorithmic,
+    not a GPU offload. VPI's CUDA PyrLK does beat OpenCV (16.6 ms against 24 ms
+    forward, agreeing to 0.23 px) and is worth taking later, but VPI's Harris
+    corners returned 3 points where OpenCV returned 714, so the detector cannot
+    move to the GPU as configured.
+    """
+
+    def __init__(self, *, max_corners: int = 1200, quality: float = 0.01,
+                 min_dist: int = 8, min_tracks: int = 30,
+                 redetect_below: float = 0.6, redetect_every: int = 30):
+        self.max_corners, self.quality, self.min_dist = max_corners, quality, min_dist
+        self.min_tracks = min_tracks
+        self.redetect_below = redetect_below
+        self.redetect_every = redetect_every
+        self.prev = None
+        self.pts = None
+        self.n_seed = 0
+        self.age = 0
+        self.redetections = 0
+
+    def _detect(self, img):
+        p = cv2.goodFeaturesToTrack(img, self.max_corners, self.quality, self.min_dist)
+        self.pts = p
+        self.n_seed = 0 if p is None else len(p)
+        self.age = 0
+        self.redetections += 1
+
+    def step(self, img: np.ndarray):
+        """Returns (median pixel shift, track count), or (None, n) if it failed."""
+        if self.prev is None or self.pts is None or len(self.pts) < self.min_tracks:
+            self._detect(img)
+            self.prev = img
+            return None, self.n_seed
+
+        p1, st, _ = cv2.calcOpticalFlowPyrLK(self.prev, img, self.pts, None,
+                                             winSize=(31, 31), maxLevel=4)
+        if p1 is None:
+            self._detect(img); self.prev = img
+            return None, 0
+        p0r, st2, _ = cv2.calcOpticalFlowPyrLK(img, self.prev, p1, None,
+                                               winSize=(31, 31), maxLevel=4)
+        good = (st.ravel() == 1) & (st2.ravel() == 1) & \
+               (np.linalg.norm(self.pts - p0r, axis=2).ravel() < 1.0)
+        n = int(good.sum())
+        shift = None
+        if n >= self.min_tracks:
+            src = self.pts[good].reshape(-1, 1, 2)
+            dst = p1[good].reshape(-1, 1, 2)
+            M, inl = cv2.estimateAffinePartial2D(src, dst, method=cv2.RANSAC,
+                                                 ransacReprojThreshold=1.5)
+            if M is not None and inl is not None and int(inl.sum()) >= self.min_tracks:
+                c = np.array([[[img.shape[1] / 2.0, img.shape[0] / 2.0]]], np.float32)
+                shift = (cv2.transform(c, M)[0][0] - c[0][0]).astype(float)
+                n = int(inl.sum())
+            else:
+                shift = np.median((p1 - self.pts)[good].reshape(-1, 2), axis=0)
+
+        self.prev = img
+        self.age += 1
+        surviving = 0 if self.n_seed == 0 else n / self.n_seed
+        if (n < self.min_tracks or surviving < self.redetect_below
+                or self.age >= self.redetect_every):
+            self._detect(img)
+        else:
+            self.pts = p1[good].reshape(-1, 1, 2)
+        return shift, n
