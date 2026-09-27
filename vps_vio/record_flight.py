@@ -44,7 +44,7 @@ class Telemetry:
         self.lock = threading.Lock()
         self.state = dict(lat=None, lon=None, alt_rel=None, alt_amsl=None,
                           roll=None, pitch=None, yaw=None, fix=None, sats=None,
-                          hdg=None, t=0.0)
+                          hdg=None, rngfnd=None, t=0.0)
         self._run = False
         self._thr = None
         self.connected = False
@@ -85,7 +85,8 @@ class Telemetry:
                 self._request_streams()
             try:
                 msg = self.m.recv_match(
-                    type=["GLOBAL_POSITION_INT", "GPS_RAW_INT", "ATTITUDE"],
+                    type=["GLOBAL_POSITION_INT", "GPS_RAW_INT", "ATTITUDE",
+                          "DISTANCE_SENSOR", "RANGEFINDER"],
                     blocking=True, timeout=1.0)
             except Exception:
                 continue
@@ -100,6 +101,15 @@ class Telemetry:
                                       hdg=msg.hdg / 100.0 if msg.hdg != 65535 else None)
                 elif t == "GPS_RAW_INT":
                     self.state.update(fix=msg.fix_type, sats=msg.satellites_visible)
+                elif t == "RANGEFINDER":
+                    # Logged alongside the frames so lidar height can be compared
+                    # against the barometer over a whole flight. It is NOT fed to
+                    # the EKF - the analog scaling is still wrong (it reads 110 cm
+                    # as 123 cm) and a two-point ground fit implied a 3.2 m
+                    # ceiling, which cannot be right for a 180 m sensor.
+                    self.state["rngfnd"] = float(msg.distance)
+                elif t == "DISTANCE_SENSOR":
+                    self.state["rngfnd"] = msg.current_distance / 100.0
                 elif t == "ATTITUDE":
                     self.state.update(roll=np.degrees(msg.roll),
                                       pitch=np.degrees(msg.pitch),
@@ -201,7 +211,8 @@ def main():
     wr = csv.writer(f)
     wr.writerow(["n", "wall_s", "dev_ts_ns", "mono_file", "rgb_file",
                  "lat", "lon", "alt_rel_m", "alt_amsl_m",
-                 "roll_deg", "pitch_deg", "yaw_deg", "hdg_deg", "fix", "sats"])
+                 "roll_deg", "pitch_deg", "yaw_deg", "hdg_deg", "fix", "sats",
+                 "rngfnd_m"])
 
     with dai.Device() as dev:
         cal = dev.readCalibration()
@@ -250,7 +261,7 @@ def main():
                              name, rgbname,
                              s.get("lat"), s.get("lon"), s.get("alt_rel"), s.get("alt_amsl"),
                              s.get("roll"), s.get("pitch"), s.get("yaw"), s.get("hdg"),
-                             s.get("fix"), s.get("sats")])
+                             s.get("fix"), s.get("sats"), s.get("rngfnd")])
                 n += 1
                 if n % 20 == 0:
                     f.flush()
