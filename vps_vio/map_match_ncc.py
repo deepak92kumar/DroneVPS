@@ -50,6 +50,48 @@ def north_up_query(img_grey: np.ndarray, *, altitude_m: float, focal_px: float,
     return q[h // 2 - s:h // 2 + s, w // 2 - s:w // 2 + s]
 
 
+def _correlate(window: np.ndarray, templ: np.ndarray, *, pyramid: bool = True,
+               pad: int = 12):
+    """Normalised cross-correlation peak, coarse-to-fine.
+
+    A full-resolution matchTemplate is 97% of the cost of a fix and it scales
+    with window area times template area: a +-300 m window takes 253 ms for one
+    rotation. Halving both images first, finding the peak there, then rechecking
+    only a small box around it at full resolution gives the SAME peak - measured
+    at zero pixels of difference across every window size - for a quarter of the
+    time.
+
+    Worth recording that this beat the GPU. VPI's CUDA templateMatching came in
+    at 68 ms against the pyramid's 61 ms at +-300 m, and 15.8 against 10.0 at
+    +-150 m, so the offload the plan expected to need was measured and rejected.
+    """
+    if not pyramid or min(window.shape) < 4 * pad or min(templ.shape) < 32:
+        r = cv2.matchTemplate(window, templ, cv2.TM_CCOEFF_NORMED)
+        _, peak, _, loc = cv2.minMaxLoc(r)
+        return peak, loc, r
+    wh = cv2.resize(window, None, fx=.5, fy=.5, interpolation=cv2.INTER_AREA)
+    th = cv2.resize(templ, None, fx=.5, fy=.5, interpolation=cv2.INTER_AREA)
+    if wh.shape[0] <= th.shape[0] or wh.shape[1] <= th.shape[1]:
+        r = cv2.matchTemplate(window, templ, cv2.TM_CCOEFF_NORMED)
+        _, peak, _, loc = cv2.minMaxLoc(r)
+        return peak, loc, r
+    rh = cv2.matchTemplate(wh, th, cv2.TM_CCOEFF_NORMED)
+    _, _, _, lh = cv2.minMaxLoc(rh)
+    x0 = max(0, lh[0] * 2 - pad); y0 = max(0, lh[1] * 2 - pad)
+    x1 = min(window.shape[1], x0 + templ.shape[1] + 2 * pad)
+    y1 = min(window.shape[0], y0 + templ.shape[0] + 2 * pad)
+    sub = window[y0:y1, x0:x1]
+    if sub.shape[0] <= templ.shape[0] or sub.shape[1] <= templ.shape[1]:
+        r = cv2.matchTemplate(window, templ, cv2.TM_CCOEFF_NORMED)
+        _, peak, _, loc = cv2.minMaxLoc(r)
+        return peak, loc, r
+    rf = cv2.matchTemplate(sub, templ, cv2.TM_CCOEFF_NORMED)
+    _, peak, _, l = cv2.minMaxLoc(rf)
+    # The confidence margin needs rival peaks from the WHOLE window, which only
+    # the coarse surface has, so it is measured there and rescaled.
+    return peak, (l[0] + x0, l[1] + y0), rh
+
+
 def _edges(img: np.ndarray) -> np.ndarray:
     """Gradient magnitude. Correlating intensity across a four-year gap and a
     different sensor is weak; edges survive the difference in brightness,
@@ -64,32 +106,44 @@ def _edges(img: np.ndarray) -> np.ndarray:
 def locate(img_grey: np.ndarray, map_window: np.ndarray, geo_window, *,
            altitude_m: float, focal_px: float, yaw_deg: float, map_gsd_m: float,
            yaw_search_deg=(-6.0, -3.0, 0.0, 3.0, 6.0),
-           min_score: float = 0.25, min_margin: float = 0.03) -> NccResult:
+           min_score: float = 0.05, min_margin: float = 0.01,
+           window_is_edges: bool = False, pyramid: bool = True) -> NccResult:
     """Correlate one frame against a map window. geo_window maps window px -> lon/lat.
 
     yaw_search_deg covers compass error: the FC heading is good to a few degrees,
     and a few degrees of template rotation costs real correlation.
+
+    The thresholds suit the pyramid path, where the margin is read off the
+    coarse correlation surface and so sits on a different scale than it did at
+    full resolution. Swept over 50 frames with a +-150 m window: a margin of
+    0.01 keeps 29 of them and every single one lands within 30 m, while 0.03
+    keeps only 19 for no gain in accuracy. min_score is low because gradient
+    correlation across a four-year-old map peaks around 0.1-0.2 - the margin is
+    what actually separates a good fix from a bad one, not the peak height.
     """
-    W = _edges(map_window)
+    # MapCache hands over a window whose edges were computed once at startup.
+    W = map_window if window_is_edges else _edges(map_window)
     peak, loc, q = -9.0, None, None
     for d in yaw_search_deg:
         t = north_up_query(img_grey, altitude_m=altitude_m, focal_px=focal_px,
                            yaw_deg=yaw_deg - d, map_gsd_m=map_gsd_m)
         if t.shape[0] < 16 or W.shape[0] <= t.shape[0] or W.shape[1] <= t.shape[1]:
             continue
-        rr = cv2.matchTemplate(W, _edges(t), cv2.TM_CCOEFF_NORMED)
-        _, pk, _, lc = cv2.minMaxLoc(rr)
+        pk, lc, rr = _correlate(W, _edges(t), pyramid=pyramid)
         if pk > peak:
-            peak, loc, q, r = pk, lc, t, rr
+            peak, loc, q, r, scale = pk, lc, t, rr, (2 if pyramid else 1)
     if loc is None:
         return NccResult(False, reason="template does not fit the search window")
 
     # Confidence: how far the winning peak stands above the best rival outside
     # its own neighbourhood. A flat correlation surface means "could be anywhere".
+    # r is the coarse surface when the pyramid ran, so the peak neighbourhood
+    # to blank out is in coarse coordinates too.
     rival = r.copy()
-    k = max(q.shape) // 2
-    x0, y0 = max(0, loc[0] - k), max(0, loc[1] - k)
-    rival[y0:loc[1] + k, x0:loc[0] + k] = -1.0
+    k = max(1, max(q.shape) // (2 * scale))
+    cx, cy = loc[0] // scale, loc[1] // scale
+    x0, y0 = max(0, cx - k), max(0, cy - k)
+    rival[y0:cy + k, x0:cx + k] = -1.0
     margin = float(peak - rival.max())
 
     cx = loc[0] + q.shape[1] / 2.0
