@@ -120,8 +120,13 @@ def main():
     ap.add_argument("--seconds", type=float, default=900, help="max duration")
     ap.add_argument("--hz", type=float, default=2.0, help="frames saved per second")
     ap.add_argument("--rgb", action="store_true", help="also save the colour camera")
-    ap.add_argument("--exposure-us", type=int, default=oak_rig.EXPOSURE_US)
-    ap.add_argument("--iso", type=int, default=oak_rig.ISO)
+    # Auto-exposure by default. The VIO rig's fixed 4000 us / ISO 800 is an
+    # INDOOR setting: outdoors it is several stops over, and the first flight
+    # came back as 545 pure-white frames, every one of them useless. This
+    # recorder is not in the control loop, so it has no reason to pin exposure.
+    ap.add_argument("--exposure-us", type=int, default=0,
+                    help="0 = auto-exposure (default); >0 pins it, indoor use only")
+    ap.add_argument("--iso", type=int, default=0, help="only used with --exposure-us")
     ap.add_argument("--fc-port", default="/dev/ttyTHS1")
     ap.add_argument("--fc-baud", type=int, default=115200)
     ap.add_argument("--no-fc", action="store_true", help="skip telemetry entirely")
@@ -147,7 +152,15 @@ def main():
     m.setBoardSocket(dai.CameraBoardSocket.CAM_B)
     m.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)
     m.setFps(30)
-    m.initialControl.setManualExposure(a.exposure_us, a.iso)
+    if a.exposure_us > 0:
+        m.initialControl.setManualExposure(a.exposure_us, a.iso or oak_rig.ISO)
+        print(f"  MANUAL exposure {a.exposure_us} us ISO {a.iso or oak_rig.ISO} "
+              f"- daylight mein ye jal jayegi")
+    else:
+        # Cap the auto-exposure so a dark patch cannot smear the image with a
+        # long exposure while the aircraft is moving.
+        m.initialControl.setAutoExposureLimit(8000)
+        print("  AUTO exposure (limit 8000 us)")
     xo = p.create(dai.node.XLinkOut); xo.setStreamName("mono"); m.out.link(xo.input)
     if a.rgb:
         c = p.create(dai.node.ColorCamera)
@@ -170,7 +183,8 @@ def main():
         with open(os.path.join(a.out, "camera.txt"), "w") as cf:
             cf.write(f"mono CAM_B 1280x800 fx={K[0][0]:.2f} fy={K[1][1]:.2f} "
                      f"cx={K[0][2]:.2f} cy={K[1][2]:.2f}\n")
-            cf.write(f"exposure_us={a.exposure_us} iso={a.iso}\n")
+            cf_mode = "auto" if a.exposure_us <= 0 else f"manual {a.exposure_us}us iso{a.iso}"
+            cf.write(f"exposure={cf_mode}\n")
         print(f"mono focal {K[0][0]:.1f} px -> footprint at 120 m = "
               f"{2*120*np.tan(np.arctan(640/K[0][0])):.0f} m")
 
@@ -207,8 +221,11 @@ def main():
                 if n % 20 == 0:
                     f.flush()
                     alt = s.get("alt_rel")
+                    sat = 100.0 * float((img > 250).mean())
+                    warn = "  <<< OVEREXPOSED" if sat > 40 else ""
                     print(f"  {now:6.1f}s  {n:5d} frames  alt={alt if alt is None else round(alt,1)} m  "
-                          f"lat={s.get('lat')}  sats={s.get('sats')}")
+                          f"lat={s.get('lat')}  sats={s.get('sats')}  "
+                          f"white={sat:.0f}%{warn}")
         except KeyboardInterrupt:
             print("\nstopped by user")
         finally:

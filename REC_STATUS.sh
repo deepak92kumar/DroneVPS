@@ -27,6 +27,26 @@ fi
 
 if [ -z "$ALT" ]; then echo "  ALTITUDE : nahi aa rahi  X"; OK=0
 else echo "  ALTITUDE : $ALT m  OK"; fi
+
+# The first flight logged 545 frames that were 100% white: indoor exposure used
+# in daylight. Frames existing is not the same as frames being usable, so the
+# newest one is inspected here. Run this OUTSIDE, where the flight will happen.
+IMG=$(ls -t "$D"/mono/*.png 2>/dev/null | head -1)
+if [ -z "$IMG" ]; then echo "  IMAGE    : koi frame nahi  X"; OK=0
+else
+  R=$(/mnt/ssd/DRONE/vps_vio/.venv/bin/python - "$IMG" <<'PY2'
+import cv2, sys
+im = cv2.imread(sys.argv[1], 0)
+if im is None:
+    print("BAD 0 0"); raise SystemExit
+print(f"{'OK' if 100*(im>250).mean()<40 and im.std()>10 else 'BAD'} "
+      f"{100*(im>250).mean():.0f} {im.std():.0f}")
+PY2
+)
+  set -- $R
+  if [ "$1" = "OK" ]; then echo "  IMAGE    : white=$2% detail=$3  OK"
+  else echo "  IMAGE    : KHARAB  X   white=$2% detail=$3  <- jali hui / kaali hai"; OK=0; fi
+fi
 echo
 if [ $OK -eq 1 ]; then echo "########  SAB THEEK - UDA SAKTE HO  ########"
 else echo "########  ABHI MAT UDAO  ########"; fi
