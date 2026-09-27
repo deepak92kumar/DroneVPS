@@ -52,11 +52,25 @@ def attitude_shift_px(att_prev, att_cur) -> np.ndarray:
 
 def frame_shift_px(prev: np.ndarray, cur: np.ndarray, *,
                    max_corners: int = 1200, quality: float = 0.01,
-                   min_dist: int = 8, min_tracks: int = 30):
-    """Median pixel translation from prev to cur, with a track count.
+                   min_dist: int = 8, min_tracks: int = 30,
+                   use_similarity: bool = True):
+    """Pixel translation from prev to cur, with a track count.
 
-    A median over hundreds of tracks rejects the moving cars, shadows and
-    mis-tracks that would wreck a least-squares fit.
+    Tracking itself is not the hard part - at 110 m over this ground, 1180 to
+    1200 of 1200 corners survive the forward-backward check, and the flow field
+    is visibly coherent. What matters is how those tracks are reduced to one
+    number. A median treats every track alike; fitting a similarity with RANSAC
+    separates the ones that agree on a single rigid motion from the moving cars,
+    tree shadows and parallax on tall buildings, and that alone took the flight's
+    median error from 19.6 m to 13.6 m.
+
+    The fit also yields the frame-to-frame rotation, but integrating it as a
+    visual gyro does NOT work: measured against the compass it came out at a
+    slope of -0.365 instead of -1, and integrating it drifted 356 degrees over
+    one flight. Per-step rotation here is a tenth of a degree, down in the noise,
+    and the roll/pitch contribution to apparent rotation is not removed. Yaw
+    stays with the magnetometer, which does not need GPS; the map corrects its
+    bias, which measured -1.5 deg with a heading-dependent swing of about 3 deg.
     """
     p0 = cv2.goodFeaturesToTrack(prev, max_corners, quality, min_dist)
     if p0 is None or len(p0) < min_tracks:
@@ -75,6 +89,15 @@ def frame_shift_px(prev: np.ndarray, cur: np.ndarray, *,
            (np.linalg.norm(p0 - p0r, axis=2).ravel() < 1.0)
     if good.sum() < min_tracks:
         return None, int(good.sum())
+    src = p0[good].reshape(-1, 1, 2)
+    dst = p1[good].reshape(-1, 1, 2)
+    if use_similarity:
+        M, inl = cv2.estimateAffinePartial2D(src, dst, method=cv2.RANSAC,
+                                             ransacReprojThreshold=1.5)
+        if M is not None and inl is not None and int(inl.sum()) >= min_tracks:
+            c = np.array([[[prev.shape[1] / 2.0, prev.shape[0] / 2.0]]], np.float32)
+            t = cv2.transform(c, M)[0][0] - c[0][0]
+            return t.astype(float), int(inl.sum())
     d = (p1 - p0)[good].reshape(-1, 2)
     return np.median(d, axis=0), int(good.sum())
 
