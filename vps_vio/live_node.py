@@ -437,6 +437,80 @@ def read_scr_user(endpoint: str, baud: int = 921600, timeout_s: float = 8.0):
                 pass
 
 
+
+class Notifier:
+    """Short STATUSTEXT lines to whatever is listening on the radio.
+
+    The pilot flies looking at a transmitter screen, not a terminal. The marker
+    daemon has thirty-one of these; the VPS path had none, so from the air
+    there was no way to tell a healthy VPS from a dead one.
+
+    Two rules, because a flooded link is worse than a quiet one:
+
+      * a heartbeat line every period_s, so silence means something is wrong
+        rather than nothing is happening
+      * state CHANGES immediately, and only once per change - tracking lost,
+        map fixes stopped, velocity refused, the camera IMU gone quiet
+
+    STATUSTEXT is 50 characters. Anything longer is cut by the protocol, so
+    these are written short rather than truncated by accident.
+    """
+
+    SEV_CRIT, SEV_WARN, SEV_INFO = 2, 4, 6
+
+    def __init__(self, link, period_s: float = 10.0, enabled: bool = True):
+        self.link = link                    # anything with .mav.statustext_send
+        self.period = float(period_s)
+        self.enabled = bool(enabled) and link is not None
+        self._next = 0.0
+        self._state = {}
+        self.sent = 0
+
+    def _send(self, text: str, sev: int) -> None:
+        if not self.enabled:
+            return
+        try:
+            self.link.mav.statustext_send(sev, text[:50].encode())
+            self.sent += 1
+        except Exception:
+            pass                            # the link is not the mission
+
+    def event(self, key: str, value, text: str, sev: int = SEV_WARN) -> None:
+        """Announce only when `value` for `key` actually changes."""
+        if self._state.get(key) == value:
+            return
+        self._state[key] = value
+        self._send(text, sev)
+
+    def tick(self, t: float, est: dict, node) -> None:
+        v = est["vel"]
+        tracks = est["tracks"]
+
+        # Changes first - these are what the pilot needs immediately.
+        self.event("track", tracks >= 30,
+                   f"VPS TRACK OK {tracks}" if tracks >= 30
+                   else f"VPS TRACK LOST {tracks}",
+                   self.SEV_INFO if tracks >= 30 else self.SEV_CRIT)
+        self.event("vel", v.valid,
+                   "VPS VEL OK" if v.valid else f"VPS VEL {v.reason}"[:50],
+                   self.SEV_INFO if v.valid else self.SEV_WARN)
+        self.event("imu", (est.get("gyro_n") or 0) > 0,
+                   "VPS GYRO OK" if (est.get("gyro_n") or 0) > 0
+                   else "VPS GYRO SILENT - CAM IMU DEAD",
+                   self.SEV_INFO if (est.get("gyro_n") or 0) > 0 else self.SEV_CRIT)
+        self.event("fix", node.n_fix > 0,
+                   f"VPS MAP FIX {node.n_fix}" if node.n_fix
+                   else "VPS NO MAP FIX",
+                   self.SEV_INFO if node.n_fix else self.SEV_WARN)
+
+        if t < self._next:
+            return
+        self._next = t + self.period
+        # The heartbeat. Everything a pilot can act on, in 50 characters.
+        self._send(f"VPS t{tracks} s{est['sigma']:.0f}m f{node.n_fix} "
+                   f"a{est['alt']:.0f} v{v.speed_mps:.1f}", self.SEV_INFO)
+
+
 class VpsNode:
     def __init__(self, cache: MapCache, focal_px: float, *,
                  fix_period_s: float = 1.0, radius_m: float = 150.0,
@@ -545,6 +619,10 @@ def main():
                          "through the router")
     ap.add_argument("--fc-baud", type=int, default=921600,
                     help="TELEM2 flies at 921600. Ignored for a udp endpoint.")
+    ap.add_argument("--no-notify", action="store_true",
+                    help="do not send STATUSTEXT to the radio")
+    ap.add_argument("--notify-period", type=float, default=10.0,
+                    help="seconds between VPS heartbeat lines on the radio")
     ap.add_argument("--no-scr-origin", action="store_true",
                     help="do not take the origin from SCR_USER1/2")
     ap.add_argument("--out", help="estimate log CSV")
@@ -628,6 +706,29 @@ def main():
                      "fc_d_roll", "fc_d_pitch",
                      "gyro_d_roll", "gyro_d_pitch", "gyro_n"])
 
+    # Reuse a sender's link if one exists. If none does - a read-only ground
+    # run - open a link only through the ROUTER. A second opener of the serial
+    # device is precisely the contention the router exists to remove, and
+    # LiveSource's Telemetry cannot be used: it is read-only by contract.
+    _link = (gps_sender.m if gps_sender is not None
+             else (sender.m if sender is not None else None))
+    if _link is None and not a.no_notify:
+        if a.fc_port.startswith(("udp", "tcp")):
+            try:
+                from pymavlink import mavutil as _mu2
+                _link = _mu2.mavlink_connection(a.fc_port, source_system=255,
+                                                source_component=222)
+            except Exception as e:
+                print(f"notifications off: {e}")
+        else:
+            print("notifications off: nothing is sending, and opening "
+                  f"{a.fc_port} a second time would fight the recorder. "
+                  "Use --fc-port udpout:127.0.0.1:14650 through the router.")
+    notifier = Notifier(_link, period_s=a.notify_period,
+                        enabled=not a.no_notify)
+    if notifier.enabled:
+        print(f"notifications ON, every {a.notify_period:.0f}s")
+
     errs, t_start, n = [], time.perf_counter(), 0
     try:
         while True:
@@ -660,6 +761,12 @@ def main():
                 olon, olat = node.origin
                 covered = cache.covers(olon, olat)
                 print(f"origin from {why}: {olat:.6f}, {olon:.6f}")
+                notifier.event("origin", why, f"VPS ORIGIN {why}"[:50],
+                               Notifier.SEV_INFO)
+                notifier.event("sheet", covered,
+                               "VPS SHEET OK" if covered
+                               else "VPS SHEET MISS - NO MAP FIX",
+                               Notifier.SEV_INFO if covered else Notifier.SEV_CRIT)
                 print(f"  sheet covers this point: "
                       f"{'YES' if covered else 'NO - there will be NO map fixes'}")
                 if not covered:
@@ -694,6 +801,8 @@ def main():
                              "" if est["gyro_d_roll"] is None else f"{est['gyro_d_roll']:.4f}",
                              "" if est["gyro_d_pitch"] is None else f"{est['gyro_d_pitch']:.4f}",
                              est["gyro_n"]])
+            notifier.tick(est["t"], est, node)
+
             if gps_sender is not None:
                 if gps_sender.armed():
                     print("\n*** AIRCRAFT ARMED - transmission band ***")
