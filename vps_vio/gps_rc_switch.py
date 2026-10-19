@@ -6,15 +6,22 @@ watches an RC channel and sets GPS_PRIMARY itself. A Lua script could do the
 same on the flight controller, but SCR_ENABLE is deliberately off and the
 companion is already reading this link.
 
-    ch low  (~1500)  ->  GPS_PRIMARY = 0   real GPS
-    ch high (~1950)  ->  GPS_PRIMARY = 1   VPS
+    ch6 at 1045  ->  GPS_PRIMARY = 0   real GPS
+    ch6 at 1945  ->  GPS_PRIMARY = 1   VPS
+
+Channel 6, threshold 1500. Those endpoints are not guesses - RC6_MIN and
+RC6_MAX read 1045 and 1945 off the flight controller, so the channel is already
+calibrated to exactly that travel, and 1500 sits midway with 455 us of margin
+on each side. RC6_OPTION is 0 and FLTMODE_CH is 5, so nothing else is listening
+to this channel.
 
 Three guards, because handing a switch this much authority deserves them.
 
 It refuses a channel that already carries an ArduPilot auxiliary function. The
-first channel picked here was RC11, and RC11_OPTION is 18 - Land. Flipping it
-to change GPS source would have landed the aircraft. Nothing about reading a
-channel tells you what else is listening to it, so the parameter is checked.
+first channel picked for this was RC11, and RC11_OPTION was 18 - Land. Flipping
+it to change GPS source would have landed the aircraft. Nothing about reading a
+channel tells you what else is listening to it, so the parameter is checked -
+and it was checked again before moving to channel 6.
 
 It refuses to move onto the VPS unless GPS2 is actually reporting a 3D fix.
 The flight controller will not check that for you - on the GPS_INPUT path it
@@ -40,7 +47,7 @@ PORT, BAUD = "/dev/ttyTHS1", 921600
 
 
 class RcGpsSwitch:
-    def __init__(self, channel=11, high_us=1750, allow_armed=False,
+    def __init__(self, channel=6, high_us=1500, allow_armed=False,
                  require_vps_fix=True, stable_n=4, port: str | None = None):
         self.ch = int(channel)
         self.high = int(high_us)
@@ -168,8 +175,10 @@ class RcGpsSwitch:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--channel", type=int, default=11)
-    ap.add_argument("--high-us", type=int, default=1750)
+    ap.add_argument("--channel", type=int, default=6)
+    ap.add_argument("--high-us", type=int, default=1500,
+                    help="above this = VPS. RC6 travels 1045-1945, so 1500 "
+                         "is midway with 455 us of margin each side.")
     ap.add_argument("--allow-armed", action="store_true",
                     help="hawa mein bhi switch karne do (pehle zameen par test karo)")
     ap.add_argument("--no-fix-check", action="store_true",
