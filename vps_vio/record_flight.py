@@ -53,7 +53,7 @@ def td_ns(td) -> int:
     return int(td.total_seconds() * 1e9)
 
 
-class CameraVibe:
+class CamImu:
     """Vibration from the camera's own IMU, in the same units as the FC's VIBE.
 
     ArduPilot computes VIBE as the deviation of the raw accelerometer from a
@@ -72,10 +72,27 @@ class CameraVibe:
         self.n = max(8, int(window_s * rate_hz))
         self.buf = collections.deque(maxlen=self.n)
         self.samples = 0
+        # The latest raw values as well as the derived vibration. A vibration
+        # figure with no raw behind it cannot be re-derived later if the way it
+        # is computed ever changes, and this project has already lost one set
+        # of measurements it could not reconstruct.
+        self.ax = self.ay = self.az = None
+        self.gx = self.gy = self.gz = None
+        self.gyro_n = 0
+        self._t0 = time.monotonic()
 
     def push(self, ax: float, ay: float, az: float) -> None:
         self.buf.append((ax, ay, az))
+        self.ax, self.ay, self.az = ax, ay, az
         self.samples += 1
+
+    def push_gyro(self, gx: float, gy: float, gz: float) -> None:
+        self.gx, self.gy, self.gz = gx, gy, gz
+        self.gyro_n += 1
+
+    def rate_hz(self) -> float:
+        dt = time.monotonic() - self._t0
+        return self.samples / dt if dt > 0.5 else 0.0
 
     def value(self):
         """(x, y, z) m/s/s, or (None, None, None) before the window fills."""
@@ -99,7 +116,21 @@ class Telemetry:
                           # the other says nothing: vibration at idle and
                           # vibration at hover throttle are different questions.
                           vibe_x=None, vibe_y=None, vibe_z=None, clip=None,
-                          mot=None)
+                          mot=None,
+                          # velocity the FC believes it has, which is the whole
+                          # of the 54% row and the thing the bridge gets wrong
+                          vx=None, vy=None, vz=None, climb=None,
+                          # what the EKF thinks of its own solution. Variances
+                          # above 1.0 are what an EKF failsafe is made of, and
+                          # a flight that failsafed without these logged cannot
+                          # be explained afterwards.
+                          ekf_vel_var=None, ekf_pos_h_var=None,
+                          ekf_pos_v_var=None, ekf_comp_var=None, ekf_flags=None,
+                          # GPS2 is OUR injection - this is how we see whether
+                          # the FC accepted it at all
+                          gps2_fix=None, gps2_sats=None,
+                          batt_v=None, batt_a=None, batt_pct=None,
+                          throttle=None, groundspeed=None, mode=None)
         self._run = False
         self._thr = None
         self.connected = False
@@ -142,7 +173,8 @@ class Telemetry:
                 msg = self.m.recv_match(
                     type=["GLOBAL_POSITION_INT", "GPS_RAW_INT", "ATTITUDE",
                           "DISTANCE_SENSOR", "RANGEFINDER", "HEARTBEAT",
-                          "VIBRATION", "SERVO_OUTPUT_RAW"],
+                          "VIBRATION", "SERVO_OUTPUT_RAW", "EKF_STATUS_REPORT",
+                          "GPS2_RAW", "SYS_STATUS", "VFR_HUD", "BATTERY_STATUS"],
                     blocking=True, timeout=1.0)
             except Exception:
                 continue
@@ -154,7 +186,27 @@ class Telemetry:
                     self.state.update(lat=msg.lat / 1e7, lon=msg.lon / 1e7,
                                       alt_amsl=msg.alt / 1000.0,
                                       alt_rel=msg.relative_alt / 1000.0,
-                                      hdg=msg.hdg / 100.0 if msg.hdg != 65535 else None)
+                                      hdg=msg.hdg / 100.0 if msg.hdg != 65535 else None,
+                                      vx=msg.vx / 100.0, vy=msg.vy / 100.0,
+                                      vz=msg.vz / 100.0)
+                elif t == "EKF_STATUS_REPORT":
+                    self.state.update(ekf_vel_var=msg.velocity_variance,
+                                      ekf_pos_h_var=msg.pos_horiz_variance,
+                                      ekf_pos_v_var=msg.pos_vert_variance,
+                                      ekf_comp_var=msg.compass_variance,
+                                      ekf_flags=msg.flags)
+                elif t == "GPS2_RAW":
+                    self.state.update(gps2_fix=msg.fix_type,
+                                      gps2_sats=msg.satellites_visible)
+                elif t == "VFR_HUD":
+                    self.state.update(throttle=msg.throttle, climb=msg.climb,
+                                      groundspeed=msg.groundspeed)
+                elif t == "SYS_STATUS":
+                    self.state.update(batt_v=msg.voltage_battery / 1000.0,
+                                      batt_a=(msg.current_battery / 100.0
+                                              if msg.current_battery != -1 else None),
+                                      batt_pct=(msg.battery_remaining
+                                                if msg.battery_remaining != -1 else None))
                 elif t == "GPS_RAW_INT":
                     self.state.update(fix=msg.fix_type, sats=msg.satellites_visible)
                 elif t == "VIBRATION":
@@ -178,6 +230,7 @@ class Telemetry:
                     from pymavlink import mavutil as _mu
                     self.state["armed"] = bool(
                         msg.base_mode & _mu.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+                    self.state["mode"] = msg.custom_mode
                 elif t == "RANGEFINDER":
                     # Logged alongside the frames so lidar height can be
                     # compared against the barometer over a whole flight.
@@ -222,7 +275,9 @@ def main():
                     help="0 = auto-exposure (default); >0 pins it, indoor use only")
     ap.add_argument("--iso", type=int, default=0, help="only used with --exposure-us")
     ap.add_argument("--fc-port", default="/dev/ttyTHS1")
-    ap.add_argument("--fc-baud", type=int, default=115200)
+    ap.add_argument("--fc-baud", type=int, default=921600,
+                    help="TELEM2 flies at 921600 - SERIAL2_BAUD reads 921 "
+                         "on the FC. Ignored for a udp: endpoint.")
     ap.add_argument("--no-fc", action="store_true", help="skip telemetry entirely")
     ap.add_argument("--on-arm", action="store_true",
                     help="record only while the aircraft is armed; one folder per flight")
@@ -254,10 +309,31 @@ def main():
                               "lat", "lon", "alt_rel_m", "alt_amsl_m",
                               "roll_deg", "pitch_deg", "yaw_deg", "hdg_deg",
                               "fix", "sats", "rngfnd_m",
+                              # vibration, from both places it can be measured
                               "fc_vibe_x", "fc_vibe_y", "fc_vibe_z", "fc_clip",
                               "cam_vibe_x", "cam_vibe_y", "cam_vibe_z",
-                              "cam_imu_n",
-                              "mot1", "mot2", "mot3", "mot4", "mot5", "mot6"])
+                              "cam_imu_n", "cam_imu_hz",
+                              # the raw IMU the vibration was derived from, so
+                              # it can be recomputed if the method ever changes
+                              "cam_gyro_x", "cam_gyro_y", "cam_gyro_z",
+                              "cam_accel_x", "cam_accel_y", "cam_accel_z",
+                              # what the motors were doing at the time
+                              "mot1", "mot2", "mot3", "mot4", "mot5", "mot6",
+                              "throttle_pct",
+                              # velocity - the 54% row, and the thing the
+                              # bridge has been getting wrong
+                              "vx", "vy", "vz", "climb", "groundspeed",
+                              # what the EKF thinks of its own solution.
+                              # Variances above 1.0 are what a failsafe is made
+                              # of; a flight that failsafed without these
+                              # logged cannot be explained afterwards.
+                              "ekf_vel_var", "ekf_pos_h_var", "ekf_pos_v_var",
+                              "ekf_comp_var", "ekf_flags",
+                              # GPS2 is OUR injection - this is how we see
+                              # whether the FC accepted it at all
+                              "gps2_fix", "gps2_sats",
+                              "batt_v", "batt_a", "batt_pct",
+                              "mode", "armed", "dropped"])
             # What the Jetson was actually doing, sampled while flying. The only
             # honest way to know the load is to measure it in the air.
             self.lf = open(os.path.join(root, "load.csv"), "w", newline="")
@@ -384,7 +460,7 @@ def main():
         qm = dev.getOutputQueue("mono", 4, False)
         qr = dev.getOutputQueue("rgb", 4, False) if a.rgb else None
         qi = dev.getOutputQueue("imu", 50, False)
-        cam_vibe = CameraVibe(window_s=1.0, rate_hz=100.0)
+        cam_imu = CamImu(window_s=1.0, rate_hz=100.0)
 
         next_save, t_start = 0.0, time.monotonic()
         # Asking for the camera's own rate means "every frame". Computing the
@@ -418,7 +494,10 @@ def main():
                     for packet in pk.packets:
                         la = getattr(packet, "acceleroMeter", None)
                         if la is not None:
-                            cam_vibe.push(la.x, la.y, la.z)
+                            cam_imu.push(la.x, la.y, la.z)
+                        gy = getattr(packet, "gyroscope", None)
+                        if gy is not None:
+                            cam_imu.push_gyro(gy.x, gy.y, gy.z)
                     pk = qi.tryGet()
 
                 if a.on_arm:
@@ -454,7 +533,7 @@ def main():
                     except queue.Full:
                         dropped[0] += 1
                 mot = s_tel.get("mot") or [None] * 6
-                cvx, cvy, cvz = cam_vibe.value()
+                cvx, cvy, cvz = cam_imu.value()
                 sess.wr.writerow([sess.n, f"{now:.3f}",
                                   td_ns(fr.getTimestampDevice()), name, rgbname,
                                   s_tel.get("lat"), s_tel.get("lon"),
@@ -469,9 +548,30 @@ def main():
                                   None if cvx is None else round(cvx, 4),
                                   None if cvy is None else round(cvy, 4),
                                   None if cvz is None else round(cvz, 4),
-                                  cam_vibe.samples,
-                                  # and what the motors were doing at the time
-                                  *mot])
+                                  cam_imu.samples, round(cam_imu.rate_hz(), 1),
+                                  # the raw IMU behind that vibration figure,
+                                  # so it can be recomputed if the method ever
+                                  # changes
+                                  cam_imu.gx, cam_imu.gy, cam_imu.gz,
+                                  cam_imu.ax, cam_imu.ay, cam_imu.az,
+                                  # what the motors were doing at the time
+                                  *mot, s_tel.get("throttle"),
+                                  # velocity - the 54% row
+                                  s_tel.get("vx"), s_tel.get("vy"),
+                                  s_tel.get("vz"), s_tel.get("climb"),
+                                  s_tel.get("groundspeed"),
+                                  # what the EKF thinks of its own solution
+                                  s_tel.get("ekf_vel_var"),
+                                  s_tel.get("ekf_pos_h_var"),
+                                  s_tel.get("ekf_pos_v_var"),
+                                  s_tel.get("ekf_comp_var"),
+                                  s_tel.get("ekf_flags"),
+                                  # GPS2 is our own injection
+                                  s_tel.get("gps2_fix"), s_tel.get("gps2_sats"),
+                                  s_tel.get("batt_v"), s_tel.get("batt_a"),
+                                  s_tel.get("batt_pct"),
+                                  s_tel.get("mode"),
+                                  int(bool(s_tel.get("armed"))), dropped[0]])
                 sess.n += 1
 
                 if now >= next_load:
