@@ -32,14 +32,57 @@ Fly to 100-150 m, loiter, translate a few hundred metres, come back. Map
 matching needs >= ~80 m, so time spent below that is only useful for VIO.
 """
 from __future__ import annotations
-import argparse, csv, os, queue, sys, threading, time
+import argparse, collections, csv, os, queue, sys, threading, time
 
 import cv2
 import numpy as np
 import depthai as dai
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import oak_rig  # noqa: E402
+# NOT oak_rig. It imports cuvslam, which is not installed and was REJECTED on
+# 28 Sep - the OAK-D's 7.5 cm baseline gives under 0.3 px of disparity above
+# ~25 m against a 100-150 m mission, so it contributed exactly 0 over 1680
+# frames. Importing it for three constants made this whole recorder
+# unimportable, so the three constants live here instead.
+OAK_ISO = 800          # measured 27 Sep with 4000 us exposure
+OAK_FPS = 30
+
+
+def td_ns(td) -> int:
+    """depthai timedelta -> integer nanoseconds on the device clock."""
+    return int(td.total_seconds() * 1e9)
+
+
+class CameraVibe:
+    """Vibration from the camera's own IMU, in the same units as the FC's VIBE.
+
+    ArduPilot computes VIBE as the deviation of the raw accelerometer from a
+    low-passed version of itself. This does the same thing on the OAK-D's
+    LINEAR_ACCELERATION: hold a short rolling window and take the per-axis
+    standard deviation. Same units, m/s/s, so the camera's number and the
+    flight controller's can be put side by side and mean something.
+
+    That comparison is the point. The camera is bolted to a mount, the FC to
+    the frame. The 11 Oct report measured the camera mount going from damping
+    at 0.91x of the airframe to AMPLIFYING at 1.50x, and that ratio - not
+    either number alone - is what found it.
+    """
+
+    def __init__(self, window_s: float = 1.0, rate_hz: float = 100.0):
+        self.n = max(8, int(window_s * rate_hz))
+        self.buf = collections.deque(maxlen=self.n)
+        self.samples = 0
+
+    def push(self, ax: float, ay: float, az: float) -> None:
+        self.buf.append((ax, ay, az))
+        self.samples += 1
+
+    def value(self):
+        """(x, y, z) m/s/s, or (None, None, None) before the window fills."""
+        if len(self.buf) < self.n // 2:
+            return (None, None, None)
+        a = np.asarray(self.buf, dtype=float)
+        return tuple(float(x) for x in a.std(axis=0))
 
 
 class Telemetry:
@@ -50,7 +93,13 @@ class Telemetry:
         self.lock = threading.Lock()
         self.state = dict(lat=None, lon=None, alt_rel=None, alt_amsl=None,
                           roll=None, pitch=None, yaw=None, fix=None, sats=None,
-                          hdg=None, rngfnd=None, armed=False, t=0.0)
+                          hdg=None, rngfnd=None, armed=False, t=0.0,
+                          # The FC's own accelerometer vibration, and what the
+                          # motors were doing when it was measured. One without
+                          # the other says nothing: vibration at idle and
+                          # vibration at hover throttle are different questions.
+                          vibe_x=None, vibe_y=None, vibe_z=None, clip=None,
+                          mot=None)
         self._run = False
         self._thr = None
         self.connected = False
@@ -92,7 +141,8 @@ class Telemetry:
             try:
                 msg = self.m.recv_match(
                     type=["GLOBAL_POSITION_INT", "GPS_RAW_INT", "ATTITUDE",
-                          "DISTANCE_SENSOR", "RANGEFINDER", "HEARTBEAT"],
+                          "DISTANCE_SENSOR", "RANGEFINDER", "HEARTBEAT",
+                          "VIBRATION", "SERVO_OUTPUT_RAW"],
                     blocking=True, timeout=1.0)
             except Exception:
                 continue
@@ -107,6 +157,20 @@ class Telemetry:
                                       hdg=msg.hdg / 100.0 if msg.hdg != 65535 else None)
                 elif t == "GPS_RAW_INT":
                     self.state.update(fix=msg.fix_type, sats=msg.satellites_visible)
+                elif t == "VIBRATION":
+                    # ArduPilot's own VIBE, m/s/s. Under 30 is workable, under
+                    # 15 is good, and any rise in the clip counters means an
+                    # accelerometer saturated and the EKF lost that sample.
+                    self.state.update(vibe_x=msg.vibration_x,
+                                      vibe_y=msg.vibration_y,
+                                      vibe_z=msg.vibration_z,
+                                      clip=msg.clipping_0 + msg.clipping_1
+                                      + msg.clipping_2)
+                elif t == "SERVO_OUTPUT_RAW":
+                    # Motors 1-6. Vibration without the throttle that caused it
+                    # cannot be compared between flights.
+                    self.state["mot"] = [getattr(msg, f"servo{i}_raw", 0)
+                                         for i in range(1, 7)]
                 elif t == "HEARTBEAT":
                     # Arming is what decides whether we are recording at all.
                     # Encoding and writing 30 JPEGs a second while the aircraft
@@ -115,11 +179,14 @@ class Telemetry:
                     self.state["armed"] = bool(
                         msg.base_mode & _mu.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
                 elif t == "RANGEFINDER":
-                    # Logged alongside the frames so lidar height can be compared
-                    # against the barometer over a whole flight. It is NOT fed to
-                    # the EKF - the analog scaling is still wrong (it reads 110 cm
-                    # as 123 cm) and a two-point ground fit implied a 3.2 m
-                    # ceiling, which cannot be right for a 180 m sensor.
+                    # Logged alongside the frames so lidar height can be
+                    # compared against the barometer over a whole flight.
+                    # The analog scaling was wrong when this comment was first
+                    # written; RNGFND1_OFFSET was recalibrated on 19 Oct from
+                    # 0.607 to 0.66537 against a measured 0.26 m and the ground
+                    # reading went from 4.35 m to 0.26 m. SCALING 72.61 was
+                    # already right - lifting the aircraft moved the reading
+                    # 1:1 - and matches the 150 ohm / 4-20 mA design of 75 m/V.
                     self.state["rngfnd"] = float(msg.distance)
                 elif t == "DISTANCE_SENSOR":
                     self.state["rngfnd"] = msg.current_distance / 100.0
@@ -177,10 +244,20 @@ def main():
                 os.makedirs(self.rgb_dir, exist_ok=True)
             self.f = open(os.path.join(root, "index.csv"), "w", newline="")
             self.wr = csv.writer(self.f)
+            # Vibration from all three places it can come from, in one row.
+            # fc_vibe_* is ArduPilot's own VIBE off the flight controller;
+            # cam_vibe_* is the same measure computed from the OAK-D's IMU, so
+            # the two can be compared directly; mot1..6 is what the motors were
+            # doing when both were measured, because vibration without the
+            # throttle that caused it cannot be compared between flights.
             self.wr.writerow(["n", "wall_s", "dev_ts_ns", "mono_file", "rgb_file",
                               "lat", "lon", "alt_rel_m", "alt_amsl_m",
                               "roll_deg", "pitch_deg", "yaw_deg", "hdg_deg",
-                              "fix", "sats", "rngfnd_m"])
+                              "fix", "sats", "rngfnd_m",
+                              "fc_vibe_x", "fc_vibe_y", "fc_vibe_z", "fc_clip",
+                              "cam_vibe_x", "cam_vibe_y", "cam_vibe_z",
+                              "cam_imu_n",
+                              "mot1", "mot2", "mot3", "mot4", "mot5", "mot6"])
             # What the Jetson was actually doing, sampled while flying. The only
             # honest way to know the load is to measure it in the air.
             self.lf = open(os.path.join(root, "load.csv"), "w", newline="")
@@ -260,8 +337,8 @@ def main():
     m.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)
     m.setFps(30)
     if a.exposure_us > 0:
-        m.initialControl.setManualExposure(a.exposure_us, a.iso or oak_rig.ISO)
-        print(f"  MANUAL exposure {a.exposure_us} us ISO {a.iso or oak_rig.ISO} "
+        m.initialControl.setManualExposure(a.exposure_us, a.iso or OAK_ISO)
+        print(f"  MANUAL exposure {a.exposure_us} us ISO {a.iso or OAK_ISO} "
               f"- daylight mein ye jal jayegi")
     else:
         # Cap the auto-exposure so a dark patch cannot smear the image with a
@@ -270,6 +347,19 @@ def main():
         print("  AUTO exposure (limit 8000 us)")
     print(f"  saving {ext.upper()} at {a.hz:g} Hz")
     xo = p.create(dai.node.XLinkOut); xo.setStreamName("mono"); m.out.link(xo.input)
+
+    # The camera's own IMU. The flight controller has no idea the camera exists,
+    # so this is the only place camera vibration can come from - and the camera
+    # is what the whole position solution is built on. Same configuration as the
+    # daemon, for the same measured reasons: the three reports share one packet
+    # so over-asking costs the whole stream, and a batch threshold above 1 left
+    # 34.2% of frames with no sample at all.
+    imu = p.create(dai.node.IMU)
+    imu.enableIMUSensor(dai.IMUSensor.GYROSCOPE_CALIBRATED, 100)
+    imu.enableIMUSensor(dai.IMUSensor.LINEAR_ACCELERATION, 100)
+    imu.setBatchReportThreshold(1)
+    imu.setMaxBatchReports(20)
+    xi = p.create(dai.node.XLinkOut); xi.setStreamName("imu"); imu.out.link(xi.input)
     if a.rgb:
         c = p.create(dai.node.ColorCamera)
         c.setBoardSocket(dai.CameraBoardSocket.CAM_A)
@@ -293,6 +383,8 @@ def main():
         dev.startPipeline(p)
         qm = dev.getOutputQueue("mono", 4, False)
         qr = dev.getOutputQueue("rgb", 4, False) if a.rgb else None
+        qi = dev.getOutputQueue("imu", 50, False)
+        cam_vibe = CameraVibe(window_s=1.0, rate_hz=100.0)
 
         next_save, t_start = 0.0, time.monotonic()
         # Asking for the camera's own rate means "every frame". Computing the
@@ -300,7 +392,7 @@ def main():
         # roughly a third of the frames when the two rates are equal: a frame
         # arriving a hair early is skipped and the next one lands a full period
         # later. That cost 30 Hz -> 20 Hz.
-        interval = 0.0 if a.hz >= oak_rig.FPS - 1 else 1.0 / max(a.hz, 0.1)
+        interval = 0.0 if a.hz >= OAK_FPS - 1 else 1.0 / max(a.hz, 0.1)
 
         sess = None
         next_load = 0.0
@@ -317,6 +409,17 @@ def main():
                 fr = qm.get()
                 now = time.monotonic() - t_start
                 s_tel = tel.snapshot() if tel else {}
+
+                # Drain the IMU on EVERY pass, not only on the frames that get
+                # saved. The window has to be continuous: a deviation measured
+                # across a gap is not vibration, it is the gap.
+                pk = qi.tryGet()
+                while pk is not None:
+                    for packet in pk.packets:
+                        la = getattr(packet, "acceleroMeter", None)
+                        if la is not None:
+                            cam_vibe.push(la.x, la.y, la.z)
+                    pk = qi.tryGet()
 
                 if a.on_arm:
                     armed = bool(s_tel.get("armed"))
@@ -350,13 +453,25 @@ def main():
                                        qr.get().getCvFrame()))
                     except queue.Full:
                         dropped[0] += 1
+                mot = s_tel.get("mot") or [None] * 6
+                cvx, cvy, cvz = cam_vibe.value()
                 sess.wr.writerow([sess.n, f"{now:.3f}",
-                                  oak_rig.td_ns(fr.getTimestampDevice()), name, rgbname,
+                                  td_ns(fr.getTimestampDevice()), name, rgbname,
                                   s_tel.get("lat"), s_tel.get("lon"),
                                   s_tel.get("alt_rel"), s_tel.get("alt_amsl"),
                                   s_tel.get("roll"), s_tel.get("pitch"), s_tel.get("yaw"),
                                   s_tel.get("hdg"), s_tel.get("fix"), s_tel.get("sats"),
-                                  s_tel.get("rngfnd")])
+                                  s_tel.get("rngfnd"),
+                                  # the flight controller's own vibration
+                                  s_tel.get("vibe_x"), s_tel.get("vibe_y"),
+                                  s_tel.get("vibe_z"), s_tel.get("clip"),
+                                  # the camera's, from its own IMU, same units
+                                  None if cvx is None else round(cvx, 4),
+                                  None if cvy is None else round(cvy, 4),
+                                  None if cvz is None else round(cvz, 4),
+                                  cam_vibe.samples,
+                                  # and what the motors were doing at the time
+                                  *mot])
                 sess.n += 1
 
                 if now >= next_load:

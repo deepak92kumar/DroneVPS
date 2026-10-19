@@ -7,13 +7,17 @@ same on the flight controller, but SCR_ENABLE is deliberately off and the
 companion is already reading this link.
 
     ch6 at 1045  ->  GPS_PRIMARY = 0   real GPS
+    ch6 at 1495  ->  nothing. Holds whatever is selected.
     ch6 at 1945  ->  GPS_PRIMARY = 1   VPS
 
-Channel 6, threshold 1500. Those endpoints are not guesses - RC6_MIN and
-RC6_MAX read 1045 and 1945 off the flight controller, so the channel is already
-calibrated to exactly that travel, and 1500 sits midway with 455 us of margin
-on each side. RC6_OPTION is 0 and FLTMODE_CH is 5, so nothing else is listening
-to this channel.
+Three positions, and the centre is blank on purpose: passing through it on the
+way to the VPS must not command a source change, and brushing the detent must
+not be an instruction. Guard bands are the midpoints, 1270 and 1720, leaving a
+450 us dead zone.
+
+Those endpoints are not guesses - RC6_MIN and RC6_MAX read 1045 and 1945 off
+the flight controller, so the channel is already calibrated to exactly that
+travel. RC6_OPTION is 0 and FLTMODE_CH is 5, so nothing else is listening.
 
 Three guards, because handing a switch this much authority deserves them.
 
@@ -47,10 +51,12 @@ PORT, BAUD = "/dev/ttyTHS1", 921600
 
 
 class RcGpsSwitch:
-    def __init__(self, channel=6, high_us=1500, allow_armed=False,
-                 require_vps_fix=True, stable_n=4, port: str | None = None):
+    def __init__(self, channel=6, high_us=1720, allow_armed=False,
+                 require_vps_fix=True, stable_n=4, port: str | None = None,
+                 low_us=1270):
         self.ch = int(channel)
         self.high = int(high_us)
+        self.low = int(low_us)
         self.allow_armed = bool(allow_armed)
         self.require_fix = bool(require_vps_fix)
         self.stable_n = int(stable_n)
@@ -100,6 +106,28 @@ class RcGpsSwitch:
                                   mavutil.mavlink.MAV_PARAM_TYPE_REAL32)
 
     # -- main -------------------------------------------------------------- #
+    def decide(self, v: int):
+        """Which source this pulse width asks for, or None for 'nothing'.
+
+        Three positions, and the middle one is DELIBERATELY blank. RC6 travels
+        1045 / 1495 / 1945. Low asks for the real GPS, high asks for the VPS,
+        and the centre detent asks for nothing at all - it holds whatever is
+        already selected.
+
+        A two-way threshold would have made the centre mean "real GPS", so
+        passing through it on the way to the VPS would have commanded a source
+        change the pilot never asked for, and every brush against the detent
+        would have been an instruction.
+
+        Guard bands are the midpoints: 1270 and 1720, leaving 450 us of dead
+        zone between them.
+        """
+        if v <= self.low:
+            return 0
+        if v >= self.high:
+            return 1
+        return None
+
     def run(self):
         # The channel must not already carry an ArduPilot auxiliary function.
         # The first channel picked for this was RC11, which is RC11_OPTION=18,
@@ -120,7 +148,9 @@ class RcGpsSwitch:
         cur = self.get_param("GPS_PRIMARY")
         self.applied = None if cur is None else int(cur)
         t2 = self.get_param("GPS2_TYPE")
-        print(f"ch{self.ch}: <{self.high} = asli GPS | >{self.high} = VPS")
+        print(f"ch{self.ch}:  <={self.low} = asli GPS  |  "
+              f"{self.low+1}-{self.high-1} = centre, kuch nahi  |  "
+              f">={self.high} = VPS")
         print(f"abhi GPS_PRIMARY={self.applied}  GPS2_TYPE={t2}  "
               f"armed-switching={'ON' if self.allow_armed else 'OFF (zameen par hi)'}\n",
               flush=True)
@@ -144,7 +174,10 @@ class RcGpsSwitch:
             v = getattr(msg, f"chan{self.ch}_raw", 0)
             if not v:
                 continue
-            want = 1 if v >= self.high else 0
+            want = self.decide(v)
+            if want is None:
+                self.stable = 0          # centre: decide nothing, hold
+                continue
             if want == self.want:
                 self.stable += 1
             else:
@@ -176,9 +209,12 @@ class RcGpsSwitch:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--channel", type=int, default=6)
-    ap.add_argument("--high-us", type=int, default=1500,
-                    help="above this = VPS. RC6 travels 1045-1945, so 1500 "
-                         "is midway with 455 us of margin each side.")
+    ap.add_argument("--low-us", type=int, default=1270,
+                    help="at or below this = real GPS")
+    ap.add_argument("--high-us", type=int, default=1720,
+                    help="at or above this = VPS. Between the two is the "
+                         "centre detent, which commands nothing. RC6 travels "
+                         "1045 / 1495 / 1945, so these are the midpoints.")
     ap.add_argument("--allow-armed", action="store_true",
                     help="hawa mein bhi switch karne do (pehle zameen par test karo)")
     ap.add_argument("--no-fix-check", action="store_true",
@@ -188,7 +224,7 @@ def main():
                          "udpout:127.0.0.1:14650 to go through the router")
     a = ap.parse_args()
     sw = RcGpsSwitch(a.channel, a.high_us, a.allow_armed, not a.no_fix_check,
-                     port=a.port)
+                     port=a.port, low_us=a.low_us)
     try:
         sw.run()
     except KeyboardInterrupt:
