@@ -103,7 +103,7 @@ def frame_shift_px(prev: np.ndarray, cur: np.ndarray, *,
 
 
 def shift_to_ne(dpx: np.ndarray, *, altitude_m: float, focal_px: float,
-                yaw_deg: float) -> tuple[float, float]:
+                yaw_deg: float, focal_y_px: float | None = None) -> tuple[float, float]:
     """Image-plane pixels -> metres North/East, using height for scale.
 
     Signs are measured, not reasoned about. Regressing flow against GPS over 376
@@ -112,9 +112,11 @@ def shift_to_ne(dpx: np.ndarray, *, altitude_m: float, focal_px: float,
     the direction was inverted from what the obvious argument ("the ground
     slides backwards as you fly forward") predicts. The mounting is what it is.
     """
-    gsd = altitude_m / focal_px
-    fwd = dpx[1] * gsd
-    right = dpx[0] * gsd
+    # fx for the x axis, fy for the y axis. On this camera they differ by
+    # 0.018% - 1.8 cm per 100 m - so this is correctness, not a cure.
+    fy = focal_px if focal_y_px is None else focal_y_px
+    fwd = dpx[1] * (altitude_m / fy)
+    right = dpx[0] * (altitude_m / focal_px)
     t = np.radians(yaw_deg)
     north = fwd * np.cos(t) - right * np.sin(t)
     east = fwd * np.sin(t) + right * np.cos(t)
@@ -139,13 +141,37 @@ class FlowTracker:
     forward, agreeing to 0.23 px) and is worth taking later, but VPI's Harris
     corners returned 3 points where OpenCV returned 714, so the detector cannot
     move to the GPU as configured.
+
+    K and D are the camera's own intrinsics, and passing them is not a detail.
+    Read off this OAK-D on 20 Oct at 1280x800: the principal point is cx 624.89,
+    cy 391.80, which is 15.11 px and 8.20 px away from the geometric centre this
+    used to evaluate the motion at. The fitted affine carries rotation as well
+    as translation, so evaluating it at the wrong point turns rotation into
+    phantom translation - 0.32 px at 1 deg/frame, which at 100 m and 17 Hz is
+    0.64 m/s of speed the aircraft never had. The project's own unexplained
+    hover phantom is 0.36-0.43 m/s, the same size.
+
+    The distortion matters for the same reason and more: D is the 8-coefficient
+    rational model and the coefficients are large (k1 24.09, k2 -39.14,
+    k3 18.88), so a displacement measured near the edge of the frame does not
+    mean the same number of metres as one measured in the middle. The corners
+    are tracked on the raw image - LK has to be - but the affine is fitted on
+    undistorted copies of them, which is where the metres come from.
+
+    Without K and D it still runs, on the geometric centre and the raw pixels,
+    and says so. That path is what every flight before 20 Oct used.
     """
 
     def __init__(self, *, max_corners: int = 300, quality: float = 0.01,
                  min_dist: int = 8, min_tracks: int = 30,
-                 redetect_below: float = 0.6, redetect_every: int = 30):
+                 redetect_below: float = 0.6, redetect_every: int = 30,
+                 K=None, D=None):
         self.max_corners, self.quality, self.min_dist = max_corners, quality, min_dist
         self.min_tracks = min_tracks
+        self.K = None if K is None else np.asarray(K, np.float64).reshape(3, 3)
+        self.D = None if D is None else np.asarray(D, np.float64).reshape(1, -1)
+        self.centre = (None if self.K is None
+                       else np.array([self.K[0, 2], self.K[1, 2]], float))
         self.redetect_below = redetect_below
         self.redetect_every = redetect_every
         self.prev = None
@@ -153,6 +179,17 @@ class FlowTracker:
         self.n_seed = 0
         self.age = 0
         self.redetections = 0
+
+    def _undistort(self, pts):
+        """Raw pixel points -> undistorted pixel points, in the same K units.
+
+        P=K keeps the result in pixels at the same focal length, so everything
+        downstream that divides by focal_px still means what it meant.
+        """
+        if self.K is None or self.D is None:
+            return pts
+        return cv2.undistortPoints(pts.astype(np.float64), self.K, self.D,
+                                   P=self.K).astype(np.float32)
 
     def _detect(self, img):
         p = cv2.goodFeaturesToTrack(img, self.max_corners, self.quality, self.min_dist)
@@ -182,14 +219,23 @@ class FlowTracker:
         if n >= self.min_tracks:
             src = self.pts[good].reshape(-1, 1, 2)
             dst = p1[good].reshape(-1, 1, 2)
-            M, inl = cv2.estimateAffinePartial2D(src, dst, method=cv2.RANSAC,
+            # Undistorted copies for the fit only. The tracks themselves stay in
+            # raw pixels because that is the image LK ran on; the metres come
+            # out of the fit, so the fit is where the lens has to be removed.
+            u_src, u_dst = self._undistort(src), self._undistort(dst)
+            M, inl = cv2.estimateAffinePartial2D(u_src, u_dst, method=cv2.RANSAC,
                                                  ransacReprojThreshold=1.5)
             if M is not None and inl is not None and int(inl.sum()) >= self.min_tracks:
-                c = np.array([[[img.shape[1] / 2.0, img.shape[0] / 2.0]]], np.float32)
-                shift = (cv2.transform(c, M)[0][0] - c[0][0]).astype(float)
+                # At the OPTICAL centre, not the geometric one. The affine
+                # carries rotation, and rotation evaluated off-centre reads as
+                # translation that never happened.
+                c = (self.centre if self.centre is not None
+                     else np.array([img.shape[1] / 2.0, img.shape[0] / 2.0]))
+                cc = c.reshape(1, 1, 2).astype(np.float32)
+                shift = (cv2.transform(cc, M)[0][0] - c).astype(float)
                 n = int(inl.sum())
             else:
-                shift = np.median((p1 - self.pts)[good].reshape(-1, 2), axis=0)
+                shift = np.median((u_dst - u_src).reshape(-1, 2), axis=0)
 
         self.prev = img
         self.age += 1

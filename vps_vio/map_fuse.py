@@ -53,10 +53,18 @@ class MapFuser:
     def sigma_m(self) -> float:
         return float(np.sqrt(self.var))
 
-    def predict(self, d_north: float, d_east: float) -> np.ndarray:
+    def predict(self, d_north: float, d_east: float,
+                trust: float = 1.0) -> np.ndarray:
+        """Advance the estimate by one step. trust scales how fast it doubts.
+
+        trust is 1.0 for a step optical flow measured. A step DEAD RECKONED
+        from the accelerometer between frames deserves worse, because nothing
+        outside the IMU saw it happen - the caller passes a larger number and
+        the variance grows by that much more.
+        """
         step = np.array([d_north, d_east], float)
         self.pos = self.pos + step
-        grow = self.k * float(np.linalg.norm(step)) + self.floor
+        grow = trust * (self.k * float(np.linalg.norm(step)) + self.floor)
         self.var = min(self.var + grow ** 2, self.max_var)
         return self.pos
 

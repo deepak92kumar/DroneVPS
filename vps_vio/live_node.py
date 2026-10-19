@@ -126,6 +126,12 @@ class LiveSource:
         # on the same device as the frames.
         imu = p.create(dai.node.IMU)
         imu.enableIMUSensor(dai.IMUSensor.GYROSCOPE_CALIBRATED, 100)
+        # LINEAR_ACCELERATION, not ACCELEROMETER_RAW: the BNO086's own
+        # fusion has already taken gravity out, and that is what the
+        # velocity bridge's push_accel is specified to take. Raw accel
+        # would hand it 9.8 m/s^2 of gravity to integrate the moment the
+        # aircraft tilts, which is the opposite of a velocity estimate.
+        imu.enableIMUSensor(dai.IMUSensor.LINEAR_ACCELERATION, 100)
         imu.setBatchReportThreshold(1)
         imu.setMaxBatchReports(20)
         xg = p.create(dai.node.XLinkOut)
@@ -162,8 +168,53 @@ class LiveSource:
 
         self.dev = dai.Device()
         cal = self.dev.readCalibration()
+        # The IMU is not bolted to the camera's axes, and the documented body
+        # mapping (config.R_vio_to_ned) is written in the CAMERA frame - the
+        # 27 Sep note says so explicitly: the gravity vector was "rotated into
+        # the camera frame by the IMU->CAM_B extrinsics" before it landed on
+        # cam_z at 99.8%. DepthAI hands out IMU-frame vectors, so the same
+        # rotation has to be applied here or the mapping is being used on the
+        # wrong frame. On this device the two frames may well be close, but
+        # "may well be" is not a basis for integrating acceleration.
+        self.R_imu2cam = None
+        try:
+            E = np.array(cal.getImuToCameraExtrinsics(dai.CameraBoardSocket.CAM_B))
+            R = np.array(E)[:3, :3]
+            # A rotation and nothing else: orthonormal, det +1. Anything that
+            # fails this is a calibration we do not understand, and silently
+            # multiplying by it would be worse than not rotating at all.
+            if (np.allclose(R @ R.T, np.eye(3), atol=1e-3)
+                    and abs(np.linalg.det(R) - 1.0) < 1e-3):
+                self.R_imu2cam = R
+                off = float(np.degrees(np.arccos(np.clip((np.trace(R) - 1) / 2, -1, 1))))
+                print(f"IMU->CAM_B rotation read from calibration ({off:.1f} deg "
+                      f"off the camera frame)")
+            else:
+                print("*** IMU->CAM_B extrinsics is not a rotation - IGNORED ***")
+        except Exception as e:
+            print(f"*** IMU->CAM_B extrinsics padha nahi gaya ({e}) - "
+                  f"IMU axes ko camera axes maan raha hoon. Accel/gyro ka "
+                  f"mapping is frame par UNVERIFIED hai. ***")
+
         K = np.array(cal.getCameraIntrinsics(dai.CameraBoardSocket.CAM_B, 1280, 800))
         self.focal = float(K[0][0])
+        # The WHOLE of K, and the distortion, not just fx. Measured on this
+        # device 20 Oct: cx 624.89 / cy 391.80, which is 15.11 px and 8.20 px
+        # off the geometric centre, and an 8-coefficient rational distortion
+        # with k1 24.09 / k2 -39.14 / k3 18.88. Both were being thrown away
+        # here - fx was kept and the rest discarded - and both turn aircraft
+        # rotation into phantom translation. See FlowTracker for the numbers.
+        self.K = K
+        self.focal_y = float(K[1][1])
+        try:
+            self.D = np.array(list(cal.getDistortionCoefficients(
+                dai.CameraBoardSocket.CAM_B)), float)
+        except Exception as e:
+            self.D = None
+            print(f"*** distortion coefficients padhe nahi gaye ({e}) - "
+                  f"flow raw pixels par chalega ***")
+        print(f"K: fx {K[0][0]:.2f} fy {K[1][1]:.2f} cx {K[0][2]:.2f} cy {K[1][2]:.2f}"
+              + (f", D[{len(self.D)}] k1 {self.D[0]:.2f}" if self.D is not None else ""))
         self.dev.startPipeline(p)
         self.q = self.dev.getOutputQueue("mono", 4, False)
         # Non-blocking and shallow on purpose: a depth frame that is late is
@@ -178,8 +229,17 @@ class LiveSource:
         # before anything depends on it. Derotation still uses the FC.
         self._gyro_roll = self._gyro_pitch = 0.0
         self._gyro_n = 0
+        self._accel_n = 0
+        self._t_accel = None
         self._t_gyro = None
         self.t0 = time.monotonic()
+
+    def _to_cam(self, x, y, z):
+        """IMU-frame vector -> camera frame, if the calibration told us how."""
+        if self.R_imu2cam is None:
+            return float(x), float(y), float(z)
+        v = self.R_imu2cam @ np.array([x, y, z], float)
+        return float(v[0]), float(v[1]), float(v[2])
 
     def read(self):
         fr = self.q.get()
@@ -188,9 +248,34 @@ class LiveSource:
         # not that the loop waits for it.
         # Integrate the gyro over the interval this frame covers.
         d_roll = d_pitch = 0.0
+        accel = []
         pk = self.q_imu.tryGet()
         while pk is not None:
             for packet in pk.packets:
+                # Flow alone cannot see what happens BETWEEN frames; the
+                # accelerometer can, and that is the whole difference between
+                # optical flow and visual-inertial odometry. Every sample is
+                # carried out at its own device timestamp rather than one value
+                # a frame, so the bridge integrates at the IMU's 100 Hz instead
+                # of the flow loop's 17.
+                #
+                # The timestamp is the test of whether this report exists at
+                # all. An IMU field that was never enabled is not absent from
+                # the packet - it is present and full of zeros, with a
+                # timestamp that never advances - so "is not None" would have
+                # read a sensor that is not running as one reporting a perfect
+                # standstill. It has to be caught here: the bridge cannot tell
+                # a still aircraft from a dead accelerometer, and downstream
+                # accel_n would have counted up either way.
+                la = getattr(packet, "linearAcceleration", None)
+                if la is not None:
+                    ts = la.getTimestampDevice().total_seconds()
+                    if self._t_accel is None or ts > self._t_accel:
+                        if self._t_accel is not None:
+                            ax, ay, az = self._to_cam(la.x, la.y, la.z)
+                            accel.append((ts, ax, ay, az))
+                            self._accel_n += 1
+                        self._t_accel = ts
                 g = getattr(packet, "gyroscope", None)
                 if g is None:
                     continue
@@ -198,9 +283,14 @@ class LiveSource:
                 if self._t_gyro is not None:
                     dt = ts - self._t_gyro
                     if 0.0 < dt < 0.1:
-                        # x->roll, y->pitch is a GUESS. See __init__.
-                        d_roll += np.degrees(g.x) * dt
-                        d_pitch += np.degrees(g.y) * dt
+                        # Rotated into the camera frame first, for the same
+                        # reason the acceleration is. x->roll, y->pitch after
+                        # that is still a GUESS - but derotation runs off the
+                        # FC attitude, so this pair is logged for comparison
+                        # rather than flown on.
+                        gx, gy, _gz = self._to_cam(g.x, g.y, g.z)
+                        d_roll += np.degrees(gx) * dt
+                        d_pitch += np.degrees(gy) * dt
                         self._gyro_n += 1
                 self._t_gyro = ts
             pk = self.q_imu.tryGet()
@@ -216,14 +306,17 @@ class LiveSource:
                         pitch=None, gps=None, depth=depth,
                         gyro_d_roll=d_roll, gyro_d_pitch=d_pitch,
                         gyro_n=self._gyro_n,
+                        accel=accel, accel_n=self._accel_n,
                         t=time.monotonic() - self.t0)
         gps = None
         if s.get("lat") not in (None, 0.0):
             gps = (s["lon"], s["lat"])
         return dict(img=fr.getCvFrame(), alt=s["alt_rel"], yaw=s["yaw"],
+                    alt_amsl=s.get("alt_amsl"),
                     roll=s["roll"], pitch=s["pitch"], gps=gps, depth=depth,
                     gyro_d_roll=d_roll, gyro_d_pitch=d_pitch,
                     gyro_n=self._gyro_n,
+                    accel=accel, accel_n=self._accel_n,
                     t=time.monotonic() - self.t0, armed=bool(s.get("armed")))
 
 
@@ -301,7 +394,7 @@ class GpsInputSender:
     IGN_VEL_HORIZ, IGN_VEL_VERT, IGN_SPEED_ACC = 8, 16, 32
 
     def __init__(self, port="/dev/ttyTHS1", baud=921600, gps_id: int = 1,
-                 sats: int = 12, send_velocity: bool = False):
+                 sats: int = 12, send_velocity: bool = True):
         from pymavlink import mavutil
         self.mavutil = mavutil
         self.m = mavutil.mavlink_connection(port, baud=baud, source_system=1,
@@ -387,6 +480,90 @@ class GpsInputSender:
 
 
 # --------------------------------------------------------------------------- #
+class SourceWatcher:
+    """Watches GPS_PRIMARY while the node runs, not just once at startup.
+
+    This is the hole behind two of the pilot's complaints. read_gps_primary was
+    called ONCE, before the loop, and the node then injected GPS_INPUT forever -
+    so flipping the transmitter to the real receiver changed which GPS the
+    flight controller NAVIGATED on, but the VPS carried on pushing into GPS2
+    regardless, and nothing was announced either way. Log 214 has 35 VPS
+    heartbeats and not one source line.
+
+    Two ways in, because one is not reliable on its own:
+      * ArduPilot broadcasts PARAM_VALUE when a parameter changes, so a switch
+        made by gps_rc_switch.py (or by the GCS, or by hand) shows up here
+        within a frame or two.
+      * and it is re-requested every period_s anyway, because a broadcast that
+        arrives while we are not reading is a broadcast that is gone.
+
+    Unknown is NOT treated as "on the receiver". If the parameter cannot be
+    read the node keeps injecting, because the two failures are not
+    symmetrical: injecting into GPS2 while the aircraft navigates on GPS1 is
+    ignored by the flight controller - GPS_AUTO_SWITCH is 0, so the primary is
+    the primary - whereas going silent while the aircraft is actually ON the
+    VPS is what left it with no position at all on 20 Oct. So it fails towards
+    sending, and says out loud that it does not know.
+    """
+
+    def __init__(self, link, period_s: float = 2.0):
+        self.link = link
+        self.period = float(period_s)
+        self._next = 0.0
+        self.value = None
+        self.reads = 0
+
+    def poll(self, t: float):
+        """Returns GPS_PRIMARY as an int, or None if it has never been read."""
+        if self.link is None:
+            return self.value
+        try:
+            while True:
+                msg = self.link.recv_match(type="PARAM_VALUE", blocking=False)
+                if msg is None:
+                    break
+                if msg.param_id == "GPS_PRIMARY":
+                    self.value = int(msg.param_value)
+                    self.reads += 1
+            if t >= self._next:
+                self._next = t + self.period
+                self.link.mav.param_request_read_send(
+                    self.link.target_system, self.link.target_component,
+                    b"GPS_PRIMARY", -1)
+        except Exception:
+            pass
+        return self.value
+
+    def on_vps(self) -> bool:
+        """True when the VPS may inject. Unknown counts as yes - see above."""
+        return self.value != 0
+
+
+# --------------------------------------------------------------------------- #
+def accel_to_ne(ax: float, ay: float, yaw_deg: float):
+    """Camera-frame horizontal acceleration -> (north, east), m/s^2.
+
+    The body mapping is config.py's, measured 27 Sep on this camera: cam_z is
+    DOWN - the gravity vector lands on it at 99.8% - the nose points at the TOP
+    of the image, and cam_y is image DOWN. So body forward is -cam_y and body
+    right is +cam_x.
+
+    UNVERIFIED on THIS airframe: the camera has been remounted since that
+    measurement. A recording with a deliberate push along one axis would settle
+    it, and until then the only protection is that flow stays the authority -
+    a wrong mapping degrades what is carried between frames, not the answer.
+
+    The yaw convention matches shift_to_ne, which is the point: the same
+    rotation has to take flow pixels and acceleration into the same frame, or
+    position and velocity will disagree about which way north is.
+    """
+    import numpy as _np
+    fwd, right = -ay, ax
+    t = _np.radians(yaw_deg)
+    c, sn = _np.cos(t), _np.sin(t)
+    return float(fwd * c - right * sn), float(fwd * sn + right * c)
+
+
 def choose_origin(cli_origin, scr_origin, gps_primary, gps_fix):
     """Where the origin may come from. Returns ((lon, lat), why) or (None, why).
 
@@ -588,26 +765,56 @@ class Notifier:
                    "VPS GYRO OK" if (est.get("gyro_n") or 0) > 0
                    else "VPS GYRO SILENT - CAM IMU DEAD",
                    self.SEV_INFO if (est.get("gyro_n") or 0) > 0 else self.SEV_CRIT)
-        self.event("fix", node.n_fix > 0,
-                   f"VPS MAP FIX {node.n_fix}" if node.n_fix
-                   else "VPS NO MAP FIX",
-                   self.SEV_INFO if node.n_fix else self.SEV_WARN)
+        # The accelerometer gets its own line. Until 20 Oct nothing read it at
+        # all, and a dead one is invisible in the gyro's: flow would carry on
+        # looking healthy while the gap between frames went unfilled.
+        a_n = est.get("accel_n") or 0
+        self.event("accel", a_n > 0,
+                   "VPS ACCEL OK" if a_n > 0
+                   else "VPS ACCEL SILENT - FLOW ONLY, NO VIO",
+                   self.SEV_INFO if a_n > 0 else self.SEV_CRIT)
+
+        # "NO MAP FIX" on its own reads as a failure when the usual cause is
+        # simply being too low for the map to mean anything. Log 214 sat at
+        # 0.0 m for 1260 s and sent 22 405 doomed submissions; the pilot saw
+        # one warning with no number in it.
+        min_alt = getattr(getattr(node, "worker", None), "min_alt_m", None)
+        alt = est.get("alt")
+        too_low = (min_alt is not None and alt is not None and alt < min_alt)
+        if node.n_fix:
+            self.event("fix", "yes", f"VPS MAP FIX {node.n_fix}", self.SEV_INFO)
+        elif too_low:
+            self.event("fix", "low",
+                       f"VPS MAP NEEDS {min_alt:.0f}m - ab {alt:.0f}m",
+                       self.SEV_INFO)
+        else:
+            self.event("fix", "none", "VPS NO MAP FIX", self.SEV_WARN)
 
         if t < self._next:
             return
         self._next = t + self.period
         # The heartbeat. Everything a pilot can act on, in 50 characters.
         self._send(f"VPS t{tracks} s{est['sigma']:.0f}m f{node.n_fix} "
-                   f"a{est['alt']:.0f} v{v.speed_mps:.1f}", self.SEV_INFO)
+                   f"a{est['alt']:.0f} v{v.speed_mps:.1f} "
+                   f"{est.get('src') or '?'}", self.SEV_INFO)
 
 
 class VpsNode:
+    # How much faster the estimate doubts itself while dead reckoning. 3x is a
+    # starting value, not a measured one: it wants a sweep against a recording
+    # with deliberate flow dropouts.
+    DR_TRUST = 3.0
+
     def __init__(self, cache: MapCache, focal_px: float, *,
                  fix_period_s: float = 1.0, radius_m: float = 150.0,
-                 max_corners: int = 300):
+                 max_corners: int = 300, K=None, D=None, focal_y_px=None):
         self.cache = cache
         self.focal = float(focal_px)
-        self.tracker = FlowTracker(max_corners=max_corners)
+        # fy is 791.58 against fx 791.72 on this camera - a ratio of 1.000177,
+        # which is 1.8 cm per 100 m travelled. It is carried because it is free
+        # and correct, NOT because it is a fix for anything.
+        self.focal_y = float(focal_px if focal_y_px is None else focal_y_px)
+        self.tracker = FlowTracker(max_corners=max_corners, K=K, D=D)
         self.fuser = MapFuser(flow_drift_frac=0.07, fix_sigma_m=12.0)
         self.worker = MapFixWorker(cache, focal_px=focal_px, radius_m=radius_m)
         self.fix_period = float(fix_period_s)
@@ -616,11 +823,11 @@ class VpsNode:
         self._next_fix = 0.0
         self.prev_att = None
         self.prev_t = None
-        self.n_fix = self.n_flow = 0
-        # Flow-only on this path: LiveSource does not enable the camera IMU, so
-        # nothing calls push_accel. The bridge is built for that - with no
-        # acceleration it simply holds between flow updates instead of
-        # dead-reckoning through them, and says how stale it is.
+        self.n_fix = self.n_flow = self.n_dr = 0
+        # Flow AND acceleration on this path - step() pushes both. The bridge
+        # still holds rather than dead-reckoning when no acceleration arrives,
+        # which is what a replayed recording and a silent IMU both look like,
+        # and says how stale it is either way.
         self.vel = VelocityBridge()
 
     def set_origin(self, lon: float, lat: float):
@@ -646,11 +853,31 @@ class VpsNode:
         if self.prev_att is not None:
             fc_dr = _wrap(att[0] - self.prev_att[0])
             fc_dp = _wrap(att[1] - self.prev_att[1])
+        # The camera's accelerometer, rotated into NED and handed to the
+        # bridge. This is what makes it inertial rather than flow-only: flow
+        # cannot see what happens BETWEEN frames, and at ~17 Hz that is 60 ms
+        # of unobserved motion per gap.
+        #
+        # The body mapping is config.py's, measured 27 Sep: cam_z is DOWN (the
+        # gravity vector lands on it at 99.8%), the nose points at the TOP of
+        # the image and cam_y is image DOWN, so body forward = -cam_y and body
+        # right = +cam_x. UNVERIFIED on THIS airframe - the camera has been
+        # remounted since. accel_n is logged so a silent accelerometer reads as
+        # silent, and the bridge treats flow as the authority regardless, so a
+        # wrong mapping degrades the between-frame carry rather than the
+        # answer.
+        acc = f.get("accel")
+        if acc and f.get("yaw") is not None:
+            for ts, ax, ay, _az in acc:
+                an, ae = accel_to_ne(ax, ay, f["yaw"])
+                self.vel.push_accel(ts, an, ae)
+
         d, ntrk = self.tracker.step(f["img"])
+        flowed = False
         if d is not None and self.prev_att is not None:
             d = d - attitude_shift_px(self.prev_att, att)
             dn, de = shift_to_ne(d, altitude_m=f["alt"], focal_px=self.focal,
-                                 yaw_deg=f["yaw"])
+                                 yaw_deg=f["yaw"], focal_y_px=self.focal_y)
             self.fuser.predict(dn, de)
             self.n_flow += 1
             # Velocity is the SAME displacement the fuser just consumed,
@@ -662,6 +889,29 @@ class VpsNode:
                 dt = f["t"] - self.prev_t
                 if 0.0 < dt < 0.5:
                     self.vel.push_flow(f["t"], dn / dt, de / dt)
+            flowed = True
+
+        # Flow produced nothing this frame - tracking lost, too few corners, or
+        # the first frame after a reset. THIS is the gap, and it is where the
+        # accelerometer earns its place: the position carries on at the
+        # integrated velocity instead of freezing where it was. Log 214 shows
+        # why it matters - "TRACK LOST 17" inside the first second, and while
+        # flow was down the estimate simply stopped moving, which the EKF reads
+        # as a stationary aircraft rather than an unobserved one.
+        #
+        # The window is the bridge's own: once flow has been stale longer than
+        # flow_timeout_s the velocity stops being valid and this stops with it.
+        # Dead reckoning on a camera-grade IMU is good for a fraction of a
+        # second, not for a flight, and the variance grows DR_TRUST times
+        # faster while it lasts so the flight controller is told the estimate is
+        # getting worse.
+        if not flowed and self.prev_t is not None:
+            dt = f["t"] - self.prev_t
+            v = self.vel.value(f["t"], f["alt"])
+            if 0.0 < dt < 0.5 and v.valid:
+                self.fuser.predict(v.vn * dt, v.ve * dt, trust=self.DR_TRUST)
+                self.n_dr += 1
+
         self.prev_att = att
         self.prev_t = f["t"]
 
@@ -686,7 +936,7 @@ class VpsNode:
                     fc_d_roll=fc_dr, fc_d_pitch=fc_dp,
                     gyro_d_roll=f.get("gyro_d_roll"),
                     gyro_d_pitch=f.get("gyro_d_pitch"),
-                    gyro_n=f.get("gyro_n"))
+                    gyro_n=f.get("gyro_n"), accel_n=f.get("accel_n"))
 
     def stop(self):
         self.worker.stop()
@@ -725,11 +975,16 @@ def main():
                          "this node apart from a process that is merely alive. "
                          "systemd Restart= only catches a CRASH; a node stuck "
                          "waiting on the camera stays 'active' forever.")
-    ap.add_argument("--send-vel", action="store_true",
-                    help="also send horizontal velocity in GPS_INPUT. OFF by "
-                         "default: this is the channel that reported 47.7 m/s "
-                         "at a 106 m hover on 28 Sep and caused four EKF "
-                         "failsafes, and it is still the largest open fault.")
+    ap.add_argument("--no-send-vel", dest="send_vel", action="store_false",
+                    help="do NOT send horizontal velocity in GPS_INPUT. It is "
+                         "ON by default now, because a real receiver sends "
+                         "velocity and the flight controller expects it. This "
+                         "is the channel that reported 47.7 m/s at a 106 m "
+                         "hover on 28 Sep and caused four EKF failsafes - "
+                         "velocity_bridge.py exists for that, and its 23 tests "
+                         "pin the collapse - but the first flight on it is "
+                         "still the first flight on it, so this is the way off.")
+    ap.set_defaults(send_vel=True)
     ap.add_argument("--gps-id", type=int, default=1, help="0 = GPS1, 1 = GPS2")
     a = ap.parse_args()
 
@@ -774,7 +1029,10 @@ def main():
     print(f"focal {src.focal:.1f} px, fix har {a.fix_period:.1f} s, window +-{a.radius:.0f} m, "
           f"{a.corners} corners\n", flush=True)
 
-    node = VpsNode(cache, src.focal, fix_period_s=a.fix_period,
+    node = VpsNode(cache, src.focal,
+                   K=getattr(src, "K", None), D=getattr(src, "D", None),
+                   focal_y_px=getattr(src, "focal_y", None),
+                   fix_period_s=a.fix_period,
                    radius_m=a.radius, max_corners=a.corners)
 
     wr = None
@@ -823,6 +1081,11 @@ def main():
                         enabled=not a.no_notify)
     if notifier.enabled:
         print(f"notifications ON, every {a.notify_period:.0f}s")
+
+    # The link the watcher listens on is the sender's, because that is the one
+    # that owns the FC endpoint. With no sender there is nothing to gate, so
+    # the notification link will do.
+    watcher = SourceWatcher(getattr(gps_sender, "m", None) or _link)
 
     _origin_refused = [False]
     errs, t_start, n = [], time.perf_counter(), 0
@@ -877,6 +1140,21 @@ def main():
             if est is None:
                 continue
             n += 1
+
+            # Which source the aircraft is actually navigating on, NOW, not at
+            # startup. The pilot's rule: on the real receiver nothing of ours
+            # reaches the flight controller, and either way the change is
+            # announced on the radio.
+            watcher.poll(est["t"])
+            on_vps = watcher.on_vps()
+            est["src"] = ("VPS" if watcher.value == 1
+                          else "GPS1" if watcher.value == 0 else "?")
+            notifier.event(
+                "source", est["src"],
+                "VPS ON - FC ko GPS2 ja raha hai" if watcher.value == 1
+                else "GPS1 ON - VPS ka data FC ko BAND" if watcher.value == 0
+                else "SOURCE ? - GPS_PRIMARY padha nahi gaya",
+                Notifier.SEV_INFO if watcher.value == 1 else Notifier.SEV_CRIT)
             gN = gE = err = None
             if f["gps"]:
                 gN = (f["gps"][1] - node.origin[1]) * M_PER_DEG_LAT
@@ -902,12 +1180,17 @@ def main():
                              "" if est["fc_d_pitch"] is None else f"{est['fc_d_pitch']:.4f}",
                              "" if est["gyro_d_roll"] is None else f"{est['gyro_d_roll']:.4f}",
                              "" if est["gyro_d_pitch"] is None else f"{est['gyro_d_pitch']:.4f}",
-                             est["gyro_n"]])
+                             est["gyro_n"], est["accel_n"]])
             notifier.tick(est["t"], est, node)
 
-            if gps_sender is not None:
+            # Gated on the source. GPS_PRIMARY=0 means the pilot asked for the
+            # real M9N, so the VPS stops injecting entirely - not "sends and is
+            # ignored", stops. Unknown keeps sending; see SourceWatcher for why
+            # the two directions are not symmetrical.
+            if gps_sender is not None and on_vps:
                 gps_sender.send(est["lon"], est["lat"],
-                                (f.get("alt_amsl") or est["alt"]), est["sigma"],
+                                (est["alt"] if f.get("alt_amsl") is None
+                                 else f["alt_amsl"]), est["sigma"],
                                 est["yaw"], vel=est["vel"])
             if sender is not None:
                 sender.send(est["north"], est["east"], -est["alt"],

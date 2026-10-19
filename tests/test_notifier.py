@@ -39,14 +39,21 @@ class Vel:
         self.valid, self.reason, self.speed_mps = valid, reason, speed
 
 
+class Worker:
+    def __init__(self, min_alt_m=60.0):
+        self.min_alt_m = min_alt_m
+
+
 class Node:
-    def __init__(self, n_fix=0):
+    def __init__(self, n_fix=0, min_alt_m=60.0):
         self.n_fix = n_fix
+        self.worker = Worker(min_alt_m) if min_alt_m is not None else None
 
 
-def est(tracks=250, sigma=6.0, alt=110.0, gyro_n=500, vel=None):
+def est(tracks=250, sigma=6.0, alt=110.0, gyro_n=500, vel=None, accel_n=500,
+        src=None):
     return dict(tracks=tracks, sigma=sigma, alt=alt, gyro_n=gyro_n,
-                vel=vel or Vel())
+                accel_n=accel_n, src=src, vel=vel or Vel())
 
 
 print("a state change is announced once, not every frame")
@@ -104,6 +111,45 @@ for want in ("TRACK LOST", "VEL", "GYRO SILENT"):
 
 print("\na dead camera IMU is not read as calm")
 check("gyro_n 0 says SILENT, not OK", "GYRO SILENT" in text)
+
+print("\nthe accelerometer has its own line - a dead gyro does not cover it")
+lk = FakeLink()
+n = Notifier(lk, period_s=1e9)
+n.tick(0.0, est(accel_n=0), Node())
+t2 = " | ".join(t for _, t in lk.mav.lines)
+check("accel_n 0 says SILENT", "ACCEL SILENT" in t2, t2)
+check("and it is critical", any(s == Notifier.SEV_CRIT for s, t in lk.mav.lines
+                               if "ACCEL" in t))
+lk = FakeLink()
+n = Notifier(lk, period_s=1e9)
+n.tick(0.0, est(accel_n=120), Node())
+check("a live accelerometer says OK",
+      any("ACCEL OK" in t for _, t in lk.mav.lines))
+
+print("\n'no map fix' says WHY, because on the ground it is not a fault")
+lk = FakeLink()
+n = Notifier(lk, period_s=1e9)
+n.tick(0.0, est(alt=0.0), Node(n_fix=0, min_alt_m=60.0))
+low = [t for _, t in lk.mav.lines if "MAP" in t]
+check("below the minimum it gives the number", low and "60" in low[0], str(low))
+check("and it is not screamed as a warning",
+      all(s == Notifier.SEV_INFO for s, t in lk.mav.lines if "MAP" in t), str(low))
+lk = FakeLink()
+n = Notifier(lk, period_s=1e9)
+n.tick(0.0, est(alt=110.0), Node(n_fix=0, min_alt_m=60.0))
+high = [(s, t) for s, t in lk.mav.lines if "MAP" in t]
+check("high enough and still nothing IS a warning",
+      high and high[0][0] == Notifier.SEV_WARN and "NO MAP FIX" in high[0][1],
+      str(high))
+check("a node with no worker does not crash the notifier",
+      Notifier(FakeLink(), period_s=1e9).tick(0.0, est(), Node(min_alt_m=None)) is None)
+
+print("\nthe heartbeat carries which source is live")
+lk = FakeLink()
+n = Notifier(lk, period_s=0.0)
+n.tick(0.0, est(src="VPS"), Node(n_fix=2))
+beat = [t for _, t in lk.mav.lines if t.startswith("VPS t")]
+check("the heartbeat names the source", beat and "VPS" in beat[-1], str(beat[-1:]))
 
 print("\ndisabled means silent")
 lk = FakeLink()
