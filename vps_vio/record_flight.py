@@ -103,7 +103,26 @@ class CamImu:
 
 
 class Telemetry:
-    """Read-only MAVLink listener. Never transmits anything to the FC."""
+    """MAVLink listener. Sends nothing that commands the aircraft.
+
+    It is not literally silent, and 20 Oct is why. It used to transmit only a
+    stream request at startup, and the router drops a UDP client it has not
+    heard from in 30 seconds. The router's own log, at exactly 30 s after
+    start: four of five clients gone, each having sent 1-9 frames and received
+    about 3800. This was one of them.
+
+    What that costs is not a missing log line. snapshot() keeps the last value
+    of everything it has seen, so when the messages stop the dictionary does
+    not empty - it FREEZES. The VPS node goes on reading roll, pitch, yaw and
+    altitude out of it and they are all stale, so derotation is subtracting an
+    attitude change that stopped being current minutes ago, and the altitude
+    that scales every pixel into metres is whatever it was half an hour in.
+    Nothing reports an error, because from here a dead link and a still
+    aircraft look identical.
+
+    So it heartbeats, to stay registered, and it tracks the age of what it
+    holds so a caller can tell fresh data from frozen data.
+    """
 
     def __init__(self, port: str, baud: int):
         self.port, self.baud = port, baud
@@ -160,6 +179,27 @@ class Telemetry:
         self._thr.start()
         return self
 
+    def _heartbeat(self):
+        """Keep this client registered with the router. Commands nothing.
+
+        MAV_TYPE_GCS / MAV_AUTOPILOT_INVALID: a heartbeat that says "a ground
+        station is listening", which is what this is. It does not arm, set a
+        mode or move a parameter.
+        """
+        try:
+            from pymavlink import mavutil
+            self.m.mav.heartbeat_send(mavutil.mavlink.MAV_TYPE_GCS,
+                                      mavutil.mavlink.MAV_AUTOPILOT_INVALID,
+                                      0, 0, 0)
+        except Exception:
+            pass
+
+    def age_s(self) -> float:
+        """How long since anything arrived. Large means the state is frozen."""
+        with self.lock:
+            t = self.state.get("t") or 0.0
+        return 1e9 if t <= 0 else max(0.0, time.time() - t)
+
     def _request_streams(self):
         """Ask for the telemetry we log. Re-sent until data arrives, because the
         FC is often powered on after this script has already started."""
@@ -173,9 +213,20 @@ class Telemetry:
 
     def _loop(self):
         last_req = 0.0
+        last_hb = 0.0
         while self._run:
-            if self.state["lat"] is None and time.time() - last_req > 5.0:
-                last_req = time.time()
+            now = time.time()
+            # Every 5 s, for the whole run. The router's client timeout is 30 s
+            # and this loop can otherwise go minutes without transmitting.
+            if now - last_hb > 5.0:
+                last_hb = now
+                self._heartbeat()
+            # The stream request is also re-sent for the whole run, not only
+            # until the first position. Being dropped and re-registered means
+            # the FC's stream rates have to be asked for again, and asking
+            # only while lat is None would never do it a second time.
+            if now - last_req > 10.0:
+                last_req = now
                 self._request_streams()
             try:
                 msg = self.m.recv_match(

@@ -127,12 +127,27 @@ class LiveSource:
         # arrives over MAVLink at a few Hz, interpolated and late. The gyro is
         # on the same device as the frames.
         imu = p.create(dai.node.IMU)
+        # 100 Hz is not a choice here, it is the ceiling. Luxonis' own IMU
+        # table gives GYROSCOPE_CALIBRATED a maximum of 100 Hz on the BNO086 -
+        # the raw gyro goes to 1000 but is only recommended at or below 400,
+        # because above that the part jitters. So this is already as fast as
+        # the calibrated report can be asked for, and the BNO rounds a request
+        # UP to its next supported rate, which is how asking for more than the
+        # part supports turns into a slower packet rather than a faster one.
         imu.enableIMUSensor(dai.IMUSensor.GYROSCOPE_CALIBRATED, 100)
         # LINEAR_ACCELERATION, not ACCELEROMETER_RAW: the BNO086's own
         # fusion has already taken gravity out, and that is what the
         # velocity bridge's push_accel is specified to take. Raw accel
         # would hand it 9.8 m/s^2 of gravity to integrate the moment the
         # aircraft tilts, which is the opposite of a velocity estimate.
+        # LINEAR_ACCELERATION's own maximum is 400 Hz, so there is headroom
+        # here that the gyro does not have. It is deliberately matched to the
+        # gyro instead, for two measured reasons: all three reports share one
+        # packet, and 3 Oct measured asking for 400 on the gyro dragging the
+        # whole stream down rather than speeding anything up; and the job this
+        # does is filling a ~60 ms gap between flow frames, where six samples
+        # already integrate to well under the sensor's own noise. Raising it
+        # would cost packet rate to buy precision nothing downstream can use.
         imu.enableIMUSensor(dai.IMUSensor.LINEAR_ACCELERATION, 100)
         imu.setBatchReportThreshold(1)
         imu.setMaxBatchReports(20)
@@ -554,7 +569,11 @@ class SourceWatcher:
         made by gps_rc_switch.py (or by the GCS, or by hand) shows up here
         within a frame or two.
       * and it is re-requested every period_s anyway, because a broadcast that
-        arrives while we are not reading is a broadcast that is gone.
+        arrives while we are not reading is a broadcast that is gone. Half a
+        second, not two: the pilot has to be able to flip the switch and see
+        the answer, and every link in that chain adds its own delay already -
+        four stable RC samples in gps_rc_switch, then its parameter set and
+        read-back, then this.
 
     Unknown is NOT treated as "on the receiver". If the parameter cannot be
     read the node keeps injecting, because the two failures are not
@@ -565,7 +584,7 @@ class SourceWatcher:
     sending, and says out loud that it does not know.
     """
 
-    def __init__(self, link, period_s: float = 2.0):
+    def __init__(self, link, period_s: float = 0.5):
         self.link = link
         self.period = float(period_s)
         self._next = 0.0
@@ -1021,7 +1040,15 @@ def main():
     ap.add_argument("--map", default=DEFAULT_MAP)
     ap.add_argument("--every", type=int, default=3, help="replay: frame stride (3 = 10 Hz)")
     ap.add_argument("--min-alt", type=float, default=60.0)
-    ap.add_argument("--fix-period", type=float, default=1.0)
+    ap.add_argument("--fix-period", type=float, default=0.5,
+                    help="seconds between map fixes. 1.0 until 20 Oct, when "
+                         "XFeat went from 1233 ms to 272 ms by being given "
+                         "ONE torch thread instead of six - it could not "
+                         "previously finish inside its own period. 0.5 s also "
+                         "pairs with the 0.5 m cap on each correction: "
+                         "together they give the map 1 m/s of authority to "
+                         "pull the estimate back, with no single fix able to "
+                         "move it more than half a metre.")
     ap.add_argument("--radius", type=float, default=150.0)
     ap.add_argument("--corners", type=int, default=300)
     ap.add_argument("--origin", help="lon,lat - GPS-denied start")

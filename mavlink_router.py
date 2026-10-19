@@ -198,8 +198,15 @@ class Router:
             if now - c.last_seen > self.client_timeout_s:
                 del self.clients[addr]
                 self.to_fc.pop(addr, None)
-                print(f"client gone: {addr[0]}:{addr[1]} "
-                      f"(rx {c.rx}, tx {c.tx})", flush=True)
+                # A dropped client simply stops receiving, and from its own
+                # side that is indistinguishable from a link that has gone
+                # quiet - a receive-only client cannot tell the difference at
+                # all. gps_rc_switch spent 20 Oct in exactly that state, deaf
+                # while the pilot flipped the switch. So the reason goes in
+                # the line, not just the fact.
+                print(f"client gone: {addr[0]}:{addr[1]} - silent for "
+                      f"{self.client_timeout_s:.0f}s (rx {c.rx}, tx {c.tx}, "
+                      f"{len(self.clients)} left)", flush=True)
 
     def stats(self) -> str:
         return (f"fc_frames {self.n_fc_frames}  to_fc {self.n_to_fc}  "

@@ -100,13 +100,36 @@ def _load():
     import torch
     from modules.xfeat import XFeat
     _TORCH = torch
+
+    # ONE thread, not six. Measured on this Orin 20 Oct, same frame and the
+    # same map window every time:
+    #
+    #     1 thread    261 ms        4 threads    646 ms
+    #     2 threads   484 ms        6 threads   1233 ms   <- the default
+    #     3 threads   510 ms
+    #
+    # Five times faster on one core than on all six. XFeat is a small sparse
+    # model and torch's thread pool costs more to coordinate than the work it
+    # divides, so every extra thread made it slower - monotonically, with no
+    # sweet spot in between.
+    #
+    # It is the difference between fitting the job and not. The worker is
+    # asked for a fix every second and was taking 1233 ms, so it could never
+    # keep up; at 261 ms there is 739 ms of headroom. And it was taking that
+    # time on ALL SIX cores, against a flow loop that needs one of them every
+    # 59 ms - which is the host-side contention the 9 Oct report recorded as
+    # "main loop stalled 44 s and 30 s" and blamed on stereo depth. Stereo
+    # runs on the camera's own VPU and costs the Jetson nothing. This was it.
+    #
+    # Set before the model is built, because torch reads it when it first
+    # builds its pool.
+    torch.set_num_threads(1)
     # XFeat picks its own device - torch.cuda.is_available() inside its
     # __init__ - and takes no device argument. On this Jetson that resolves to
     # CPU, which upstream states is enough for real-time sparse inference.
     #
     # top_k 1024: 5 Oct measured it doubling the inliers above 140 m (14 -> 32)
-    # and buying 13% of error for 1.9x the time per fix. Affordable because the
-    # fix period is 2 s and the worker sat at 17% of a core.
+    # and buying 13% of error for 1.9x the time per fix.
     _MODEL = XFeat(top_k=1024)
     return _MODEL
 
