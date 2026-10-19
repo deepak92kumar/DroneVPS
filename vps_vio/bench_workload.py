@@ -13,7 +13,7 @@ import numpy as np, cv2
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from flow_odom import FlowTracker, frame_shift_px, shift_to_ne, attitude_shift_px
 from map_cache import MapCache
-from map_match_ncc import locate
+from map_match_xfeat import locate
 from map_fix_worker import MapFixWorker
 
 FLIGHT = "/mnt/ssd/DRONE/flights/auto_20260927_181924"
@@ -127,7 +127,7 @@ def main():
          lambda: _tr.step(i1)),
         ("map fix: +-150 m, 5 rotations",
          lambda: locate(i1, win, wg, altitude_m=alt, focal_px=FOCAL, yaw_deg=yaw,
-                        map_gsd_m=M.gsd, window_is_edges=True)),
+                        map_gsd_m=M.gsd, map_gsd_x_m=M.gsd_x)),
     ]
     costs = {}
     for name, fn in stages:
@@ -185,7 +185,8 @@ def main():
                                   yaw_deg=float(r["yaw_deg"]))
                 else:
                     locate(img, win, wg, altitude_m=float(r["alt_rel_m"]), focal_px=FOCAL,
-                           yaw_deg=float(r["yaw_deg"]), map_gsd_m=M.gsd, window_is_edges=True)
+                           yaw_deg=float(r["yaw_deg"]), map_gsd_m=M.gsd,
+                           map_gsd_x_m=M.gsd_x)
                     n_fix += 1
                 next_fix = time.time() + 1.0 / a.fix_hz
             if worker is not None and worker.poll() is not None:

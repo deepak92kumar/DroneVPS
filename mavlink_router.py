@@ -226,6 +226,14 @@ class Router:
                 last = now
 
 
+def _take_lock():
+    """One router. Two would both own the serial port and split every stream."""
+    import sys as _s, os as _o
+    _s.path.insert(0, _o.path.join(_o.path.dirname(_o.path.abspath(__file__)), "vps_vio"))
+    import single_instance
+    return single_instance.require("drone-router")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--port", default="/dev/ttyTHS1",
@@ -238,6 +246,10 @@ def main(argv=None):
     ap.add_argument("--read-only", action="store_true",
                     help="drop everything clients send; bench in this mode first")
     a = ap.parse_args(argv)
+    # One router. Two would both open the serial port, and every frame would
+    # land in whichever read happened to get it - each copy seeing half a
+    # stream and resyncing on the other half.
+    _lock_fd = _take_lock()   # noqa: F841 - held for the process's life
     host, _, port = a.listen.rpartition(":")
     try:
         r = Router(a.port, a.baud, (host, int(port)), read_only=a.read_only)

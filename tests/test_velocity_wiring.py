@@ -40,7 +40,7 @@ class StubCache:
     def covers(self, lon, lat):
         return False                    # no fixes; this test is about velocity
 
-    def window(self, lon, lat, radius_m, kind="edges"):
+    def window(self, lon, lat, radius_m, kind="grey"):
         raise AssertionError("should not be reached")
 
 

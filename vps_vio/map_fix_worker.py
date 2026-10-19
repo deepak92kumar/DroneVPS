@@ -48,7 +48,7 @@ class FixResult:
     age_s: float          # how long the fix took, i.e. how stale it is on arrival
     prior_lon: float      # the prior it was computed against, so the caller can
     prior_lat: float      # apply it as a correction to that, not to "now"
-    inliers: int = 0      # xfeat only; 0 on the ncc path
+    inliers: int = 0      # RANSAC inliers behind the fix
     total_matches: int = 0
     reason: str = ""      # why a rejected fix was rejected, for the recorder
 
@@ -67,14 +67,14 @@ class MapFixWorker:
         self.min_alt_m = float(min_alt_m)
         self.fix_period_s = float(fix_period_s)
 
-        if self.matcher == "xfeat":
-            from map_match_xfeat import locate
-            self._window_kind = "grey"
-        elif self.matcher == "ncc":
-            from map_match_ncc import locate
-            self._window_kind = "edges"
-        else:
-            raise ValueError(f"unknown matcher {matcher!r}, expected xfeat or ncc")
+        # XFeat only. The NCC matcher was removed on 20 Oct at the pilot's
+        # instruction - XFeat had already been the default here and the two
+        # were never run together, so the alternative was dead weight on the
+        # flying path. The geometry they shared lives in map_query.
+        if self.matcher != "xfeat":
+            raise ValueError(f"unknown matcher {matcher!r}, only 'xfeat' remains")
+        from map_match_xfeat import locate
+        self._window_kind = "grey"
         self._locate = locate
 
         gate = _GATES[self.matcher]

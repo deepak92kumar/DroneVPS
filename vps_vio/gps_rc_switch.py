@@ -43,6 +43,7 @@ from pymavlink import mavutil
 
 sys.path.insert(0, __import__('os').path.dirname(__import__('os').path.abspath(__file__)))
 from fc_port import exclusive_fc
+import single_instance
 
 # Defaults are the direct serial line, which is what this did before the
 # router existed. The systemd unit passes the router's UDP endpoint instead:
@@ -232,6 +233,10 @@ def main():
                     help="serial device, or a pymavlink endpoint such as "
                          "udpout:127.0.0.1:14650 to go through the router")
     a = ap.parse_args()
+    # One copy. Two would both be setting GPS_PRIMARY from the same channel,
+    # and a refusal announced twice on the radio is a pilot reading two
+    # different stories about which source is live.
+    _lock_fd = single_instance.require("drone-rc-switch")   # noqa: F841
     sw = RcGpsSwitch(a.channel, a.high_us, a.allow_armed, not a.no_fix_check,
                      port=a.port, low_us=a.low_us)
     try:

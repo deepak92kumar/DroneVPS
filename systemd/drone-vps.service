@@ -8,13 +8,32 @@ Requires=drone-router.service
 Type=simple
 User=abc
 WorkingDirectory=/data/DRONE/vps_vio
-# --send-vel is NOT here on purpose. Velocity is the 54% row and the channel
-# that caused four EKF failsafes on 28 Sep; turning it on is a deliberate act
-# with its own bench step, not a boot default.
+# Rewritten 20 Oct. What was here passed --gps2, which live_node has never
+# had: the unit died on an argparse error the instant it started, and with
+# Restart=always in front of it, it did that every five seconds for ever. The
+# service could not have worked on any boot. It was also missing --map,
+# --fc-port and --send-gps, so even with the flag accepted it would have sat
+# there matching nothing against nothing and sending nowhere.
+#
+# --fc-port goes through the router, not at the serial device: the router is
+# the one owner of /dev/ttyTHS1 and everything else is a UDP client of it.
+# --send-gps with --gps-id 1 is what makes the estimate arrive as GPS2.
 ExecStart=/usr/bin/python3 /data/DRONE/vps_vio/live_node.py \
-    --live --gps2 --liveness /run/drone/vps.alive
+    --live \
+    --map /data/DRONE/bhh.tif \
+    --fc-port udpout:127.0.0.1:14650 \
+    --send-gps --gps-id 1 \
+    --liveness /run/drone/vps.alive
 Restart=always
 RestartSec=5
+# Exit 3 is single_instance's "someone else already holds it". Restarting on
+# that is pointless and noisy - the other copy is doing the job - so systemd
+# steps aside instead of looping. Every other failure still restarts.
+RestartPreventExitStatus=3
+# /run/drone, owned by this user, created at start and cleaned up at stop.
+# The liveness file and the watchdog's state both live there.
+RuntimeDirectory=drone
+RuntimeDirectoryMode=0755
 # Restart= catches a crash. It does NOT catch a loop stuck on a camera frame,
 # which is what the liveness file above and drone-watchdog.timer are for.
 StandardOutput=append:/data/DRONE/flight_logs/vps_stdout.log

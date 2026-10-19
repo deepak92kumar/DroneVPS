@@ -67,8 +67,10 @@ class FakeTracker:
     def __init__(self, seq):
         self.seq = list(seq)
         self.n = 0
+        self.depth_med_m = None
+        self.depth_dropped = 0
 
-    def step(self, img):
+    def step(self, img, depth=None):
         d = self.seq[min(self.n, len(self.seq) - 1)]
         self.n += 1
         return (None, 0) if d is None else (np.array(d, float), 200)

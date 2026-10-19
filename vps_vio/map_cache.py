@@ -1,4 +1,4 @@
-"""Hold the map in RAM with its edges already computed.
+"""Hold the map in RAM, ready to slice a window out of.
 
 Profiling the matcher showed the work was not where it looked. Reading a
 window out of the GeoTIFF dominated everything - a +-300 m window cost about
@@ -17,7 +17,6 @@ import numpy as np
 import cv2
 
 from map_db import GeoRef
-from map_match_ncc import _edges
 
 
 class MapCache:
@@ -30,7 +29,6 @@ class MapCache:
         if arr.ndim == 3:
             arr = cv2.cvtColor(np.dstack([arr[0], arr[1], arr[2]]), cv2.COLOR_RGB2GRAY)
         self.grey = np.ascontiguousarray(arr)
-        self.edges = _edges(self.grey)
         gt = ds.GetGeoTransform()
         self.gt = gt
         self.geo = GeoRef.from_gdal(gt)
@@ -45,19 +43,23 @@ class MapCache:
         self.h, self.w = self.grey.shape
 
     def window(self, lon: float, lat: float, radius_m: float,
-               kind: str = "edges"):
+               kind: str = "grey"):
         """Window centred on a lon/lat, plus its own GeoRef.
 
         Returns (image, georef). The georef is what turns a pixel inside the
         window back into a position, so the caller never has to track offsets.
 
-        kind picks which of the two cached arrays is sliced. "edges" is the
-        gradient image the NCC matcher correlates; "grey" is the intensity the
-        XFeat matcher needs, because gradient magnitude has none of the texture
-        its descriptors were trained on. Both live in RAM already, so this is a
-        slice either way and costs nothing to choose.
+        Grey only. A gradient image was cached alongside it for the NCC
+        matcher, which was removed on 20 Oct; XFeat needs intensity, because
+        gradient magnitude has none of the texture its descriptors were trained
+        on, and it refuses an edge window outright. Keeping the edges would
+        have been 32 MB of RAM and a Sobel over the whole sheet at every
+        startup, computed for nothing.
         """
-        src = self.grey if kind == "grey" else self.edges
+        if kind != "grey":
+            raise ValueError(f"only grey windows remain, not {kind!r} - the "
+                             f"NCC matcher that used edges is gone")
+        src = self.grey
         c, r = self.geo.to_pixel(lon, lat)
         half = int(radius_m / self.gsd)
         x0 = int(np.clip(int(c) - half, 0, max(0, self.w - 2 * half)))
@@ -78,4 +80,4 @@ class MapCache:
         return (f"map {self.w}x{self.h} @ {self.gsd:.3f} m/px N-S, "
                 f"{self.gsd_x:.3f} E-W "
                 f"({self.w*self.gsd_x/1000:.2f} x {self.h*self.gsd/1000:.2f} km), "
-                f"{self.grey.nbytes/1e6:.0f} MB grey + {self.edges.nbytes/1e6:.0f} MB edges")
+                f"{self.grey.nbytes/1e6:.0f} MB grey")

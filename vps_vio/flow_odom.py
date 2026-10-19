@@ -179,6 +179,8 @@ class FlowTracker:
         self.n_seed = 0
         self.age = 0
         self.redetections = 0
+        self.depth_med_m = None
+        self.depth_dropped = 0
 
     def _undistort(self, pts):
         """Raw pixel points -> undistorted pixel points, in the same K units.
@@ -198,8 +200,69 @@ class FlowTracker:
         self.age = 0
         self.redetections += 1
 
-    def step(self, img: np.ndarray):
-        """Returns (median pixel shift, track count), or (None, n) if it failed."""
+    # Below this the stereo pair is worth listening to, above it the disparity
+    # is smaller than its own noise. From the 7.5 cm baseline and fx 791.72:
+    # 0.2 px of disparity noise is 3.4% of range at 10 m, 8.4% at 25 m and
+    # 20.2% at 60 m, where the disparity itself has fallen under 1 px.
+    DEPTH_MAX_M = 30.0
+    # A track has to be this far off the surface everyone else is on before it
+    # is thrown away: 1 m, or three times the depth noise at that range,
+    # whichever is larger. Tight enough to drop a rooftop, loose enough not to
+    # fight the sensor's own scatter.
+    DEPTH_TOL_M = 1.0
+    DEPTH_SIGMA_K = 3.0
+    DEPTH_MIN_KEEP = 30
+    # Fractions, and they are what the first live run taught. Sitting on the
+    # floor the pair reported 1.3-1.8 m and the gate threw away 190 of 300
+    # tracks - 63% - because at that range the depth map is mostly noise and
+    # unmatched pixels. An absolute floor of 30 survivors passed that happily.
+    # A gate that drops most of the frame is not finding a rooftop, it is
+    # failing, and it has to say so instead of making the flow worse.
+    DEPTH_MIN_VALID_FRAC = 0.5    # of the tracks must have a depth at all
+    DEPTH_MIN_KEEP_FRAC = 0.6     # of the tracks must survive the gate
+
+    def _depth_gate(self, pts, depth):
+        """Which tracks sit on the same surface as the majority. None = no gate.
+
+        shift_to_ne converts pixels to metres by dividing by ONE altitude, so
+        it assumes every tracked feature lies on one plane. A feature on a roof
+        or a treetop breaks that silently: it is a perfectly consistent track,
+        RANSAC is happy with it, and it is simply scaled wrong. That is the
+        "parallax on tall buildings" this module's own notes blame, and the
+        stereo pair can see it directly where the single altitude cannot.
+        """
+        if depth is None or len(pts) < self.DEPTH_MIN_KEEP:
+            return None
+        h, w = depth.shape[:2]
+        xy = pts.reshape(-1, 2)
+        xi = np.clip(xy[:, 0].astype(np.int32), 0, w - 1)
+        yi = np.clip(xy[:, 1].astype(np.int32), 0, h - 1)
+        z = depth[yi, xi].astype(np.float32) / 1000.0     # mm -> m
+        have = z > 0.0                                     # 0 means no match
+        if (have.sum() < self.DEPTH_MIN_KEEP
+                or have.mean() < self.DEPTH_MIN_VALID_FRAC):
+            return None
+        med = float(np.median(z[have]))
+        if not (0.0 < med < self.DEPTH_MAX_M):
+            return None
+        tol = max(self.DEPTH_TOL_M,
+                  self.DEPTH_SIGMA_K * med * med * 0.2 / (791.723 * 0.075))
+        keep = have & (np.abs(z - med) <= tol)
+        # Refuse to gate rather than gate down to nothing: too few survivors
+        # means the surface assumption has failed, not that the tracks are bad.
+        if (keep.sum() < self.DEPTH_MIN_KEEP
+                or keep.mean() < self.DEPTH_MIN_KEEP_FRAC):
+            return None
+        return keep, med, tol
+
+    def step(self, img: np.ndarray, depth: np.ndarray | None = None):
+        """Returns (median pixel shift, track count), or (None, n) if it failed.
+
+        depth is the stereo pair's range map, aligned to this image and in
+        millimetres, used only to drop tracks that are not on the same surface
+        as the rest. It is NOT a height source - that was tried on 9 Oct and
+        came out worse than the barometer - and nothing here divides by it.
+        """
         if self.prev is None or self.pts is None or len(self.pts) < self.min_tracks:
             self._detect(img)
             self.prev = img
@@ -214,6 +277,17 @@ class FlowTracker:
                                                winSize=(31, 31), maxLevel=4)
         good = (st.ravel() == 1) & (st2.ravel() == 1) & \
                (np.linalg.norm(self.pts - p0r, axis=2).ravel() < 1.0)
+        # One surface, if the stereo pair can tell us which one.
+        self.depth_med_m = None
+        self.depth_dropped = 0
+        g = self._depth_gate(self.pts[good], depth)
+        if g is not None:
+            keep, self.depth_med_m, _tol = g
+            full = np.zeros(len(good), bool)
+            full[np.flatnonzero(good)[keep]] = True
+            self.depth_dropped = int(good.sum() - full.sum())
+            good = full
+
         n = int(good.sum())
         shift = None
         if n >= self.min_tracks:

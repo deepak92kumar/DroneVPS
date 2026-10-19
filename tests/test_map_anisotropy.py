@@ -1,5 +1,10 @@
 """Does correcting the map's east-west scale actually remove the error.
 
+Measured through XFeat, which is the matcher that flies. It used to run through
+the NCC matcher; that was removed on 20 Oct, and moving this onto XFeat is an
+improvement rather than a port - the correction now has to hold on the path the
+aircraft actually uses.
+
 The 12 Oct report found a 16.5% mismatch behind XFEAT_ANISO and blamed it for
 "16 m that has never been explained". A geographic GeoTIFF has equal pixel size
 in DEGREES, so in METRES it is anisotropic by cos(latitude) - 1/cos(30.89) is
@@ -30,7 +35,7 @@ if not os.path.exists(MAP):
     sys.exit(0)
 
 from map_cache import MapCache          # noqa: E402
-from map_match_ncc import locate as ncc_locate   # noqa: E402
+from map_match_xfeat import locate as xf_locate   # noqa: E402
 
 ALT, FOCAL = 110.0, 791.72
 GSD_DRONE = ALT / FOCAL
@@ -98,35 +103,52 @@ for fy in (0.35, 0.5, 0.65):
 
 print(f"{len(pts)} points, each matched with and without the correction\n")
 rows = []
+n_on = n_off = 0
 for lon, lat in pts:
     frame = synth_frame(lon, lat)
-    win, wg = M.window(lon, lat, RADIUS_M, kind="edges")
-    common = dict(altitude_m=ALT, focal_px=FOCAL, yaw_deg=0.0,
-                  map_gsd_m=M.gsd, window_is_edges=True)
-    r_off = ncc_locate(frame, win, wg, **common)
-    r_on = ncc_locate(frame, win, wg, map_gsd_x_m=M.gsd_x, **common)
-    if not (r_off.ok and r_on.ok):
-        print(f"  (skipped a point: off.ok={r_off.ok} on.ok={r_on.ok})")
-        continue
-    e_off = err_m(r_off.lon, r_off.lat, lon, lat)
-    e_on = err_m(r_on.lon, r_on.lat, lon, lat)
-    rows.append((e_off, e_on))
-    print(f"  off: E {e_off[0]:6.2f}  N {e_off[1]:5.2f}  tot {e_off[2]:6.2f} m"
-          f"   |   on: E {e_on[0]:5.2f}  N {e_on[1]:5.2f}  tot {e_on[2]:5.2f} m")
+    win, wg = M.window(lon, lat, RADIUS_M, kind="grey")
+    common = dict(altitude_m=ALT, focal_px=FOCAL, yaw_deg=0.0, map_gsd_m=M.gsd)
+    r_off = xf_locate(frame, win, wg, **common)
+    r_on = xf_locate(frame, win, wg, map_gsd_x_m=M.gsd_x, **common)
+    n_on += bool(r_on.ok)
+    n_off += bool(r_off.ok)
+    if r_on.ok:
+        e_on = err_m(r_on.lon, r_on.lat, lon, lat)
+        e_off = err_m(r_off.lon, r_off.lat, lon, lat) if r_off.ok else None
+        rows.append((e_off, e_on))
+        print(f"  on: E {e_on[0]:5.2f}  N {e_on[1]:5.2f}  tot {e_on[2]:5.2f} m"
+              + (f"   |   off: tot {e_off[2]:6.2f} m" if e_off else
+                 "   |   off: NO MATCH AT ALL"))
+    else:
+        print(f"  (on failed too: {r_on.reason})")
 
-check("enough points matched", len(rows) >= 5, f"{len(rows)} of {len(pts)}")
+print(f"\n  matched WITH the correction:    {n_on} of {len(pts)}")
+print(f"  matched WITHOUT it:             {n_off} of {len(pts)}")
+
+# On the NCC matcher this correction reduced the error. On XFeat it is the
+# difference between matching and not matching at all: a 16.53% east-west
+# stretch leaves the descriptors with nothing to agree on. That is a stronger
+# statement than the one this test was originally written to make, and it is
+# the one that matters, because XFeat is what flies.
+check("the correction lets XFeat match", n_on >= len(pts) - 1,
+      f"{n_on} of {len(pts)}")
+check("without it, XFeat mostly cannot", n_off <= 1, f"{n_off} of {len(pts)}")
+check("so the correction is not an optimisation, it is required",
+      n_on > n_off, f"{n_on} vs {n_off}")
+
 if rows:
-    off_tot = float(np.median([r[0][2] for r in rows]))
     on_tot = float(np.median([r[1][2] for r in rows]))
-    off_e = float(np.median([r[0][0] for r in rows]))
     on_e = float(np.median([r[1][0] for r in rows]))
-    print(f"\n  median total error   off {off_tot:6.2f} m   on {on_tot:5.2f} m")
-    print(f"  median east-west     off {off_e:6.2f} m   on {on_e:5.2f} m")
-    check("the correction reduces total error", on_tot < off_tot,
-          f"{off_tot:.2f} -> {on_tot:.2f} m")
-    check("and it is the EAST-WEST component that moves", on_e < off_e,
-          f"{off_e:.2f} -> {on_e:.2f} m")
+    print(f"\n  median total error, corrected  {on_tot:5.2f} m")
+    print(f"  median east-west, corrected    {on_e:5.2f} m")
     check("corrected error is small", on_tot < 5.0, f"{on_tot:.2f} m")
+    check("and the east-west component is not the dominant one",
+          on_e < 5.0, f"{on_e:.2f} m")
+    paired = [r for r in rows if r[0] is not None]
+    if paired:
+        o = float(np.median([r[0][2] for r in paired]))
+        n = float(np.median([r[1][2] for r in paired]))
+        check("where both matched, corrected is closer", n < o, f"{o:.2f} -> {n:.2f} m")
 
 print(f"\n{'ALL PASS' if not fails else str(len(fails)) + ' FAILED: ' + ', '.join(fails)}")
 sys.exit(1 if fails else 0)

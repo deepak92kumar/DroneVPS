@@ -29,7 +29,8 @@ class MapFuser:
                  fix_sigma_m: float = 30.0,
                  gate_sigmas: float = 3.0,
                  max_sigma_m: float = 400.0,
-                 init_sigma_m: float = 2.0):
+                 init_sigma_m: float = 2.0,
+                 max_correction_m: float = 0.5):
         """Defaults are swept on the 27 Sep flight, not assumed.
 
         fix_sigma_m is deliberately larger than the fixes actually are (they
@@ -38,6 +39,19 @@ class MapFuser:
         map correct slowly. On a long mission, where flow drift grows past the
         map's error, the same setting hands authority to the map on its own -
         that is what the growing variance is for."""
+        # The most one map fix may move the estimate, metres. At the pilot's
+        # instruction, 20 Oct. The Kalman gain already shrinks a correction,
+        # but it shrinks it in PROPORTION - a fix 40 m out still moves the
+        # aircraft metres in one step, and a single wrong match looks exactly
+        # like a correct one to this filter. A hard cap means no single fix can
+        # yank the position, however confident it was.
+        #
+        # The cost is honest: a genuine 20 m error now takes 40 fixes to walk
+        # off, which at the 1 Hz fix period is 40 seconds. That is the trade -
+        # slow convergence in exchange for no sudden jumps - and the residual
+        # is reported every time so a log shows when the cap was biting.
+        self.max_correction_m = float(max_correction_m)
+        self.n_capped = 0
         self.pos = np.zeros(2)               # North, East, metres from origin
         self.var = float(init_sigma_m) ** 2
         self.k = float(flow_drift_frac)
@@ -72,7 +86,9 @@ class MapFuser:
                fix_sigma_m: float | None = None) -> bool:
         """Fold in one map fix. Returns False if it was rejected as an outlier.
 
-        The gate widens with every consecutive rejection. Without that the
+        The correction is capped at max_correction_m, so no single fix can
+        move the aircraft further than that however large its residual - see
+        __init__. The gate widens with every consecutive rejection. Without that the
         filter can lock itself out: once the estimate has drifted further than
         the gate allows, every correct fix looks like an outlier and is thrown
         away, so the drift is never corrected and the rejections continue
@@ -93,7 +109,12 @@ class MapFuser:
             return False
         self.consec_rejected = 0
         gain = self.var / (self.var + fv)
-        self.pos = self.pos + gain * r
+        corr = gain * r
+        cn = float(np.linalg.norm(corr))
+        if self.max_correction_m > 0.0 and cn > self.max_correction_m:
+            corr = corr * (self.max_correction_m / cn)
+            self.n_capped += 1
+        self.pos = self.pos + corr
         # A fix accepted only because the gate had widened means the estimate
         # was lost, so the uncertainty must reflect that rather than collapsing.
         self.var = max((1.0 - gain) * self.var, min(fv, self.var))

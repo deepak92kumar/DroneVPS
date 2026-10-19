@@ -14,6 +14,9 @@ ExecStart=/usr/bin/python3 /data/DRONE/vps_vio/gps_rc_switch.py \
     --port udpout:127.0.0.1:14650 --channel 6 --low-us 1270 --high-us 1720
 Restart=always
 RestartSec=3
+# Exit 3 is single_instance's 'another copy holds it'. Looping on that
+# achieves nothing, so systemd stands down instead.
+RestartPreventExitStatus=3
 
 [Install]
 WantedBy=multi-user.target

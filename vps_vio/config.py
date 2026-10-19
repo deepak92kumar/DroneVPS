@@ -111,6 +111,25 @@ class VpsConfig:
     # What it is NOT: a height source. That is the part 9 Oct reverted, and the
     # report's own verdict was that it came out "worse than the baro it was
     # meant to help". Height stays TF03 below lidar_max_alt_m, barometer above.
+    # --- the aircraft's own leg, in the left camera's frame ---
+    # Measured 20 Oct off CAM_B at 1280x800. The left landing leg occludes the
+    # left edge: columns 0-63 fall below 60% of the frame median (70-90 against
+    # 147.5) and the darkening tapers out by x~120. The RIGHT camera is flat
+    # across every column, 153-157, which is what proves it is an object in
+    # front of CAM_B and not lens vignetting - both sensors are the same part.
+    #
+    # It matters because it is RIGIDLY ATTACHED. 32 of 300 detected corners sat
+    # inside it, and a corner on the aircraft reports zero motion in every
+    # frame while the ground moves. RANSAC does not save you from that: those
+    # tracks agree perfectly with each other on a single rigid motion of zero,
+    # so a tenth of the evidence is pulling the estimate towards standing still.
+    #
+    # Cropped, not masked: a masked block is a uniform patch that the NCC
+    # matcher would happily correlate against. Cropping the column off takes
+    # the leg out of flow, the map matcher and the recorded frames at once, and
+    # cx moves with it.
+    crop_left_px: int = 130       # 120 where the taper ends, plus margin
+
     stereo_depth: bool = True
     stereo_depth_as_height: bool = False   # keep False. See above.
 

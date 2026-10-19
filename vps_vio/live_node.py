@@ -25,6 +25,7 @@ from map_cache import MapCache
 from map_fix_worker import MapFixWorker
 from map_fuse import MapFuser
 from velocity_bridge import VelocityBridge
+import single_instance
 
 M_PER_DEG_LAT = 111_320.0
 # The only map on this machine after the SSD was lost. It was
@@ -83,7 +84,8 @@ class LiveSource:
     """OAK-D mono plus read-only FC telemetry."""
 
     def __init__(self, fc_port="/dev/ttyTHS1", fc_baud=921600, *,
-                 fps: int | None = None, stereo_depth: bool | None = None):
+                 fps: int | None = None, stereo_depth: bool | None = None,
+                 crop_left: int | None = None):
         import depthai as dai
         from record_flight import Telemetry
         from config import VpsConfig
@@ -204,6 +206,16 @@ class LiveSource:
         # with k1 24.09 / k2 -39.14 / k3 18.88. Both were being thrown away
         # here - fx was kept and the rest discarded - and both turn aircraft
         # rotation into phantom translation. See FlowTracker for the numbers.
+        # The leg comes off here, before anything looks at the image, so flow,
+        # the map matcher and the recorder all get the same clean frame. cx
+        # shifts with the crop; fx, fy and cy do not. See config.crop_left_px.
+        self.crop_left = int(crop_left if crop_left is not None
+                             else getattr(cfg, "crop_left_px", 0))
+        if self.crop_left > 0:
+            K = K.copy()
+            K[0][2] -= self.crop_left
+            print(f"crop: left {self.crop_left} px (drone ka leg), "
+                  f"cx {K[0][2] + self.crop_left:.1f} -> {K[0][2]:.1f}")
         self.K = K
         self.focal_y = float(K[1][1])
         try:
@@ -240,6 +252,9 @@ class LiveSource:
             return float(x), float(y), float(z)
         v = self.R_imu2cam @ np.array([x, y, z], float)
         return float(v[0]), float(v[1]), float(v[2])
+
+    def _crop(self, img):
+        return img if self.crop_left <= 0 else img[:, self.crop_left:]
 
     def read(self):
         fr = self.q.get()
@@ -299,11 +314,11 @@ class LiveSource:
         if self.q_depth is not None:
             d = self.q_depth.tryGet()
             if d is not None:
-                depth = d.getFrame()        # uint16, millimetres, aligned to CAM_B
+                depth = self._crop(d.getFrame())   # uint16 mm, aligned to CAM_B
         s = self.tel.snapshot()
         if s.get("alt_rel") is None or s.get("yaw") is None:
-            return dict(img=fr.getCvFrame(), alt=None, yaw=None, roll=None,
-                        pitch=None, gps=None, depth=depth,
+            return dict(img=self._crop(fr.getCvFrame()), alt=None, yaw=None, roll=None,
+                        pitch=None, gps=None, depth=depth, rngfnd=s.get("rngfnd"),
                         gyro_d_roll=d_roll, gyro_d_pitch=d_pitch,
                         gyro_n=self._gyro_n,
                         accel=accel, accel_n=self._accel_n,
@@ -311,8 +326,9 @@ class LiveSource:
         gps = None
         if s.get("lat") not in (None, 0.0):
             gps = (s["lon"], s["lat"])
-        return dict(img=fr.getCvFrame(), alt=s["alt_rel"], yaw=s["yaw"],
-                    alt_amsl=s.get("alt_amsl"),
+        return dict(img=self._crop(fr.getCvFrame()), alt=s["alt_rel"], yaw=s["yaw"],
+                    alt_amsl=s.get("alt_amsl"), rngfnd=s.get("rngfnd"),
+                    gps1_alt=s.get("gps1_alt"), gps1_fix=s.get("fix"),
                     roll=s["roll"], pitch=s["pitch"], gps=gps, depth=depth,
                     gyro_d_roll=d_roll, gyro_d_pitch=d_pitch,
                     gyro_n=self._gyro_n,
@@ -477,6 +493,49 @@ class GpsInputSender:
         self.sent += 1
         if not (ign & self.IGN_VEL_HORIZ):
             self.sent_with_vel += 1
+
+
+# --------------------------------------------------------------------------- #
+class AmslRef:
+    """The ground's AMSL altitude, for the one field GPS_INPUT cannot fake.
+
+    The first attempt at this read GLOBAL_POSITION_INT.alt and sent it straight
+    back as the GPS2 altitude. That is a FEEDBACK LOOP: GLOBAL_POSITION_INT is
+    the EKF's altitude, the EKF's origin altitude came from our own injection,
+    so the number we sent was the number we had just been told. Measured on the
+    bench 20 Oct: the real receiver read 300.73 m and GPS2 read 2.43 m and
+    climbing, having started at 0.01 m.
+
+    So the reference comes from somewhere that is not the EKF:
+
+      1. --site-alt, if the pilot knows the elevation and says so.
+      2. the REAL receiver, the first time it has a 3D fix: its AMSL minus the
+         relative altitude at that moment is the ground, and that is a constant.
+
+    and the altitude sent is that reference plus the relative altitude, which
+    is barometer-driven (EK3_SRC1_POSZ is the baro, not GPS) and so is not
+    something we fed in.
+
+    With neither available there is no honest AMSL, and it says so rather than
+    inventing one.
+    """
+
+    def __init__(self, fixed_m=None):
+        self.ref = None if fixed_m is None else float(fixed_m)
+        self.source = None if fixed_m is None else "--site-alt"
+
+    def observe(self, gps1_fix, gps1_alt_m, alt_rel_m) -> None:
+        if self.ref is not None:
+            return
+        if (gps1_fix is not None and gps1_fix >= 3 and gps1_alt_m is not None
+                and alt_rel_m is not None):
+            self.ref = float(gps1_alt_m) - float(alt_rel_m)
+            self.source = f"asli GPS1 3D fix ({self.ref:.1f} m)"
+
+    def amsl(self, alt_rel_m):
+        if self.ref is None or alt_rel_m is None:
+            return None
+        return self.ref + float(alt_rel_m)
 
 
 # --------------------------------------------------------------------------- #
@@ -774,6 +833,11 @@ class Notifier:
                    else "VPS ACCEL SILENT - FLOW ONLY, NO VIO",
                    self.SEV_INFO if a_n > 0 else self.SEV_CRIT)
 
+        dm = est.get("depth_med_m")
+        self.event("depth", dm is not None,
+                   f"VPS STEREO OK {dm:.1f}m" if dm is not None
+                   else "VPS STEREO OFF/OUT OF RANGE", self.SEV_INFO)
+
         # "NO MAP FIX" on its own reads as a failure when the usual cause is
         # simply being too low for the map to mean anything. Log 214 sat at
         # 0.0 m for 1260 s and sent 22 405 doomed submissions; the pilot saw
@@ -872,7 +936,11 @@ class VpsNode:
                 an, ae = accel_to_ne(ax, ay, f["yaw"])
                 self.vel.push_accel(ts, an, ae)
 
-        d, ntrk = self.tracker.step(f["img"])
+        # The stereo pair, which until now was computed on the camera's own
+        # VPU, carried all the way into this dict and then dropped. It is used
+        # to keep the flow on ONE surface - see FlowTracker._depth_gate - and
+        # not as a height, which 9 Oct already tried and reverted.
+        d, ntrk = self.tracker.step(f["img"], depth=f.get("depth"))
         flowed = False
         if d is not None and self.prev_att is not None:
             d = d - attitude_shift_px(self.prev_att, att)
@@ -936,7 +1004,10 @@ class VpsNode:
                     fc_d_roll=fc_dr, fc_d_pitch=fc_dp,
                     gyro_d_roll=f.get("gyro_d_roll"),
                     gyro_d_pitch=f.get("gyro_d_pitch"),
-                    gyro_n=f.get("gyro_n"), accel_n=f.get("accel_n"))
+                    gyro_n=f.get("gyro_n"), accel_n=f.get("accel_n"),
+                    depth_med_m=self.tracker.depth_med_m,
+                    depth_dropped=self.tracker.depth_dropped,
+                    n_dr=self.n_dr)
 
     def stop(self):
         self.worker.stop()
@@ -985,15 +1056,32 @@ def main():
                          "pin the collapse - but the first flight on it is "
                          "still the first flight on it, so this is the way off.")
     ap.set_defaults(send_vel=True)
+    ap.add_argument("--crop-left", type=int, default=None,
+                    help="pixels to cut off the LEFT edge, where the drone's "
+                         "left leg sits in CAM_B's frame. Measured 20 Oct: "
+                         "columns 0-63 are under 60%% of the frame median and "
+                         "the taper ends by 120, so the default is 130. "
+                         "0 disables it. cx moves with the crop.")
+    ap.add_argument("--site-alt", type=float, default=None,
+                    help="ground elevation AMSL in metres. GPS_INPUT needs a "
+                         "real AMSL altitude and the EKF's own is partly our "
+                         "doing - see AmslRef. Without this it is taken from "
+                         "the real receiver's first 3D fix.")
     ap.add_argument("--gps-id", type=int, default=1, help="0 = GPS1, 1 = GPS2")
     a = ap.parse_args()
 
-    if a.send_fc:
-        import subprocess
-        st = subprocess.run(["systemctl", "is-active", "drone-vio"],
-                            capture_output=True, text=True).stdout.strip()
-        if st == "active":
-            sys.exit("drone-vio service chal rahi hai - ye node usse ladega. Pehle band karo.")
+    # One copy, whoever started it. What was here asked systemctl whether a
+    # unit called "drone-vio" was active; no such unit exists - they are
+    # drone-router, drone-vps, drone-rc-switch and drone-watchdog - so it was
+    # always inactive and the guard never fired once. See single_instance for
+    # why a second copy is not harmless: the camera opens exclusively, so with
+    # Restart=always in front of it the loser crash-loops, and every loop is a
+    # hole in the GPS_INPUT stream. A hole is what takes the EKF's position
+    # away and drops the aircraft into ALT_HOLD, which log 214 shows at 8.6 s.
+    #
+    # The fd is kept for the life of the process on purpose: closing it would
+    # release the lock while the node was still flying.
+    _lock_fd = single_instance.require("drone-vps")   # noqa: F841
 
     gps_sender = None
     if a.send_gps:
@@ -1023,7 +1111,7 @@ def main():
             print(f"SCR_USER1/2: {scr_origin[1]:.6f}, {scr_origin[0]:.6f}")
 
     src = (ReplaySource(a.replay, a.every, a.min_alt) if a.replay
-           else LiveSource(a.fc_port, a.fc_baud))
+           else LiveSource(a.fc_port, a.fc_baud, crop_left=a.crop_left))
     cache = MapCache(a.map)
     print(cache.summary())
     print(f"focal {src.focal:.1f} px, fix har {a.fix_period:.1f} s, window +-{a.radius:.0f} m, "
@@ -1086,6 +1174,7 @@ def main():
     # that owns the FC endpoint. With no sender there is nothing to gate, so
     # the notification link will do.
     watcher = SourceWatcher(getattr(gps_sender, "m", None) or _link)
+    amsl_ref = AmslRef(a.site_alt)
 
     _origin_refused = [False]
     errs, t_start, n = [], time.perf_counter(), 0
@@ -1180,7 +1269,13 @@ def main():
                              "" if est["fc_d_pitch"] is None else f"{est['fc_d_pitch']:.4f}",
                              "" if est["gyro_d_roll"] is None else f"{est['gyro_d_roll']:.4f}",
                              "" if est["gyro_d_pitch"] is None else f"{est['gyro_d_pitch']:.4f}",
-                             est["gyro_n"], est["accel_n"]])
+                             est["gyro_n"], est["accel_n"],
+                             "" if est["depth_med_m"] is None
+                             else f"{est['depth_med_m']:.2f}",
+                             est["depth_dropped"], est["n_dr"],
+                             est.get("src") or "",
+                             "" if f.get("rngfnd") is None else f"{f['rngfnd']:.2f}",
+                             "" if f.get("alt_amsl") is None else f"{f['alt_amsl']:.2f}"])
             notifier.tick(est["t"], est, node)
 
             # Gated on the source. GPS_PRIMARY=0 means the pilot asked for the
@@ -1188,10 +1283,17 @@ def main():
             # ignored", stops. Unknown keeps sending; see SourceWatcher for why
             # the two directions are not symmetrical.
             if gps_sender is not None and on_vps:
+                amsl_ref.observe(f.get("gps1_fix"), f.get("gps1_alt"), f["alt"])
+                amsl = amsl_ref.amsl(f["alt"])
+                notifier.event("amsl", amsl_ref.source or False,
+                               f"VPS AMSL {amsl_ref.source}"[:50]
+                               if amsl_ref.source
+                               else "VPS AMSL ANJAAN - --site-alt do",
+                               Notifier.SEV_INFO if amsl_ref.source
+                               else Notifier.SEV_WARN)
                 gps_sender.send(est["lon"], est["lat"],
-                                (est["alt"] if f.get("alt_amsl") is None
-                                 else f["alt_amsl"]), est["sigma"],
-                                est["yaw"], vel=est["vel"])
+                                est["alt"] if amsl is None else amsl,
+                                est["sigma"], est["yaw"], vel=est["vel"])
             if sender is not None:
                 sender.send(est["north"], est["east"], -est["alt"],
                             f["roll"], f["pitch"], f["yaw"])

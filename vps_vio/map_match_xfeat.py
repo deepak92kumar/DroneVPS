@@ -1,6 +1,7 @@
 """Locate a nadir frame on the satellite map with XFeat learned features.
 
-Replaces the gradient-correlation matcher (map_match_ncc) as the flying path.
+Replaced the gradient-correlation matcher as the flying path; that matcher
+was removed on 20 Oct at the pilot's instruction, once this one had taken over.
 The reason for the swap is measured, not aesthetic: NCC correlates appearance,
 so a four-year-old map costs it contrast on every frame, and its cost scales
 with window area times template area. Learned features survive the appearance
@@ -49,7 +50,7 @@ import sys
 import numpy as np
 import cv2
 
-from map_match_ncc import north_up_query
+from map_query import north_up_query
 
 # One model instance per process. Loading is ~100 ms and the worker thread
 # calls locate() repeatedly, so it must not reload per fix.
@@ -163,14 +164,14 @@ def locate(img_grey: np.ndarray, map_window: np.ndarray, geo_window, *,
            window_is_edges: bool = False) -> XFeatResult:
     """Match one frame to a map window and read off lon/lat.
 
-    geo_window maps window pixel -> lon/lat, exactly as the NCC path uses it.
+    geo_window maps window pixel -> lon/lat.
 
-    window_is_edges exists only for interface compatibility with the NCC
-    matcher, whose MapCache hands over a pre-computed edge image. XFeat needs
-    intensity, so an edge window is REFUSED rather than silently matched
-    against - a gradient-magnitude image has none of the texture the
-    descriptors were trained on, and matching it would produce confident
-    nonsense. The cache must be asked for a grey window on this path.
+    window_is_edges is kept as a REFUSAL, not as an option. MapCache can still
+    hand over a pre-computed edge window, and XFeat needs intensity: a
+    gradient-magnitude image has none of the texture the descriptors were
+    trained on, so matching one would produce confident nonsense. The cache has
+    to be asked for a grey window on this path, and asking for the wrong one is
+    an error rather than a silent wrong answer.
     """
     if window_is_edges:
         return XFeatResult(False, reason="XFeat needs an intensity window, got edges")

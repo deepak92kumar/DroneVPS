@@ -19,6 +19,9 @@ ExecStart=/usr/bin/python3 /data/DRONE/mavlink_router.py \
     --port /dev/ttyTHS1 --baud 921600 --listen 127.0.0.1:14650
 Restart=always
 RestartSec=2
+# Exit 3 is single_instance's 'another copy holds it'. Looping on that
+# achieves nothing, so systemd stands down instead.
+RestartPreventExitStatus=3
 # /run/drone, owned by abc, created at start and removed on stop. The liveness
 # file and the watchdog state live here rather than /tmp.
 RuntimeDirectory=drone

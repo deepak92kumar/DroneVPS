@@ -108,9 +108,17 @@ class Telemetry:
     def __init__(self, port: str, baud: int):
         self.port, self.baud = port, baud
         self.lock = threading.Lock()
+        # The TF03 jumps, in both directions, and log 214 shows it on a
+        # stationary aircraft: RFND spread 0.05-0.77 m with a median of 0.41.
+        # cuav_mavlink_bridge had a median of 5 on its own copy; this path had
+        # nothing at all. See lidar_filter.LidarFilter for why a median alone
+        # is not enough.
+        from lidar_filter import LidarFilter
+        self.lidar = LidarFilter()
         self.state = dict(lat=None, lon=None, alt_rel=None, alt_amsl=None,
                           roll=None, pitch=None, yaw=None, fix=None, sats=None,
-                          hdg=None, rngfnd=None, armed=False, t=0.0,
+                          hdg=None, rngfnd=None, rngfnd_raw=None, armed=False, t=0.0,
+                          gps1_alt=None,
                           # The FC's own accelerometer vibration, and what the
                           # motors were doing when it was measured. One without
                           # the other says nothing: vibration at idle and
@@ -208,7 +216,13 @@ class Telemetry:
                                       batt_pct=(msg.battery_remaining
                                                 if msg.battery_remaining != -1 else None))
                 elif t == "GPS_RAW_INT":
-                    self.state.update(fix=msg.fix_type, sats=msg.satellites_visible)
+                    # alt as well as the fix. It is the only AMSL on this
+                    # aircraft that does not come back out of the EKF, which
+                    # matters because the EKF's altitude is partly OUR doing -
+                    # see AmslRef in live_node.
+                    self.state.update(fix=msg.fix_type, sats=msg.satellites_visible,
+                                      gps1_alt=(msg.alt / 1000.0
+                                                if msg.fix_type >= 3 else None))
                 elif t == "VIBRATION":
                     # ArduPilot's own VIBE, m/s/s. Under 30 is workable, under
                     # 15 is good, and any rise in the clip counters means an
@@ -240,9 +254,14 @@ class Telemetry:
                     # reading went from 4.35 m to 0.26 m. SCALING 72.61 was
                     # already right - lifting the aircraft moved the reading
                     # 1:1 - and matches the 150 ohm / 4-20 mA design of 75 m/V.
-                    self.state["rngfnd"] = float(msg.distance)
+                    now = time.time()
+                    self.state["rngfnd_raw"] = float(msg.distance)
+                    self.state["rngfnd"] = self.lidar.push(now, msg.distance)
                 elif t == "DISTANCE_SENSOR":
-                    self.state["rngfnd"] = msg.current_distance / 100.0
+                    now = time.time()
+                    raw = msg.current_distance / 100.0
+                    self.state["rngfnd_raw"] = raw
+                    self.state["rngfnd"] = self.lidar.push(now, raw)
                 elif t == "ATTITUDE":
                     self.state.update(roll=np.degrees(msg.roll),
                                       pitch=np.degrees(msg.pitch),
