@@ -194,11 +194,12 @@ class RcGpsSwitch:
                 continue
 
             name = "VPS (GPS2)" if want else "asli GPS (GPS1)"
-            if self.armed and not self.allow_armed:
-                self.say(f"GPS switch mana: armed hai ({name})")
-                self.refusals += 1
-                self.applied = want      # do not nag on every sample
-                continue
+            # The armed refusal that used to sit here is gone, at the pilot's
+            # instruction. It was half of what stranded the aircraft on 20 Oct:
+            # the VPS node stopped injecting on arm, and then this refused to
+            # let the pilot switch back to the receiver, so there was no way
+            # out from the transmitter. The switch is the pilot's control and
+            # it answers while flying.
             if want == 1 and self.require_fix and self.gps2_fix < 3:
                 self.say(f"VPS switch MANA: GPS2 fix={self.gps2_fix} sats={self.gps2_sats}")
                 self.refusals += 1

@@ -246,10 +246,12 @@ class FcSender:
         self.mavutil = mavutil
         self.m = mavutil.mavlink_connection(port, baud=baud, source_system=1,
                                             source_component=197)
+        _announce(self.m)
         if self.m.wait_heartbeat(timeout=20) is None:
             raise RuntimeError("FC se heartbeat nahi aaya")
-        if bool(self.m.motors_armed()):
-            raise RuntimeError("*** ARMED - bench test disarmed hi hoga ***")
+        # No armed check, at the pilot's instruction - same reason as
+        # GpsInputSender: refusing to start while armed means the node can
+        # never be brought back after an arm.
         self.t0 = time.monotonic()
         self.sent = 0
 
@@ -309,8 +311,9 @@ class GpsInputSender:
         _announce(self.m)
         if self.m.wait_heartbeat(timeout=20) is None:
             raise RuntimeError("FC se heartbeat nahi aaya")
-        if bool(self.m.motors_armed()):
-            raise RuntimeError("*** ARMED - bench test disarmed hi hoga ***")
+        # No armed check here either, at the pilot's instruction. Refusing to
+        # START while armed would mean the node could never be brought back up
+        # after an arm - which is precisely when the aircraft needs it.
         self.gps_id = int(gps_id)
         self.sats = int(sats)
         # OFF by default, and it stays off until someone passes it. Velocity is
@@ -903,16 +906,10 @@ def main():
             notifier.tick(est["t"], est, node)
 
             if gps_sender is not None:
-                if gps_sender.armed():
-                    print("\n*** AIRCRAFT ARMED - transmission band ***")
-                    break
                 gps_sender.send(est["lon"], est["lat"],
                                 (f.get("alt_amsl") or est["alt"]), est["sigma"],
                                 est["yaw"], vel=est["vel"])
             if sender is not None:
-                if sender.armed():
-                    print("\n*** AIRCRAFT ARMED - transmission band ***")
-                    break
                 sender.send(est["north"], est["east"], -est["alt"],
                             f["roll"], f["pitch"], f["yaw"])
             if a.liveness:
