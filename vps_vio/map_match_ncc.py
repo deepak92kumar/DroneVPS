@@ -32,6 +32,7 @@ class NccResult:
 
 def north_up_query(img_grey: np.ndarray, *, altitude_m: float, focal_px: float,
                    yaw_deg: float, map_gsd_m: float,
+                   map_gsd_x_m: float | None = None,
                    keep: float = 0.95) -> np.ndarray:
     """Rescale to the map's GSD and rotate north-up, then keep the centre.
 
@@ -46,6 +47,30 @@ def north_up_query(img_grey: np.ndarray, *, altitude_m: float, focal_px: float,
     h, w = q.shape
     M = cv2.getRotationMatrix2D((w / 2, h / 2), -yaw_deg, 1.0)
     q = cv2.warpAffine(q, M, (w, h))
+
+    # The map's pixels are not square IN METRES, and that is a 16.5% error here.
+    #
+    # A geographic (EPSG:4326) GeoTIFF has equal pixel size in DEGREES, but a
+    # degree of longitude is cos(latitude) of a degree of latitude - 0.858 at
+    # 30.9 N. So this map is 0.5092 m/px north-south and 0.4369 m/px east-west,
+    # while MapCache.gsd carries only the north-south figure and the scale
+    # above applied it to both axes.
+    #
+    # 1/cos(30.89) = 1.1653, which is the 16.5% the 12 Oct report found behind
+    # XFEAT_ANISO and "16 m that has never been explained". Over a 178 m
+    # footprint at 110 m, a 16.5% east-west scale error is about 15 m.
+    #
+    # The correction has to come AFTER the rotation, not before: the anisotropy
+    # lives in the map's axes, not the camera's, so the frame has to be north-up
+    # before x means east. With an isotropic map the order does not matter and
+    # this is skipped entirely, which is why it went unnoticed.
+    if map_gsd_x_m and abs(map_gsd_x_m - map_gsd_m) > 1e-9:
+        # Map pixels are SMALLER in metres east-west, so the same ground
+        # distance spans MORE of them: stretch x.
+        q = cv2.resize(q, None, fx=map_gsd_m / float(map_gsd_x_m), fy=1.0,
+                       interpolation=cv2.INTER_LINEAR)
+        h, w = q.shape
+
     s = int(min(h, w) * keep) // 2
     return q[h // 2 - s:h // 2 + s, w // 2 - s:w // 2 + s]
 
@@ -105,6 +130,7 @@ def _edges(img: np.ndarray) -> np.ndarray:
 
 def locate(img_grey: np.ndarray, map_window: np.ndarray, geo_window, *,
            altitude_m: float, focal_px: float, yaw_deg: float, map_gsd_m: float,
+           map_gsd_x_m: float | None = None,
            yaw_search_deg=(-6.0, -3.0, 0.0, 3.0, 6.0),
            min_score: float = 0.05, min_margin: float = 0.01,
            window_is_edges: bool = False, pyramid: bool = True) -> NccResult:
@@ -126,7 +152,8 @@ def locate(img_grey: np.ndarray, map_window: np.ndarray, geo_window, *,
     peak, loc, q = -9.0, None, None
     for d in yaw_search_deg:
         t = north_up_query(img_grey, altitude_m=altitude_m, focal_px=focal_px,
-                           yaw_deg=yaw_deg - d, map_gsd_m=map_gsd_m)
+                           yaw_deg=yaw_deg - d, map_gsd_m=map_gsd_m,
+                           map_gsd_x_m=map_gsd_x_m)
         if t.shape[0] < 16 or W.shape[0] <= t.shape[0] or W.shape[1] <= t.shape[1]:
             continue
         pk, lc, rr = _correlate(W, _edges(t), pyramid=pyramid)

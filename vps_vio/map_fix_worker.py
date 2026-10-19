@@ -159,6 +159,7 @@ class MapFixWorker:
                     res = self._locate(
                         img, win, wg, altitude_m=alt, focal_px=self.focal_px,
                         yaw_deg=yaw, map_gsd_m=self.cache.gsd,
+                        map_gsd_x_m=getattr(self.cache, "gsd_x", None),
                         min_score=self.min_score, min_margin=self.min_margin,
                         window_is_edges=(self._window_kind == "edges"))
             except Exception:

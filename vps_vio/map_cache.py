@@ -11,6 +11,8 @@ Both go away by paying once at startup: the whole map as one greyscale array
 then a numpy slice. No GDAL, no CLAHE, no Sobel in the flight loop.
 """
 from __future__ import annotations
+import math
+
 import numpy as np
 import cv2
 
@@ -32,7 +34,14 @@ class MapCache:
         gt = ds.GetGeoTransform()
         self.gt = gt
         self.geo = GeoRef.from_gdal(gt)
+        # gsd is the NORTH-SOUTH figure and stays the primary one, because
+        # everything already written uses it. gsd_x is the east-west figure,
+        # which on a geographic raster is smaller by cos(latitude) - 16.5% at
+        # 30.9 N. See north_up_query for what ignoring that cost.
         self.gsd = abs(gt[5]) * 111_320.0
+        lat_c = gt[3] + (ds.RasterYSize / 2) * gt[5]
+        self.gsd_x = abs(gt[1]) * 111_320.0 * math.cos(math.radians(lat_c))
+        self.lat_centre = lat_c
         self.h, self.w = self.grey.shape
 
     def window(self, lon: float, lat: float, radius_m: float,
@@ -66,6 +75,7 @@ class MapCache:
                 margin_px <= r < self.h - margin_px)
 
     def summary(self) -> str:
-        return (f"map {self.w}x{self.h} @ {self.gsd:.3f} m/px "
-                f"({self.w*self.gsd/1000:.2f} x {self.h*self.gsd/1000:.2f} km), "
+        return (f"map {self.w}x{self.h} @ {self.gsd:.3f} m/px N-S, "
+                f"{self.gsd_x:.3f} E-W "
+                f"({self.w*self.gsd_x/1000:.2f} x {self.h*self.gsd/1000:.2f} km), "
                 f"{self.grey.nbytes/1e6:.0f} MB grey + {self.edges.nbytes/1e6:.0f} MB edges")

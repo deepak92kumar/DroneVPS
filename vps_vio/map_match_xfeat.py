@@ -158,7 +158,7 @@ def _translation(src: np.ndarray, dst: np.ndarray, tol_px: float):
 
 def locate(img_grey: np.ndarray, map_window: np.ndarray, geo_window, *,
            altitude_m: float, focal_px: float, yaw_deg: float, map_gsd_m: float,
-           min_inliers: int = 12, min_score: float = 0.25,
+           map_gsd_x_m: float | None = None, min_inliers: int = 12, min_score: float = 0.25,
            min_margin: float = 0.20, tol_px: float = 4.0,
            window_is_edges: bool = False) -> XFeatResult:
     """Match one frame to a map window and read off lon/lat.
@@ -186,7 +186,8 @@ def locate(img_grey: np.ndarray, map_window: np.ndarray, geo_window, *,
     # path uses, so the two matchers see the identical query and can be scored
     # against each other on the same recording.
     q = north_up_query(img_grey, altitude_m=altitude_m, focal_px=focal_px,
-                       yaw_deg=yaw_deg, map_gsd_m=map_gsd_m)
+                       yaw_deg=yaw_deg, map_gsd_m=map_gsd_m,
+                       map_gsd_x_m=map_gsd_x_m)
     if min(q.shape[:2]) < 32:
         return XFeatResult(False, reason="query too small after rescaling")
 
