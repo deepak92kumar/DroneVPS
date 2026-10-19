@@ -82,7 +82,7 @@ class ReplaySource:
 class LiveSource:
     """OAK-D mono plus read-only FC telemetry."""
 
-    def __init__(self, fc_port="/dev/ttyTHS1", fc_baud=115200, *,
+    def __init__(self, fc_port="/dev/ttyTHS1", fc_baud=921600, *,
                  fps: int | None = None, stereo_depth: bool | None = None):
         import depthai as dai
         from record_flight import Telemetry
@@ -95,6 +95,10 @@ class LiveSource:
         cfg = VpsConfig()
         fps = cfg.mono_fps if fps is None else int(fps)
         stereo_depth = cfg.stereo_depth if stereo_depth is None else bool(stereo_depth)
+        # 921600, not 115200. TELEM2 flies at 921600 - SERIAL2_BAUD reads 921
+        # on the FC. At the wrong baud the link produces nothing, alt and yaw
+        # stay None, and VpsNode.step returns None on every frame: the node
+        # runs, finds its origin, and silently never estimates anything.
         self.tel = Telemetry(fc_port, fc_baud).start()
 
         p = dai.Pipeline()
@@ -114,6 +118,19 @@ class LiveSource:
                 xo = p.create(dai.node.XLinkOut)
                 xo.setStreamName(name)
                 m.out.link(xo.input)
+
+        # The camera's own gyro. 28 Sep moved derotation onto it because flow
+        # error DOUBLES when the aircraft tilts - 0.81 m/step under 0.5 deg of
+        # attitude change against 1.75 m over 1.5 deg - and the FC's attitude
+        # arrives over MAVLink at a few Hz, interpolated and late. The gyro is
+        # on the same device as the frames.
+        imu = p.create(dai.node.IMU)
+        imu.enableIMUSensor(dai.IMUSensor.GYROSCOPE_CALIBRATED, 100)
+        imu.setBatchReportThreshold(1)
+        imu.setMaxBatchReports(20)
+        xg = p.create(dai.node.XLinkOut)
+        xg.setStreamName("imu")
+        imu.out.link(xg.input)
 
         if stereo_depth:
             # Depth is computed on the OAK's Myriad X VPU, so this costs the
@@ -153,6 +170,15 @@ class LiveSource:
         # dropped rather than delaying the mono frame the flow loop runs on.
         self.q_depth = (self.dev.getOutputQueue("depth", 2, False)
                         if stereo_depth else None)
+        self.q_imu = self.dev.getOutputQueue("imu", 50, False)
+        # Gyro integrated between frames, in degrees. UNVERIFIED AXIS MAPPING:
+        # which gyro axis is roll and which is pitch, and the sign of each, has
+        # not been measured on this airframe. Both this and the FC's attitude
+        # delta are logged every frame so the mapping can be settled from data
+        # before anything depends on it. Derotation still uses the FC.
+        self._gyro_roll = self._gyro_pitch = 0.0
+        self._gyro_n = 0
+        self._t_gyro = None
         self.t0 = time.monotonic()
 
     def read(self):
@@ -160,6 +186,25 @@ class LiveSource:
         # tryGet, never get: the mono frame is what the flow loop is waiting on,
         # and depth is an aid to it. Missing depth means this frame has none,
         # not that the loop waits for it.
+        # Integrate the gyro over the interval this frame covers.
+        d_roll = d_pitch = 0.0
+        pk = self.q_imu.tryGet()
+        while pk is not None:
+            for packet in pk.packets:
+                g = getattr(packet, "gyroscope", None)
+                if g is None:
+                    continue
+                ts = g.getTimestampDevice().total_seconds()
+                if self._t_gyro is not None:
+                    dt = ts - self._t_gyro
+                    if 0.0 < dt < 0.1:
+                        # x->roll, y->pitch is a GUESS. See __init__.
+                        d_roll += np.degrees(g.x) * dt
+                        d_pitch += np.degrees(g.y) * dt
+                        self._gyro_n += 1
+                self._t_gyro = ts
+            pk = self.q_imu.tryGet()
+
         depth = None
         if self.q_depth is not None:
             d = self.q_depth.tryGet()
@@ -169,12 +214,16 @@ class LiveSource:
         if s.get("alt_rel") is None or s.get("yaw") is None:
             return dict(img=fr.getCvFrame(), alt=None, yaw=None, roll=None,
                         pitch=None, gps=None, depth=depth,
+                        gyro_d_roll=d_roll, gyro_d_pitch=d_pitch,
+                        gyro_n=self._gyro_n,
                         t=time.monotonic() - self.t0)
         gps = None
         if s.get("lat") not in (None, 0.0):
             gps = (s["lon"], s["lat"])
         return dict(img=fr.getCvFrame(), alt=s["alt_rel"], yaw=s["yaw"],
                     roll=s["roll"], pitch=s["pitch"], gps=gps, depth=depth,
+                    gyro_d_roll=d_roll, gyro_d_pitch=d_pitch,
+                    gyro_n=self._gyro_n,
                     t=time.monotonic() - self.t0, armed=bool(s.get("armed")))
 
 
@@ -423,6 +472,16 @@ class VpsNode:
         if f["alt"] is None or f["yaw"] is None or self.origin is None:
             return None
         att = (f["roll"], f["pitch"], f["yaw"])
+        # What the FC says the tilt changed by, for comparison against what the
+        # camera's own gyro integrated over the same interval. Derotation uses
+        # the FC; this pair is logged so the gyro's axis mapping and sign can be
+        # settled from a recording instead of guessed.
+        def _wrap(a):
+            return (a + 180.0) % 360.0 - 180.0
+        fc_dr = fc_dp = None
+        if self.prev_att is not None:
+            fc_dr = _wrap(att[0] - self.prev_att[0])
+            fc_dp = _wrap(att[1] - self.prev_att[1])
         d, ntrk = self.tracker.step(f["img"])
         if d is not None and self.prev_att is not None:
             d = d - attitude_shift_px(self.prev_att, att)
@@ -459,7 +518,11 @@ class VpsNode:
         return dict(north=float(self.fuser.pos[0]), east=float(self.fuser.pos[1]),
                     lon=lon, lat=lat, sigma=self.fuser.sigma_m, tracks=ntrk,
                     fix_used=fix_used, alt=f["alt"], yaw=f["yaw"], t=f["t"],
-                    vel=self.vel.value(f["t"], f["alt"]))
+                    vel=self.vel.value(f["t"], f["alt"]),
+                    fc_d_roll=fc_dr, fc_d_pitch=fc_dp,
+                    gyro_d_roll=f.get("gyro_d_roll"),
+                    gyro_d_pitch=f.get("gyro_d_pitch"),
+                    gyro_n=f.get("gyro_n"))
 
     def stop(self):
         self.worker.stop()
@@ -478,8 +541,10 @@ def main():
     ap.add_argument("--corners", type=int, default=300)
     ap.add_argument("--origin", help="lon,lat - GPS-denied start")
     ap.add_argument("--fc-port", default="/dev/ttyTHS1",
-                    help="FC endpoint for reading SCR_USER1/2: a device, or "
-                         "udpout:127.0.0.1:14650 through the router")
+                    help="FC endpoint: a device, or udpout:127.0.0.1:14650 "
+                         "through the router")
+    ap.add_argument("--fc-baud", type=int, default=921600,
+                    help="TELEM2 flies at 921600. Ignored for a udp endpoint.")
     ap.add_argument("--no-scr-origin", action="store_true",
                     help="do not take the origin from SCR_USER1/2")
     ap.add_argument("--out", help="estimate log CSV")
@@ -529,7 +594,8 @@ def main():
         else:
             print(f"SCR_USER1/2: {scr_origin[1]:.6f}, {scr_origin[0]:.6f}")
 
-    src = ReplaySource(a.replay, a.every, a.min_alt) if a.replay else LiveSource()
+    src = (ReplaySource(a.replay, a.every, a.min_alt) if a.replay
+           else LiveSource(a.fc_port, a.fc_baud))
     cache = MapCache(a.map)
     print(cache.summary())
     print(f"focal {src.focal:.1f} px, fix har {a.fix_period:.1f} s, window +-{a.radius:.0f} m, "
@@ -554,7 +620,13 @@ def main():
                      "vel_sent_vn", "vel_sent_ve", "vel_deadbanded",
                      "vel_deadband", "vel_age_s", "vel_flow_updates",
                      "vel_bias_n", "vel_bias_e", "vel_bias_frozen",
-                     "vel_reason"])
+                     "vel_reason",
+                     # Derotation: what the FC said the tilt did, and what the
+                     # camera's own gyro integrated over the same interval.
+                     # Logged side by side because the gyro's axis mapping and
+                     # sign are a GUESS until a recording settles them.
+                     "fc_d_roll", "fc_d_pitch",
+                     "gyro_d_roll", "gyro_d_pitch", "gyro_n"])
 
     errs, t_start, n = [], time.perf_counter(), 0
     try:
@@ -616,7 +688,12 @@ def main():
                              int(v.deadbanded), f"{v.deadband_mps:.3f}",
                              f"{v.age_s:.3f}", v.flow_updates,
                              f"{v.bias_n:.5f}", f"{v.bias_e:.5f}",
-                             int(v.bias_frozen), v.reason])
+                             int(v.bias_frozen), v.reason,
+                             "" if est["fc_d_roll"] is None else f"{est['fc_d_roll']:.4f}",
+                             "" if est["fc_d_pitch"] is None else f"{est['fc_d_pitch']:.4f}",
+                             "" if est["gyro_d_roll"] is None else f"{est['gyro_d_roll']:.4f}",
+                             "" if est["gyro_d_pitch"] is None else f"{est['gyro_d_pitch']:.4f}",
+                             est["gyro_n"]])
             if gps_sender is not None:
                 if gps_sender.armed():
                     print("\n*** AIRCRAFT ARMED - transmission band ***")
