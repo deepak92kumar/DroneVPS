@@ -11,13 +11,26 @@ So the node writes a liveness file every loop and this checks its age.
 TWO THINGS ARE DELIBERATE AND BOTH ARE ARGUABLE - say so rather than bury them.
 
 1. By default it does NOT restart while the aircraft is armed.
-   A stuck node in flight means GPS_INPUT stops arriving, and ArduPilot then
-   marks GPS2 unhealthy and GPS_AUTO_SWITCH moves the aircraft onto the real
-   receiver by itself - the FC has its own fallback. A restart in flight has no
-   such grace: it guarantees a gap in the position source, and the same report
-   notes "depthai can abort during rapid restart cycling", so the restart
-   itself can fail and leave nothing. On the ground none of that applies.
-   --restart-when-armed overrides this if you disagree; it is a real choice.
+
+   CORRECTION, read live from the FC on 19 Oct: this default was first written
+   on the belief that ArduPilot would fall back to the real receiver by itself,
+   because GpsInputSender's docstring says GPS_AUTO_SWITCH is "already set to
+   use the best". It is not. The FC reports GPS_AUTO_SWITCH = 0, which is
+   disabled - the primary GPS only, no automatic fallback. That matches the
+   28 Sep design note "never falls back to GPS1 automatically - the pilot
+   decides", and the channel 11 switch is what decides.
+
+   So there is NO free fallback, and the honest position is that neither choice
+   is safe on its own. Not restarting leaves the aircraft on a source that has
+   stopped updating until the pilot flips channel 11. Restarting guarantees a
+   gap, takes as long as depthai needs to come up, and "depthai can abort
+   during rapid restart cycling" says the restart itself may fail and leave
+   nothing at all.
+
+   The default stays OFF because a watchdog should not take an action whose
+   outcome it cannot verify while something is flying, and because the pilot
+   has a switch and this does not. But this is the pilot's call, not a settled
+   matter: --restart-when-armed exists for the other decision.
 
 2. Restarts are rate limited and capped.
    Cycling a service that cannot start is how the depthai abort was reached.

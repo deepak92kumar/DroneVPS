@@ -230,10 +230,16 @@ class GpsInputSender:
 
     It is still the right path here. Nothing about the aircraft's configuration
     has to change - no EK3 source switching, Loiter, Auto and RTL behave exactly
-    as they do today, missions stay in latitude and longitude, and with
-    GPS_AUTO_SWITCH already set to "use the best" the aircraft moves onto this
-    source by itself the moment the real GPS loses its fix. Fifty-four flights
-    of experience are on the GPS path; this keeps them.
+    as they do today, and missions stay in latitude and longitude. Fifty-four
+    flights of experience are on the GPS path; this keeps them.
+
+    This docstring used to claim that "with GPS_AUTO_SWITCH already set to use
+    the best the aircraft moves onto this source by itself the moment the real
+    GPS loses its fix". That is NOT TRUE on this aircraft: read live on 19 Oct,
+    GPS_AUTO_SWITCH = 0, which is disabled - the primary receiver only. Nothing
+    switches by itself. The channel 11 RC switch is what selects the source,
+    which is the 28 Sep design on purpose: "never falls back to GPS1
+    automatically - the pilot decides".
 
     What makes the trust defensible is that horiz_accuracy carries the fuser's
     own sigma. When the estimate is drifting the flight controller is told so,
@@ -326,6 +332,62 @@ class GpsInputSender:
 
 
 # --------------------------------------------------------------------------- #
+def read_scr_user(endpoint: str, baud: int = 921600, timeout_s: float = 8.0):
+    """The take-off point the pilot typed on the RC, read off the FC.
+
+    SCR_USER1 is latitude, SCR_USER2 is longitude, in decimal degrees. The
+    13 Oct report records why this has to win over the live receiver: the pilot
+    typed coordinates for one site, drove to a second, retyped nothing, and the
+    aircraft picked up the NEW location by itself - because the receiver was
+    winning whenever it had a fix, so the typed point only ever reached the
+    flight controller's home. On the VPS the typed point must win.
+
+    Returns (lon, lat) or None. The validation mirrors flight_daemon's
+    pick_origin: 0, missing or out-of-range falls through rather than placing
+    the origin in the Gulf of Guinea.
+
+    Called BEFORE the camera source opens the serial port, so this works on a
+    direct device as well as on the router's UDP endpoint.
+    """
+    try:
+        from pymavlink import mavutil
+    except Exception:
+        return None
+    m = None
+    try:
+        m = mavutil.mavlink_connection(endpoint, baud=baud, source_system=255,
+                                       source_component=194)
+        if m.wait_heartbeat(timeout=timeout_s) is None:
+            return None
+        want = {"SCR_USER1": None, "SCR_USER2": None}
+        for name in want:
+            m.mav.param_request_read_send(m.target_system, m.target_component,
+                                          name.encode(), -1)
+        t0 = time.time()
+        while time.time() - t0 < timeout_s and any(v is None for v in want.values()):
+            msg = m.recv_match(type="PARAM_VALUE", blocking=True, timeout=1.0)
+            if msg is not None and msg.param_id in want:
+                want[msg.param_id] = float(msg.param_value)
+        lat, lon = want["SCR_USER1"], want["SCR_USER2"]
+        if lat is None or lon is None:
+            return None
+        if not (np.isfinite(lat) and np.isfinite(lon)):
+            return None
+        if abs(lat) < 1e-6 or abs(lon) < 1e-6:
+            return None
+        if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+            return None
+        return float(lon), float(lat)
+    except Exception:
+        return None
+    finally:
+        if m is not None:
+            try:
+                m.close()
+            except Exception:
+                pass
+
+
 class VpsNode:
     def __init__(self, cache: MapCache, focal_px: float, *,
                  fix_period_s: float = 1.0, radius_m: float = 150.0,
@@ -415,6 +477,11 @@ def main():
     ap.add_argument("--radius", type=float, default=150.0)
     ap.add_argument("--corners", type=int, default=300)
     ap.add_argument("--origin", help="lon,lat - GPS-denied start")
+    ap.add_argument("--fc-port", default="/dev/ttyTHS1",
+                    help="FC endpoint for reading SCR_USER1/2: a device, or "
+                         "udpout:127.0.0.1:14650 through the router")
+    ap.add_argument("--no-scr-origin", action="store_true",
+                    help="do not take the origin from SCR_USER1/2")
     ap.add_argument("--out", help="estimate log CSV")
     ap.add_argument("--send-fc", action="store_true",
                     help="transmit VISION_POSITION_ESTIMATE (disarmed only)")
@@ -452,6 +519,16 @@ def main():
         print(f"FC SENDER ON - disarmed confirmed. VISION_POSITION_ESTIMATE jayega.\n"
               f"   (EK3 sources ko haath nahi lagaya - FC padhega par istemal nahi karega)")
 
+    # Read the typed take-off point BEFORE the camera source opens the serial
+    # port, so this works whether --fc-port is a device or the router's UDP.
+    scr_origin = None
+    if a.live and not a.no_scr_origin and not a.origin:
+        scr_origin = read_scr_user(a.fc_port)
+        if scr_origin is None:
+            print("SCR_USER1/2: not readable or not set - will fall back to GPS")
+        else:
+            print(f"SCR_USER1/2: {scr_origin[1]:.6f}, {scr_origin[0]:.6f}")
+
     src = ReplaySource(a.replay, a.every, a.min_alt) if a.replay else LiveSource()
     cache = MapCache(a.map)
     print(cache.summary())
@@ -486,14 +563,35 @@ def main():
             if f is None:
                 break
             if node.origin is None:
+                # Precedence, and the order is the 13 Oct fix: an explicitly
+                # passed origin, then the point the PILOT TYPED on the RC, and
+                # only then the live receiver. It used to be the receiver that
+                # won whenever it had a fix, which is how the aircraft picked
+                # up a stale site by itself after the pilot drove to a new one.
+                #
+                # Every start says which of the three it was and whether that
+                # point is inside the loaded sheet, because a take-off point
+                # outside it means no map fixes for the whole flight - the
+                # first item on the 13 Oct list of things to confirm.
                 if a.origin:
                     lo, la = (float(x) for x in a.origin.split(","))
                     node.set_origin(lo, la)
+                    why = "--origin"
+                elif scr_origin is not None:
+                    node.set_origin(*scr_origin)
+                    why = "SCR_USER1/2 (typed on the RC)"
                 elif f["gps"]:
                     node.set_origin(*f["gps"])
-                    print(f"origin GPS se: {f['gps'][1]:.6f}, {f['gps'][0]:.6f}")
+                    why = "the live receiver"
                 else:
                     continue
+                olon, olat = node.origin
+                covered = cache.covers(olon, olat)
+                print(f"origin from {why}: {olat:.6f}, {olon:.6f}")
+                print(f"  sheet covers this point: "
+                      f"{'YES' if covered else 'NO - there will be NO map fixes'}")
+                if not covered:
+                    print(f"  loaded sheet: {a.map}")
             est = node.step(f)
             if est is None:
                 continue
