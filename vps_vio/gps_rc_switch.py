@@ -64,6 +64,14 @@ class RcGpsSwitch:
         self.m = mavutil.mavlink_connection(port or PORT, baud=BAUD,
                                             source_system=1,
                                             source_component=221)
+        # Announce before waiting. Through the router a client that has not
+        # spoken is not registered, so the heartbeat it is waiting for can
+        # never reach it - the router learns an address from a packet, and
+        # silence carries no address.
+        try:
+            self.m.mav.heartbeat_send(6, 8, 0, 0, 0)
+        except Exception:
+            pass
         if self.m.wait_heartbeat(timeout=20) is None:
             sys.exit("FC se heartbeat nahi aaya")
         self.m.mav.request_data_stream_send(self.m.target_system,

@@ -1,0 +1,19 @@
+[Unit]
+Description=Autonomous Drone Navigation Daemon (OAK-D Pro + CUAV X7 Pro)
+After=multi-user.target
+Wants=multi-user.target
+
+[Service]
+Type=simple
+User=abc
+WorkingDirectory=/data/DRONE
+ExecStart=/usr/bin/python3 /data/DRONE/flight_daemon.py
+Restart=always
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=5
+StandardOutput=append:/data/DRONE/flight_logs/systemd_stdout.log
+StandardError=append:/data/DRONE/flight_logs/systemd_stderr.log
+
+[Install]
+WantedBy=multi-user.target

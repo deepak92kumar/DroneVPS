@@ -241,7 +241,7 @@ class FcSender:
     nothing about how the aircraft flies.
     """
 
-    def __init__(self, port="/dev/ttyTHS1", baud=115200):
+    def __init__(self, port="/dev/ttyTHS1", baud=921600):
         from pymavlink import mavutil
         self.mavutil = mavutil
         self.m = mavutil.mavlink_connection(port, baud=baud, source_system=1,
@@ -304,6 +304,9 @@ class GpsInputSender:
         self.mavutil = mavutil
         self.m = mavutil.mavlink_connection(port, baud=baud, source_system=1,
                                             source_component=220)
+        # Announce before waiting: through the router a client that has not
+        # spoken is not registered, so its heartbeat can never arrive.
+        _announce(self.m)
         if self.m.wait_heartbeat(timeout=20) is None:
             raise RuntimeError("FC se heartbeat nahi aaya")
         if bool(self.m.motors_armed()):
@@ -412,6 +415,21 @@ def choose_origin(cli_origin, scr_origin, gps_primary, gps_fix):
     return None, "GPS_PRIMARY could not be read"
 
 
+def _announce(link) -> None:
+    """Say hello so a UDP router knows where to send our replies.
+
+    On a serial device this is harmless. Through the router it is REQUIRED:
+    the router learns a client's address from the first packet it receives, so
+    a client that only listens is never registered and waits for a heartbeat
+    that can never arrive. That is inherent to UDP, not a router bug - but a
+    helper that only reads still has to announce itself.
+    """
+    try:
+        link.mav.heartbeat_send(6, 8, 0, 0, 0)   # MAV_TYPE_GCS, INVALID
+    except Exception:
+        pass
+
+
 def read_gps_primary(endpoint: str, baud: int = 921600, timeout_s: float = 8.0):
     """Which source the aircraft is flying on: 0 = real GPS, 1 = the VPS.
 
@@ -428,6 +446,7 @@ def read_gps_primary(endpoint: str, baud: int = 921600, timeout_s: float = 8.0):
     try:
         m = mavutil.mavlink_connection(endpoint, baud=baud, source_system=255,
                                        source_component=223)
+        _announce(m)
         if m.wait_heartbeat(timeout=timeout_s) is None:
             return None
         m.mav.param_request_read_send(m.target_system, m.target_component,
@@ -473,6 +492,7 @@ def read_scr_user(endpoint: str, baud: int = 921600, timeout_s: float = 8.0):
     try:
         m = mavutil.mavlink_connection(endpoint, baud=baud, source_system=255,
                                        source_component=194)
+        _announce(m)
         if m.wait_heartbeat(timeout=timeout_s) is None:
             return None
         want = {"SCR_USER1": None, "SCR_USER2": None}
@@ -719,13 +739,14 @@ def main():
 
     gps_sender = None
     if a.send_gps:
-        gps_sender = GpsInputSender(gps_id=a.gps_id, send_velocity=a.send_vel)
+        gps_sender = GpsInputSender(a.fc_port, a.fc_baud, gps_id=a.gps_id,
+                                    send_velocity=a.send_vel)
         print(f"GPS INPUT SENDER ON - disarmed confirmed. GPS{a.gps_id+1} ban kar jayega.\n"
               f"   (horiz_accuracy = fuser ka apna sigma)")
 
     sender = None
     if a.send_fc:
-        sender = FcSender()
+        sender = FcSender(a.fc_port, a.fc_baud)
         print(f"FC SENDER ON - disarmed confirmed. VISION_POSITION_ESTIMATE jayega.\n"
               f"   (EK3 sources ko haath nahi lagaya - FC padhega par istemal nahi karega)")
 
