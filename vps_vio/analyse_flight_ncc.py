@@ -32,7 +32,7 @@ def focal_of(flight):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("flight")
-    ap.add_argument("--map", default="/home/abc/SSD/DRONE/ap/site_2km.tif")
+    ap.add_argument("--map", default="/data/DRONE/ap/site_2km.tif")
     ap.add_argument("--every", type=int, default=4)
     ap.add_argument("--min-alt", type=float, default=60.0)
     ap.add_argument("--radius", type=float, default=300.0, help="prior search radius, m")

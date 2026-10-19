@@ -39,7 +39,7 @@ To complete this installation, you will need the following components:
 
 Below is the complete, high-resolution electrical schematic showing the pin-to-pin wiring between the **Benewake TF03**, the **150-Ohm sampling resistor**, and the **CUAV X7 Pro Port 09 (ADC)**:
 
-![TF03 Wiring Schematic](/home/abc/Desktop/DRONE/tf03_wiring_diagram.png)
+![TF03 Wiring Schematic](/data/DRONE/tf03_wiring_diagram.png)
 
 ---
 

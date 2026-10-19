@@ -648,7 +648,7 @@ with device:
 
         # 's' -> Save Flight / Round-trip Test Report
         if key in [ord('s'), ord('S')]:
-            log_path = "/home/abc/Desktop/DRONE/flight_test_log.txt"
+            log_path = "/data/DRONE/flight_test_log.txt"
             timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             reloc_str = f"LOCKED ({home_match_count} RANSAC Inliers)" if home_relocalized else "Optical Flow Integration"
             mode_str = f"Desk Mode ({current_altitude_m:.2f}m)" if desk_mode else "Stereo Flight Mode"

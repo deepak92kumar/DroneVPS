@@ -4,7 +4,7 @@
 # Installs and enables drone-vio.service to launch on boot without password
 # =============================================================================
 
-SERVICE_SRC="/home/abc/Desktop/DRONE/drone-vio.service"
+SERVICE_SRC="/data/DRONE/drone-vio.service"
 SERVICE_DEST="/etc/systemd/system/drone-vio.service"
 
 echo "================================================================="
@@ -36,5 +36,5 @@ echo "Commands to manage the service:"
 echo "  * Start now     : sudo systemctl start drone-vio"
 echo "  * Stop service  : sudo systemctl stop drone-vio"
 echo "  * Check status  : sudo systemctl status drone-vio"
-echo "  * View live logs: tail -f /home/abc/Desktop/DRONE/flight_logs/*.log"
+echo "  * View live logs: tail -f /data/DRONE/flight_logs/*.log"
 echo "================================================================="

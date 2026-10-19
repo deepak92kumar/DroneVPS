@@ -31,7 +31,7 @@ def focal_of(d):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("flight")
-    ap.add_argument("--map", default="/home/abc/SSD/DRONE/ap/site_2km.tif")
+    ap.add_argument("--map", default="/data/DRONE/ap/site_2km.tif")
     ap.add_argument("--min-alt", type=float, default=60.0)
     ap.add_argument("--fix-every", type=int, default=60, help="frames between map fixes")
     ap.add_argument("--flow-every", type=int, default=1)

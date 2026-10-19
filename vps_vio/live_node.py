@@ -28,7 +28,7 @@ from velocity_bridge import VelocityBridge
 
 M_PER_DEG_LAT = 111_320.0
 # The only map on this machine after the SSD was lost. It was
-# /home/abc/SSD/DRONE/ap/site_2km.tif, which no longer exists.
+# /data/DRONE/ap/site_2km.tif, which no longer exists.
 #
 # BEWARE: this sheet does not cover the point the FC last flew from. It spans
 # 30.88411-30.90332 N, 74.59762-74.63224 E, while SCR_USER1/2 in log
@@ -37,7 +37,7 @@ M_PER_DEG_LAT = 111_320.0
 # site and SCR_USER holds the newer southern one. A take-off point outside the
 # sheet means no map fixes for the whole flight, which that report lists as its
 # first item to confirm before flying. Pass --map explicitly per site.
-DEFAULT_MAP = "/home/abc/Desktop/DRONE/bhh.tif"
+DEFAULT_MAP = "/data/DRONE/bhh.tif"
 
 
 # --------------------------------------------------------------------------- #

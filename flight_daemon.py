@@ -27,14 +27,14 @@ import cv2.aruco as aruco
 import depthai as dai
 
 # Import CUAV MAVLink Client from the same folder
-sys.path.insert(0, "/home/abc/SSD/DRONE")
+sys.path.insert(0, "/data/DRONE")
 from pymavlink import mavutil
 from cuav_mavlink_bridge import CuavMavlinkClient
 from flow_shadow import LongBaselineTracks, JetsonLKWorker, px_to_ned_velocity
 
 # NVMe SSD paths (primary) with eMMC fallback
-_SSD_BASE   = "/home/abc/SSD/DRONE"
-_EMMC_BASE  = "/home/abc/Desktop/DRONE"
+_SSD_BASE   = "/data/DRONE"
+_EMMC_BASE  = "/data/DRONE"
 _BASE       = _SSD_BASE if os.path.ismount("/home/abc/SSD") or os.path.exists(_SSD_BASE) else _EMMC_BASE
 LOG_DIR     = os.path.join(_BASE, "flight_logs")
 IMAGES_DIR  = os.path.join(_BASE, "flight_images")
@@ -1877,7 +1877,7 @@ def main():
                     if (now - _dbg_conn_t) > 5.0:
                         _dbg_conn_t = now
                         import json as _json
-                        with open("/home/abc/SSD/DRONE/.cursor/debug-153c11.log", "a") as _df:
+                        with open("/data/DRONE/.cursor/debug-153c11.log", "a") as _df:
                             _df.write(_json.dumps({"sessionId":"153c11","runId":"post-fix","hypothesisId":"F","location":"flight_daemon.py:cuav_wait","message":"cuav_disconnected","data":{"oak_yaw":round(oak_yaw_deg,2)},"timestamp":int(time.time()*1000)})+"\n")
                 except Exception:
                     pass
@@ -1913,7 +1913,7 @@ def main():
                 if _do_att:
                     _dbg_att_log_t = now
                     import json as _json
-                    with open("/home/abc/SSD/DRONE/.cursor/debug-153c11.log", "a") as _df:
+                    with open("/data/DRONE/.cursor/debug-153c11.log", "a") as _df:
                         _df.write(_json.dumps({"sessionId":"153c11","hypothesisId":"C","location":"flight_daemon.py:attitude","message":"yaw_source","data":{"src":_att_src,"cuav_age_s":round(cuav_att_age,3),"yaw":round(yaw_deg,2),"oak_yaw":round(oak_yaw_deg,2),"yaw_ddeg":None if _yaw_jump is None else round(_yaw_jump,2),"roll":round(roll_deg,2),"pitch":round(pitch_deg,2),"mode":getattr(cuav,"flight_mode",""),"armed":bool(cuav.is_armed),"airborne":bool(is_airborne)},"timestamp":int(time.time()*1000)})+"\n")
                 _dbg_last_yaw = yaw_deg
                 _dbg_last_att_src = _att_src
@@ -2519,7 +2519,7 @@ def main():
                             try:
                                 if frame_count % 10 == 0:
                                     import json as _json
-                                    with open("/home/abc/SSD/DRONE/.cursor/debug-153c11.log", "a") as _df:
+                                    with open("/data/DRONE/.cursor/debug-153c11.log", "a") as _df:
                                         _df.write(_json.dumps({"sessionId":"153c11","runId":"post-fix","hypothesisId":"G","location":"flight_daemon.py:affine","message":"raw_flow","data":{"allow":bool(allow_flow),"armed":bool(cuav.is_armed),"air":bool(is_airborne),"nfeat":int(len(good_new)),"inliers":int(inlier_count),"scale":round(scale,3),"tx":round(_tdx0,3),"ty":round(_tdy0,3),"step":round(step_dist,5),"h":round(optical_height_m,3)},"timestamp":int(time.time()*1000)})+"\n")
                             except Exception:
                                 pass
@@ -2572,7 +2572,7 @@ def main():
                                 try:
                                     if frame_count % 10 == 0:
                                         import json as _json
-                                        with open("/home/abc/SSD/DRONE/.cursor/debug-153c11.log", "a") as _df:
+                                        with open("/data/DRONE/.cursor/debug-153c11.log", "a") as _df:
                                             _df.write(_json.dumps({"sessionId":"153c11","runId":"post-fix","hypothesisId":"A,B,E","location":"flight_daemon.py:flow_ned","message":"flow_to_ned","data":{"dt":round(dt,4),"tx0":round(_tdx0,3),"ty0":round(_tdy0,3),"tsx":round(_tsx,3),"tsy":round(_tsy,3),"droll":round(_droll,5),"dpitch":round(_dpitch,5),"dx_b":round(dx_body,4),"dy_b":round(dy_body,4),"dN":round(eff_delta_north,4),"dE":round(eff_delta_east,4),"yaw":round(yaw_deg,2),"yaw_flow":round(_yaw_flow,2),"h_opt":round(optical_height_m,3),"mpp":round(meter_per_px,6),"imu_sync":bool(imu_bracketed),"tilt_src":_tilt_src,"gdr":None if _gd is None else round(_gd[0],5),"gdp":None if _gd is None else round(_gd[1],5),"nfeat":int(len(good_new)),"inliers":int(inlier_count),"mode":getattr(cuav,"flight_mode",""),"airborne":bool(is_airborne),"armed":bool(cuav.is_armed)},"timestamp":int(time.time()*1000)})+"\n")
                                 except Exception:
                                     pass
@@ -2905,7 +2905,7 @@ def main():
                                 if not tracking_ok:
                                     _dbg_f04_log_t = now
                                 import json as _json
-                                with open("/home/abc/SSD/DRONE/.cursor/debug-153c11.log", "a") as _df:
+                                with open("/data/DRONE/.cursor/debug-153c11.log", "a") as _df:
                                     _df.write(_json.dumps({"sessionId":"153c11","runId":"post-fix","hypothesisId":"D","location":"flight_daemon.py:vio_send","message":"vision_speed","data":{"sent":bool(sent),"ok":bool(tracking_ok),"n":round(pos_north,3),"e":round(pos_east,3),"vn":round(vn,3),"ve":round(ve,3),"vel_cov":vel_cov,"mode":getattr(cuav,"flight_mode",""),"posvar":round(getattr(cuav,"ekf_horiz_var",-1),3),"velvar":round(getattr(cuav,"ekf_vel_var",-1),3),"reset":int(getattr(cuav,"reset_counter",0)),"airborne":bool(is_airborne)},"timestamp":int(time.time()*1000)})+"\n")
                         except Exception:
                             pass
@@ -3130,7 +3130,7 @@ def main():
                     f"=================================================================\n"
                 )
                 try:
-                    with open("/home/abc/SSD/DRONE/latest_flight_summary.txt", "w") as sf:
+                    with open("/data/DRONE/latest_flight_summary.txt", "w") as sf:
                         sf.write(summary_text)
                 except Exception:
                     pass
@@ -3160,7 +3160,7 @@ def main():
     )
     logging.info(final_report)
     try:
-        with open("/home/abc/SSD/DRONE/latest_flight_summary.txt", "w") as sf:
+        with open("/data/DRONE/latest_flight_summary.txt", "w") as sf:
             sf.write(final_report)
     except Exception:
         pass

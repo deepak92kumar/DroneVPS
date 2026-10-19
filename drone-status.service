@@ -6,8 +6,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=abc
-WorkingDirectory=/home/abc/SSD/DRONE
-ExecStart=/usr/bin/python3 /home/abc/SSD/DRONE/ground_status_server.py
+WorkingDirectory=/data/DRONE
+ExecStart=/usr/bin/python3 /data/DRONE/ground_status_server.py
 Restart=always
 RestartSec=2
 

@@ -8,9 +8,9 @@ Requires=drone-router.service
 [Service]
 Type=simple
 User=abc
-WorkingDirectory=/home/abc/Desktop/DRONE/vps_vio
+WorkingDirectory=/data/DRONE/vps_vio
 # Through the router, so no serial contention and no exclusive_fc dance.
-ExecStart=/usr/bin/python3 /home/abc/Desktop/DRONE/vps_vio/gps_rc_switch.py \
+ExecStart=/usr/bin/python3 /data/DRONE/vps_vio/gps_rc_switch.py \
     --port udpout:127.0.0.1:14650 --channel 11
 Restart=always
 RestartSec=3

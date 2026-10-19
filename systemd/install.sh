@@ -38,10 +38,10 @@ install)
     echo
     echo "Installed, nothing started. './install.sh enable' to run on boot."
     echo
-    echo "Before enabling, know that drone-vps.service will NOT start yet:"
-    echo "  live_node.py needs a satellite GeoTIFF and there is none on this"
-    echo "  machine - it was on the lost SSD, and DEFAULT_MAP still points"
-    echo "  at /home/abc/SSD/DRONE/ap/site_2km.tif."
+    echo "Before enabling, check the map: live_node.py needs a GeoTIFF that"
+    echo "  COVERS THE TAKE-OFF POINT. /data/DRONE/bhh.tif spans"
+    echo "  30.88411-30.90332 N, 74.59762-74.63224 E. SCR_USER1/2 on the FC"
+    echo "  must be inside that, or there are no map fixes for the whole flight."
     ;;
 enable)
     sudo systemctl enable "${ENABLE[@]}" || die "enable failed"

@@ -294,7 +294,7 @@ def run_precision_landing(rtsp_url=DEFAULT_RTSP_URL, dry_run=False):
             print("[-] RTSP connection failed. Switching to Interactive Simulation Mode.")
             use_synthetic = True
 
-    sample_pad_path = "/home/abc/Desktop/DRONE/landing_pad_marker0.png"
+    sample_pad_path = "/data/DRONE/landing_pad_marker0.png"
     sample_pad_img = cv2.imread(sample_pad_path) if os.path.exists(sample_pad_path) else None
 
     w_px, h_px = 1280, 720
@@ -396,7 +396,7 @@ def run_precision_landing(rtsp_url=DEFAULT_RTSP_URL, dry_run=False):
             if key == ord('q') or key == 27:
                 break
             elif key == ord('s'):
-                snap_path = f"/home/abc/Desktop/DRONE/c12_aruco_snapshot_{int(time.time())}.jpg"
+                snap_path = f"/data/DRONE/c12_aruco_snapshot_{int(time.time())}.jpg"
                 cv2.imwrite(snap_path, hud_frame)
                 print(f"[+] Snapshot saved: {snap_path}")
 

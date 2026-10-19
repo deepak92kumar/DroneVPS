@@ -13,9 +13,9 @@ User=abc
 # The port is root:dialout. usermod alone does not help a service, which gets
 # its groups fresh at start, so name the group here.
 SupplementaryGroups=dialout
-WorkingDirectory=/home/abc/Desktop/DRONE
+WorkingDirectory=/data/DRONE
 # 921600 is what the FC flies: SERIAL2_BAUD reads 921 in log 00000195.BIN.
-ExecStart=/usr/bin/python3 /home/abc/Desktop/DRONE/mavlink_router.py \
+ExecStart=/usr/bin/python3 /data/DRONE/mavlink_router.py \
     --port /dev/ttyTHS1 --baud 921600 --listen 127.0.0.1:14650
 Restart=always
 RestartSec=2

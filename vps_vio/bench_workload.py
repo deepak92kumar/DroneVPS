@@ -17,7 +17,7 @@ from map_match_ncc import locate
 from map_fix_worker import MapFixWorker
 
 FLIGHT = "/mnt/ssd/DRONE/flights/auto_20260927_181924"
-MAP = "/home/abc/SSD/DRONE/ap/site_2km.tif"
+MAP = "/data/DRONE/ap/site_2km.tif"
 FOCAL = 791.72
 
 

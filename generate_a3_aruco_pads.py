@@ -11,7 +11,7 @@ import cv2.aruco as aruco
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-OUTPUT_DIR = "/home/abc/Desktop/DRONE"
+OUTPUT_DIR = "/data/DRONE"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # A3 Dimensions at 300 DPI: 297 mm x 420 mm

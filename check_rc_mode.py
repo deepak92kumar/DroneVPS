@@ -8,7 +8,7 @@ This tool shows exactly which mode the flight controller is receiving!
 import sys
 import os
 import time
-sys.path.insert(0, '/home/abc/Desktop/DRONE')
+sys.path.insert(0, '/data/DRONE')
 from cuav_mavlink_bridge import CuavMavlinkClient
 
 def main():

@@ -6,14 +6,14 @@ Wants=multi-user.target
 [Service]
 Type=simple
 User=abc
-WorkingDirectory=/home/abc/Desktop/DRONE
-ExecStart=/usr/bin/python3 /home/abc/Desktop/DRONE/flight_daemon.py
+WorkingDirectory=/data/DRONE
+ExecStart=/usr/bin/python3 /data/DRONE/flight_daemon.py
 Restart=always
 RestartSec=3
 KillSignal=SIGTERM
 TimeoutStopSec=5
-StandardOutput=append:/home/abc/Desktop/DRONE/flight_logs/systemd_stdout.log
-StandardError=append:/home/abc/Desktop/DRONE/flight_logs/systemd_stderr.log
+StandardOutput=append:/data/DRONE/flight_logs/systemd_stdout.log
+StandardError=append:/data/DRONE/flight_logs/systemd_stderr.log
 
 [Install]
 WantedBy=multi-user.target

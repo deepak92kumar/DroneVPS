@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from map_db import MapDatabase
 from map_match import match_image, geo_error_m
 
-MAP = "/home/abc/SSD/DRONE/ap/site_2km.tif"
+MAP = "/data/DRONE/ap/site_2km.tif"
 
 
 def read_index(flight: str):

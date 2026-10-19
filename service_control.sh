@@ -48,12 +48,12 @@ while true; do
             sleep 1
             ;;
         4)
-            LATEST_LOG=$(ls -t /home/abc/Desktop/DRONE/flight_logs/flight_*.log 2>/dev/null | head -n 1)
+            LATEST_LOG=$(ls -t /data/DRONE/flight_logs/flight_*.log 2>/dev/null | head -n 1)
             if [ -n "$LATEST_LOG" ]; then
                 echo "[*] Tailing latest log: $LATEST_LOG (Press Ctrl+C to stop)..."
                 tail -n 25 -f "$LATEST_LOG"
             else
-                echo "[-] No log files found in /home/abc/Desktop/DRONE/flight_logs/."
+                echo "[-] No log files found in /data/DRONE/flight_logs/."
                 read -p "Press Enter to continue..."
             fi
             ;;
@@ -64,11 +64,11 @@ while true; do
             read -p "Press Enter to continue..."
             ;;
         6)
-            bash /home/abc/Desktop/DRONE/install_autostart.sh
+            bash /data/DRONE/install_autostart.sh
             read -p "Press Enter to continue..."
             ;;
         7)
-            bash /home/abc/Desktop/DRONE/uninstall_autostart.sh
+            bash /data/DRONE/uninstall_autostart.sh
             read -p "Press Enter to continue..."
             ;;
         8)

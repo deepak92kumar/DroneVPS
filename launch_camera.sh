@@ -1,6 +1,6 @@
 #!/bin/bash
 export DISPLAY="${DISPLAY:-:0}"
-cd /home/abc/Desktop/DRONE
+cd /data/DRONE
 
 # If background autonomous daemon is running, pause it so GUI preview can access the camera
 WAS_RUNNING=0

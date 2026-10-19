@@ -10,7 +10,7 @@ import cv2
 import cv2.aruco as aruco
 import numpy as np
 
-OUTPUT_DIR = "/home/abc/Desktop/DRONE"
+OUTPUT_DIR = "/data/DRONE"
 MARKER_ID = 0
 MARKER_DICT = aruco.DICT_4X4_50
 PAD_SIZE_PX = 1200 # High resolution for sharp printing

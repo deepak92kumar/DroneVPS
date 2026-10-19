@@ -11,7 +11,7 @@ import time
 import glob
 import re
 
-LOG_DIR = "/home/abc/Desktop/DRONE/flight_logs"
+LOG_DIR = "/data/DRONE/flight_logs"
 
 def get_latest_log():
     logs = glob.glob(os.path.join(LOG_DIR, "flight_*.log"))

@@ -24,7 +24,7 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 "vps_vio"))
 
-MAP = "/home/abc/Desktop/DRONE/bhh.tif"
+MAP = "/data/DRONE/bhh.tif"
 if not os.path.exists(MAP):
     print(f"SKIP: {MAP} not present (gitignored, 91 MB)")
     sys.exit(0)

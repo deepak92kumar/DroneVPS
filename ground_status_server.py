@@ -7,7 +7,7 @@ import re
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-LOG_DIR = "/home/abc/SSD/DRONE/flight_logs"
+LOG_DIR = "/data/DRONE/flight_logs"
 PORTS = (8080, 8765)
 
 LINE_RE = re.compile(
