@@ -24,6 +24,7 @@ from flow_odom import FlowTracker, shift_to_ne, attitude_shift_px
 from map_cache import MapCache
 from map_fix_worker import MapFixWorker
 from map_fuse import MapFuser
+from velocity_bridge import VelocityBridge
 
 M_PER_DEG_LAT = 111_320.0
 DEFAULT_MAP = "/home/abc/SSD/DRONE/ap/site_2km.tif"
@@ -232,8 +233,8 @@ class GpsInputSender:
     # GPS_INPUT_IGNORE_FLAGS
     IGN_VEL_HORIZ, IGN_VEL_VERT, IGN_SPEED_ACC = 8, 16, 32
 
-    def __init__(self, port="/dev/ttyTHS1", baud=115200, gps_id: int = 1,
-                 sats: int = 12):
+    def __init__(self, port="/dev/ttyTHS1", baud=921600, gps_id: int = 1,
+                 sats: int = 12, send_velocity: bool = False):
         from pymavlink import mavutil
         self.mavutil = mavutil
         self.m = mavutil.mavlink_connection(port, baud=baud, source_system=1,
@@ -244,29 +245,74 @@ class GpsInputSender:
             raise RuntimeError("*** ARMED - bench test disarmed hi hoga ***")
         self.gps_id = int(gps_id)
         self.sats = int(sats)
+        # OFF by default, and it stays off until someone passes it. Velocity is
+        # the channel that caused four EKF failsafes on 28 Sep by reporting
+        # 47.7 m/s during a 106 m hover, and it is the 54% row that the 13 Oct
+        # report still calls the largest open fault.
+        self.send_velocity = bool(send_velocity)
         self.sent = 0
+        self.sent_with_vel = 0
 
     def armed(self) -> bool:
         msg = self.m.recv_match(type="HEARTBEAT", blocking=False)
         return False if msg is None else bool(
             msg.base_mode & self.mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
 
-    def send(self, lon, lat, alt_amsl_m, sigma_m, yaw_deg=None):
+    def velocity_fields(self, vel):
+        """Decide what to tell the FC about velocity, and say so explicitly.
+
+        Returns (ignore_flags, vn, ve, speed_acc, why).
+
+        IGN_VEL_VERT is ALWAYS set. The bridge is horizontal only, and the FC
+        itself agrees there is no vertical source: EK3_SRC1_VELZ reads 0 in log
+        00000195.BIN. Height comes from the lidar below 60 m and the barometer
+        above it.
+
+        Horizontal velocity is sent only when the bridge says valid AND the
+        value is above the deadband. When the deadband bites we go back to
+        IGNORE rather than sending zero, and that is a deliberate difference
+        from asserting a stationary aircraft: 5 Oct measured the deadband
+        discarding 49% of genuine motion below 25 m, so a zero there would be a
+        confident false statement to the EKF, which follows what it is given on
+        this path. "I do not know" is the honest flag, and "stationary" is not.
+        """
+        ign = self.IGN_VEL_VERT
+        if not self.send_velocity:
+            return ign | self.IGN_VEL_HORIZ | self.IGN_SPEED_ACC, 0.0, 0.0, 0.0, "off"
+        if vel is None:
+            return ign | self.IGN_VEL_HORIZ | self.IGN_SPEED_ACC, 0.0, 0.0, 0.0, "no estimate"
+        if not vel.valid:
+            return (ign | self.IGN_VEL_HORIZ | self.IGN_SPEED_ACC, 0.0, 0.0, 0.0,
+                    vel.reason)
+        if vel.deadbanded:
+            return (ign | self.IGN_VEL_HORIZ | self.IGN_SPEED_ACC, 0.0, 0.0, 0.0,
+                    f"deadbanded ({vel.speed_mps:.2f} < {vel.deadband_mps:.2f})")
+        # Speed accuracy the EKF can weigh. Floored at the measured noise -
+        # flow velocity error was 0.236 m/s at 0-30 m and phantom speed at a
+        # hover ran 0.36-0.43 m/s - and widened with how stale the flow is,
+        # because between flow updates this is dead reckoning on the camera
+        # accelerometer. UNVERIFIED scaling; it wants a sweep against a flight.
+        acc = max(0.4, 0.4 + 2.0 * vel.age_s)
+        return ign, float(vel.sent_vn), float(vel.sent_ve), float(acc), "sent"
+
+    def send(self, lon, lat, alt_amsl_m, sigma_m, yaw_deg=None, vel=None):
         t = time.time()
         week = int((t - 315964800) // (7 * 86400))
         week_ms = int(((t - 315964800) % (7 * 86400)) * 1000)
         # HDOP is what a GCS shows the pilot, so it should read like the real
         # thing: metres of error over the usual ~1.5 m per HDOP unit.
         hdop = float(np.clip(sigma_m / 1.5, 0.5, 99.0))
+        ign, vn, ve, speed_acc, self.vel_why = self.velocity_fields(vel)
         self.m.mav.gps_input_send(
-            int(t * 1e6), self.gps_id,
-            self.IGN_VEL_HORIZ | self.IGN_VEL_VERT | self.IGN_SPEED_ACC,
+            int(t * 1e6), self.gps_id, ign,
             week_ms, week, 3,                      # fix_type 3 = 3D
             int(lat * 1e7), int(lon * 1e7), float(alt_amsl_m),
-            hdop, hdop, 0.0, 0.0, 0.0,
-            0.0, float(sigma_m), float(sigma_m * 2.0),
+            hdop, hdop, vn, ve, 0.0,
+            speed_acc, float(sigma_m), float(sigma_m * 2.0),
             self.sats)
         self.sent += 1
+        if not (ign & self.IGN_VEL_HORIZ):
+            self.sent_with_vel += 1
 
 
 # --------------------------------------------------------------------------- #
@@ -284,7 +330,13 @@ class VpsNode:
         self.mlon = None
         self._next_fix = 0.0
         self.prev_att = None
+        self.prev_t = None
         self.n_fix = self.n_flow = 0
+        # Flow-only on this path: LiveSource does not enable the camera IMU, so
+        # nothing calls push_accel. The bridge is built for that - with no
+        # acceleration it simply holds between flow updates instead of
+        # dead-reckoning through them, and says how stale it is.
+        self.vel = VelocityBridge()
 
     def set_origin(self, lon: float, lat: float):
         self.origin = (float(lon), float(lat))
@@ -306,7 +358,17 @@ class VpsNode:
                                  yaw_deg=f["yaw"])
             self.fuser.predict(dn, de)
             self.n_flow += 1
+            # Velocity is the SAME displacement the fuser just consumed,
+            # divided by the frame interval. Deriving it here rather than in a
+            # second estimator means position and velocity cannot disagree
+            # about what the camera saw - and disagreement between them is
+            # what the EKF reads as a velocity innovation.
+            if self.prev_t is not None:
+                dt = f["t"] - self.prev_t
+                if 0.0 < dt < 0.5:
+                    self.vel.push_flow(f["t"], dn / dt, de / dt)
         self.prev_att = att
+        self.prev_t = f["t"]
 
         fix_used = False
         if f["t"] >= self._next_fix:
@@ -324,7 +386,8 @@ class VpsNode:
         lon, lat = self.to_lonlat(*self.fuser.pos)
         return dict(north=float(self.fuser.pos[0]), east=float(self.fuser.pos[1]),
                     lon=lon, lat=lat, sigma=self.fuser.sigma_m, tracks=ntrk,
-                    fix_used=fix_used, alt=f["alt"], yaw=f["yaw"], t=f["t"])
+                    fix_used=fix_used, alt=f["alt"], yaw=f["yaw"], t=f["t"],
+                    vel=self.vel.value(f["t"], f["alt"]))
 
     def stop(self):
         self.worker.stop()
@@ -347,6 +410,11 @@ def main():
                     help="transmit VISION_POSITION_ESTIMATE (disarmed only)")
     ap.add_argument("--send-gps", action="store_true",
                     help="inject as GPS2 via GPS_INPUT, Stride-style (disarmed only)")
+    ap.add_argument("--send-vel", action="store_true",
+                    help="also send horizontal velocity in GPS_INPUT. OFF by "
+                         "default: this is the channel that reported 47.7 m/s "
+                         "at a 106 m hover on 28 Sep and caused four EKF "
+                         "failsafes, and it is still the largest open fault.")
     ap.add_argument("--gps-id", type=int, default=1, help="0 = GPS1, 1 = GPS2")
     a = ap.parse_args()
 
@@ -359,7 +427,7 @@ def main():
 
     gps_sender = None
     if a.send_gps:
-        gps_sender = GpsInputSender(gps_id=a.gps_id)
+        gps_sender = GpsInputSender(gps_id=a.gps_id, send_velocity=a.send_vel)
         print(f"GPS INPUT SENDER ON - disarmed confirmed. GPS{a.gps_id+1} ban kar jayega.\n"
               f"   (horiz_accuracy = fuser ka apna sigma)")
 
@@ -382,9 +450,19 @@ def main():
     if a.out:
         fh = open(a.out, "w", newline="")
         wr = csv.writer(fh)
+        # The velocity columns are not optional padding. The 8 Oct collapse -
+        # 9.93 m/s in, 3.90 out - could not be diagnosed from any recording
+        # because the state that caused it was never written down, and five
+        # columns had to be added after the fact. Everything the bridge knows
+        # goes in the row.
         wr.writerow(["t", "north_m", "east_m", "lon", "lat", "sigma_m",
                      "tracks", "fix_used", "alt_m", "yaw_deg",
-                     "gps_north_m", "gps_east_m", "err_m"])
+                     "gps_north_m", "gps_east_m", "err_m",
+                     "vel_vn", "vel_ve", "vel_speed", "vel_valid",
+                     "vel_sent_vn", "vel_sent_ve", "vel_deadbanded",
+                     "vel_deadband", "vel_age_s", "vel_flow_updates",
+                     "vel_bias_n", "vel_bias_e", "vel_bias_frozen",
+                     "vel_reason"])
 
     errs, t_start, n = [], time.perf_counter(), 0
     try:
@@ -411,6 +489,7 @@ def main():
                 gE = (f["gps"][0] - node.origin[0]) * node.mlon
                 err = float(np.hypot(est["north"] - gN, est["east"] - gE))
                 errs.append(err)
+            v = est["vel"]
             if wr:
                 wr.writerow([f"{est['t']:.2f}", f"{est['north']:.2f}", f"{est['east']:.2f}",
                              f"{est['lon']:.7f}", f"{est['lat']:.7f}",
@@ -418,14 +497,20 @@ def main():
                              f"{est['alt']:.1f}", f"{est['yaw']:.1f}",
                              "" if gN is None else f"{gN:.2f}",
                              "" if gE is None else f"{gE:.2f}",
-                             "" if err is None else f"{err:.2f}"])
+                             "" if err is None else f"{err:.2f}",
+                             f"{v.vn:.3f}", f"{v.ve:.3f}", f"{v.speed_mps:.3f}",
+                             int(v.valid), f"{v.sent_vn:.3f}", f"{v.sent_ve:.3f}",
+                             int(v.deadbanded), f"{v.deadband_mps:.3f}",
+                             f"{v.age_s:.3f}", v.flow_updates,
+                             f"{v.bias_n:.5f}", f"{v.bias_e:.5f}",
+                             int(v.bias_frozen), v.reason])
             if gps_sender is not None:
                 if gps_sender.armed():
                     print("\n*** AIRCRAFT ARMED - transmission band ***")
                     break
                 gps_sender.send(est["lon"], est["lat"],
                                 (f.get("alt_amsl") or est["alt"]), est["sigma"],
-                                est["yaw"])
+                                est["yaw"], vel=est["vel"])
             if sender is not None:
                 if sender.armed():
                     print("\n*** AIRCRAFT ARMED - transmission band ***")
