@@ -381,6 +381,73 @@ class GpsInputSender:
 
 
 # --------------------------------------------------------------------------- #
+def choose_origin(cli_origin, scr_origin, gps_primary, gps_fix):
+    """Where the origin may come from. Returns ((lon, lat), why) or (None, why).
+
+    Precedence, and the middle rule is the pilot's:
+
+      1. --origin             an explicit instruction beats everything
+      2. SCR_USER1/2          the point typed on the RC
+      3. the live receiver    ONLY when GPS_PRIMARY == 0
+
+    While the aircraft is on the VPS, the receiver is not an acceptable origin
+    whatever it is reporting. A receiver that happens to have a fix sitting on
+    the bench before arming must not quietly become the origin, because every
+    position afterwards is measured from it.
+
+    GPS_PRIMARY of None - we could not ask - is treated as "on the VPS", not as
+    "on the receiver". Not knowing must never be the state that permits a
+    GPS-derived origin.
+    """
+    if cli_origin is not None:
+        return cli_origin, "--origin"
+    if scr_origin is not None:
+        return scr_origin, "SCR_USER1/2 (typed on the RC)"
+    if gps_primary == 0:
+        if gps_fix is not None:
+            return gps_fix, "the live receiver (GPS_PRIMARY=0)"
+        return None, "waiting for a receiver fix"
+    if gps_primary == 1:
+        return None, "the aircraft is on the VPS"
+    return None, "GPS_PRIMARY could not be read"
+
+
+def read_gps_primary(endpoint: str, baud: int = 921600, timeout_s: float = 8.0):
+    """Which source the aircraft is flying on: 0 = real GPS, 1 = the VPS.
+
+    This is the value gps_rc_switch writes from channel 6, so it is the
+    aircraft's own answer rather than our guess. None means we could not ask -
+    and "could not ask" must never be read as "on the real GPS", because that
+    is the direction that permits a GPS-derived origin.
+    """
+    try:
+        from pymavlink import mavutil
+    except Exception:
+        return None
+    m = None
+    try:
+        m = mavutil.mavlink_connection(endpoint, baud=baud, source_system=255,
+                                       source_component=223)
+        if m.wait_heartbeat(timeout=timeout_s) is None:
+            return None
+        m.mav.param_request_read_send(m.target_system, m.target_component,
+                                      b"GPS_PRIMARY", -1)
+        t0 = time.time()
+        while time.time() - t0 < timeout_s:
+            msg = m.recv_match(type="PARAM_VALUE", blocking=True, timeout=1.0)
+            if msg is not None and msg.param_id == "GPS_PRIMARY":
+                return int(msg.param_value)
+        return None
+    except Exception:
+        return None
+    finally:
+        if m is not None:
+            try:
+                m.close()
+            except Exception:
+                pass
+
+
 def read_scr_user(endpoint: str, baud: int = 921600, timeout_s: float = 8.0):
     """The take-off point the pilot typed on the RC, read off the FC.
 
@@ -665,10 +732,14 @@ def main():
     # Read the typed take-off point BEFORE the camera source opens the serial
     # port, so this works whether --fc-port is a device or the router's UDP.
     scr_origin = None
+    gps_primary = None
     if a.live and not a.no_scr_origin and not a.origin:
         scr_origin = read_scr_user(a.fc_port)
+        gps_primary = read_gps_primary(a.fc_port)
+        src_name = {0: "real GPS", 1: "VPS"}.get(gps_primary, "UNKNOWN")
+        print(f"GPS_PRIMARY = {gps_primary} ({src_name})")
         if scr_origin is None:
-            print("SCR_USER1/2: not readable or not set - will fall back to GPS")
+            print("SCR_USER1/2: not readable or not set")
         else:
             print(f"SCR_USER1/2: {scr_origin[1]:.6f}, {scr_origin[0]:.6f}")
 
@@ -729,6 +800,7 @@ def main():
     if notifier.enabled:
         print(f"notifications ON, every {a.notify_period:.0f}s")
 
+    _origin_refused = [False]
     errs, t_start, n = [], time.perf_counter(), 0
     try:
         while True:
@@ -746,18 +818,24 @@ def main():
                 # point is inside the loaded sheet, because a take-off point
                 # outside it means no map fixes for the whole flight - the
                 # first item on the 13 Oct list of things to confirm.
+                cli = None
                 if a.origin:
                     lo, la = (float(x) for x in a.origin.split(","))
-                    node.set_origin(lo, la)
-                    why = "--origin"
-                elif scr_origin is not None:
-                    node.set_origin(*scr_origin)
-                    why = "SCR_USER1/2 (typed on the RC)"
-                elif f["gps"]:
-                    node.set_origin(*f["gps"])
-                    why = "the live receiver"
-                else:
+                    cli = (lo, la)
+                chosen, why = choose_origin(cli, scr_origin, gps_primary,
+                                            f["gps"])
+                if chosen is None:
+                    if not _origin_refused[0]:
+                        _origin_refused[0] = True
+                        print(f"NO ORIGIN: {why}. The receiver cannot be used "
+                              f"here.")
+                        print("  Set SCR_USER1/2 from the RC, or pass "
+                              "--origin lon,lat. Waiting.")
+                        notifier.event("noorigin", True,
+                                       "VPS NO ORIGIN - SET SCR_USER",
+                                       Notifier.SEV_CRIT)
                     continue
+                node.set_origin(*chosen)
                 olon, olat = node.origin
                 covered = cache.covers(olon, olat)
                 print(f"origin from {why}: {olat:.6f}, {olon:.6f}")
