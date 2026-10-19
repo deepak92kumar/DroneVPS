@@ -27,3 +27,6 @@ third_party/*
 # what blocked the push on 28 Sep and cost 27 commits.
 *.tif
 *.tiff
+
+# Flight recordings: images and logs, kept outside git
+flights/

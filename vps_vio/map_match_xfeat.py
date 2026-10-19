@@ -176,6 +176,11 @@ def locate(img_grey: np.ndarray, map_window: np.ndarray, geo_window, *,
         return XFeatResult(False, reason="XFeat needs an intensity window, got edges")
     if map_window is None or min(map_window.shape[:2]) < 32:
         return XFeatResult(False, reason="map window too small")
+    if not (altitude_m > 0.0):
+        # Same reason as the NCC path: the barometer reads below zero on the
+        # ground, and a non-positive altitude makes the query scale negative.
+        return XFeatResult(False, reason=f"altitude {altitude_m:.1f} m is not "
+                                         f"above the ground")
 
     try:
         model = _load()

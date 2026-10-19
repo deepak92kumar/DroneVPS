@@ -42,6 +42,14 @@ def north_up_query(img_grey: np.ndarray, *, altitude_m: float, focal_px: float,
     from 0.50 to 0.95. Rotating the map instead, to give a template with no
     holes at all, was worse again: it blurs the map and widens the search.
     """
+    # A non-positive altitude makes the scale zero or negative and cv2.resize
+    # dies on it: "inv_scale_x > 0". The barometer reads below zero on the
+    # ground all the time, so this is reachable from any recording that starts
+    # before takeoff - and one bad row must not take a whole offline analysis
+    # down with it. Refuse the frame instead.
+    if not (altitude_m > 0.0) or not (map_gsd_m > 0.0) or not (focal_px > 0.0):
+        raise ValueError(f"altitude {altitude_m} / gsd {map_gsd_m} / focal "
+                         f"{focal_px}: cannot scale a query from these")
     scale = (altitude_m / float(focal_px)) / map_gsd_m
     q = cv2.resize(img_grey, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
     h, w = q.shape
@@ -147,6 +155,9 @@ def locate(img_grey: np.ndarray, map_window: np.ndarray, geo_window, *,
     correlation across a four-year-old map peaks around 0.1-0.2 - the margin is
     what actually separates a good fix from a bad one, not the peak height.
     """
+    if not (altitude_m > 0.0):
+        return NccResult(False, reason=f"altitude {altitude_m:.1f} m is not "
+                                       f"above the ground")
     # MapCache hands over a window whose edges were computed once at startup.
     W = map_window if window_is_edges else _edges(map_window)
     peak, loc, q = -9.0, None, None

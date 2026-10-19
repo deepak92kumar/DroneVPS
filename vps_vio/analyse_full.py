@@ -31,7 +31,7 @@ def focal_of(d):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("flight")
-    ap.add_argument("--map", default="/data/DRONE/ap/site_2km.tif")
+    ap.add_argument("--map", default="/data/DRONE/bhh.tif")
     ap.add_argument("--min-alt", type=float, default=60.0)
     ap.add_argument("--fix-every", type=int, default=60, help="frames between map fixes")
     ap.add_argument("--flow-every", type=int, default=1)
@@ -101,8 +101,12 @@ def main():
     ef, em = np.array(ef), np.array(em)
     dist = np.hypot(np.diff(t[:, 4]), np.diff(t[:, 5])).sum()
     print(f"\n=== {len(t)} frames, GPS path {dist:.0f} m, {time.time()-t0:.0f}s ===")
-    print(f"flow only  : median {np.median(ef):6.1f}  max {ef.max():6.1f}  final {ef[-1]:6.1f}  "
-          f"= {100*ef[-1]/dist:.1f}% of distance")
+    # "% of distance" is meaningless when the aircraft did not move, and
+    # dividing by it gives inf. A bench recording is a real case.
+    pct = (f"= {100*ef[-1]/dist:.1f}% of distance" if dist > 1.0
+           else "(stationary - no distance to compare against)")
+    print(f"flow only  : median {np.median(ef):6.1f}  max {ef.max():6.1f}  "
+          f"final {ef[-1]:6.1f}  {pct}")
     print(f"flow + map : median {np.median(em):6.1f}  max {em.max():6.1f}  final {em[-1]:6.1f}")
     if fixerr:
         print(f"map fixes  : {fuser.n_fix} accepted, {fuser.n_rejected} rejected, "
