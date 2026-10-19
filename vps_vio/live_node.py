@@ -71,37 +71,99 @@ class ReplaySource:
 class LiveSource:
     """OAK-D mono plus read-only FC telemetry."""
 
-    def __init__(self, fc_port="/dev/ttyTHS1", fc_baud=115200):
+    def __init__(self, fc_port="/dev/ttyTHS1", fc_baud=115200, *,
+                 fps: int | None = None, stereo_depth: bool | None = None):
         import depthai as dai
-        import oak_rig
         from record_flight import Telemetry
+        from config import VpsConfig
+        # NOT oak_rig. That module imports cuvslam, which is not installed and
+        # was REJECTED on 28 Sep: the OAK-D's 7.5 cm baseline gives under 0.3 px
+        # of disparity above ~25 m and the mission is 100-150 m, so it
+        # contributed exactly 0 over 1680 frames. Importing it for one integer
+        # made this constructor raise ModuleNotFoundError outright.
+        cfg = VpsConfig()
+        fps = cfg.mono_fps if fps is None else int(fps)
+        stereo_depth = cfg.stereo_depth if stereo_depth is None else bool(stereo_depth)
         self.tel = Telemetry(fc_port, fc_baud).start()
+
         p = dai.Pipeline()
-        m = p.create(dai.node.MonoCamera)
-        m.setBoardSocket(dai.CameraBoardSocket.CAM_B)
-        m.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)
-        m.setFps(oak_rig.FPS)
-        m.initialControl.setAutoExposureLimit(8000)
-        xo = p.create(dai.node.XLinkOut); xo.setStreamName("mono"); m.out.link(xo.input)
+        mono = {}
+        # CAM_B alone unless depth is wanted; depth needs the pair.
+        sockets = [("mono", dai.CameraBoardSocket.CAM_B)]
+        if stereo_depth:
+            sockets.append(("mono_right", dai.CameraBoardSocket.CAM_C))
+        for name, sock in sockets:
+            m = p.create(dai.node.MonoCamera)
+            m.setBoardSocket(sock)
+            m.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)
+            m.setFps(fps)
+            m.initialControl.setAutoExposureLimit(8000)
+            mono[name] = m
+            if name == "mono":          # only the left frame leaves the device
+                xo = p.create(dai.node.XLinkOut)
+                xo.setStreamName(name)
+                m.out.link(xo.input)
+
+        if stereo_depth:
+            # Depth is computed on the OAK's Myriad X VPU, so this costs the
+            # Jetson nothing but the USB bytes - measured 19 Oct: no fps or IMU
+            # change, +2 C. It feeds the VIO scale, which is what 5 Oct kept it
+            # for (flow noise down 21% at 20-40 m and 53% at 60-80 m). It is
+            # NOT a height source; see config.stereo_depth_as_height.
+            # The PRESET is the whole cost. Measured 19 Oct on this camera,
+            # mono pair at 1280x800/30 with nothing else running:
+            #   HIGH_ACCURACY  30.7 fps, worst gap 44.3 ms   (deprecated)
+            #   HIGH_DENSITY   30.7 fps, worst gap 51.8 ms
+            #   ROBOTICS       16.3 fps, worst gap 72.2 ms
+            #   DEFAULT        15.6 fps, worst gap 80.1 ms
+            # DEFAULT halving the frame rate reproduces 9 Oct's "fps 25 ->
+            # 12.5" almost exactly, so what was reverted that day may have been
+            # the preset rather than stereo depth itself.
+            # HIGH_DENSITY: holds 30 fps, is not deprecated, and fill matters
+            # more than millimetre accuracy for a VIO scale aid.
+            st = p.create(dai.node.StereoDepth)
+            st.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_DENSITY)
+            st.setLeftRightCheck(True)
+            st.setSubpixel(False)
+            st.setDepthAlign(dai.CameraBoardSocket.CAM_B)
+            mono["mono"].out.link(st.left)
+            mono["mono_right"].out.link(st.right)
+            xd = p.create(dai.node.XLinkOut)
+            xd.setStreamName("depth")
+            st.depth.link(xd.input)
+
         self.dev = dai.Device()
         cal = self.dev.readCalibration()
         K = np.array(cal.getCameraIntrinsics(dai.CameraBoardSocket.CAM_B, 1280, 800))
         self.focal = float(K[0][0])
         self.dev.startPipeline(p)
         self.q = self.dev.getOutputQueue("mono", 4, False)
+        # Non-blocking and shallow on purpose: a depth frame that is late is
+        # dropped rather than delaying the mono frame the flow loop runs on.
+        self.q_depth = (self.dev.getOutputQueue("depth", 2, False)
+                        if stereo_depth else None)
         self.t0 = time.monotonic()
 
     def read(self):
         fr = self.q.get()
+        # tryGet, never get: the mono frame is what the flow loop is waiting on,
+        # and depth is an aid to it. Missing depth means this frame has none,
+        # not that the loop waits for it.
+        depth = None
+        if self.q_depth is not None:
+            d = self.q_depth.tryGet()
+            if d is not None:
+                depth = d.getFrame()        # uint16, millimetres, aligned to CAM_B
         s = self.tel.snapshot()
         if s.get("alt_rel") is None or s.get("yaw") is None:
             return dict(img=fr.getCvFrame(), alt=None, yaw=None, roll=None,
-                        pitch=None, gps=None, t=time.monotonic() - self.t0)
+                        pitch=None, gps=None, depth=depth,
+                        t=time.monotonic() - self.t0)
         gps = None
         if s.get("lat") not in (None, 0.0):
             gps = (s["lon"], s["lat"])
         return dict(img=fr.getCvFrame(), alt=s["alt_rel"], yaw=s["yaw"],
-                    roll=s["roll"], pitch=s["pitch"], gps=gps,
+                    roll=s["roll"], pitch=s["pitch"], gps=gps, depth=depth,
                     t=time.monotonic() - self.t0, armed=bool(s.get("armed")))
 
 

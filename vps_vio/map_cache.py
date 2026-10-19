@@ -35,12 +35,20 @@ class MapCache:
         self.gsd = abs(gt[5]) * 111_320.0
         self.h, self.w = self.grey.shape
 
-    def window(self, lon: float, lat: float, radius_m: float):
-        """Edge window centred on a lon/lat, plus its own GeoRef.
+    def window(self, lon: float, lat: float, radius_m: float,
+               kind: str = "edges"):
+        """Window centred on a lon/lat, plus its own GeoRef.
 
-        Returns (edges, georef). The georef is what turns a pixel inside the
+        Returns (image, georef). The georef is what turns a pixel inside the
         window back into a position, so the caller never has to track offsets.
+
+        kind picks which of the two cached arrays is sliced. "edges" is the
+        gradient image the NCC matcher correlates; "grey" is the intensity the
+        XFeat matcher needs, because gradient magnitude has none of the texture
+        its descriptors were trained on. Both live in RAM already, so this is a
+        slice either way and costs nothing to choose.
         """
+        src = self.grey if kind == "grey" else self.edges
         c, r = self.geo.to_pixel(lon, lat)
         half = int(radius_m / self.gsd)
         x0 = int(np.clip(int(c) - half, 0, max(0, self.w - 2 * half)))
@@ -50,7 +58,7 @@ class MapCache:
         g2 = list(self.gt)
         g2[0] = self.gt[0] + x0 * self.gt[1]
         g2[3] = self.gt[3] + y0 * self.gt[5]
-        return self.edges[y0:y1, x0:x1], GeoRef.from_gdal(g2)
+        return src[y0:y1, x0:x1], GeoRef.from_gdal(g2)
 
     def covers(self, lon: float, lat: float, margin_px: int = 0) -> bool:
         c, r = self.geo.to_pixel(lon, lat)

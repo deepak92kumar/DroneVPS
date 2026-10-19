@@ -1119,12 +1119,35 @@ def build_oak_pipeline(max_exposure_us=3000, max_iso=1200, rgb_shadow=False, rgb
 
     pipeline.setXLinkChunkSize(0)
 
-    # 5. Onboard Bosch BNO086 9-Axis IMU (400 Hz)
+    # 5. Onboard Bosch BNO086 9-Axis IMU (100 Hz)
+    #
+    # Every number here was 400/400/400 with a batch threshold of 5 until the
+    # 3-5 Oct measurements, and all four were wrong:
+    #
+    #   * Rate. The three reports SHARE ONE PACKET, so over-asking is not
+    #     neutral - it is harmful. Gyro at 400 dragged the whole stream down to
+    #     57.8 Hz. A calibrated gyro requested at 200 against a documented
+    #     100 Hz maximum delivered exactly 100 anyway. 100 is what the device
+    #     actually gives, so 100 is what we ask for.
+    #   * Batch threshold. At 5, 34.2% of camera frames arrived with NO IMU
+    #     sample at all; at 1 it is 1.1%, for the same camera rate and the same
+    #     gaps. Derotation needs a sample per frame, so this must stay 1.
+    #   * GAME_ROTATION_VECTOR, not ROTATION_VECTOR. ROTATION_VECTOR fuses the
+    #     magnetometer and shares the rotation pipe with it; taking it cost
+    #     derotation outright and two flights. The GAME variant is gyro+accel
+    #     only, which is all derotation needs. The magnetometer measured clean
+    #     but stays OFF for this reason.
+    #   * LINEAR_ACCELERATION, not ACCELEROMETER_RAW - gravity already removed,
+    #     which is what the velocity path consumes.
+    #
+    # Camera yaw is NOT available from this: 4 Oct tested GAME_ROTATION_VECTOR's
+    # yaw for exactly that and it cannot do it. Heading stays on the FC compass.
+    IMU_HZ = 100
     imu = pipeline.create(dai.node.IMU)
-    imu.enableIMUSensor(dai.IMUSensor.GYROSCOPE_CALIBRATED, 400)
-    imu.enableIMUSensor(dai.IMUSensor.ACCELEROMETER_RAW, 400)
-    imu.enableIMUSensor(dai.IMUSensor.ROTATION_VECTOR, 400)
-    imu.setBatchReportThreshold(5)
+    imu.enableIMUSensor(dai.IMUSensor.GYROSCOPE_CALIBRATED, IMU_HZ)
+    imu.enableIMUSensor(dai.IMUSensor.LINEAR_ACCELERATION, IMU_HZ)
+    imu.enableIMUSensor(dai.IMUSensor.GAME_ROTATION_VECTOR, IMU_HZ)
+    imu.setBatchReportThreshold(1)
     imu.setMaxBatchReports(20)
 
     xout_imu = pipeline.create(dai.node.XLinkOut)

@@ -18,3 +18,7 @@ __pycache__/
 latest_flight_summary.txt
 flights/
 flights/analysis/*.png
+
+# Third-party checkouts: pinned in third_party/README.md, not committed
+third_party/*
+!third_party/README.md

@@ -1,0 +1,254 @@
+"""Locate a nadir frame on the satellite map with XFeat learned features.
+
+Replaces the gradient-correlation matcher (map_match_ncc) as the flying path.
+The reason for the swap is measured, not aesthetic: NCC correlates appearance,
+so a four-year-old map costs it contrast on every frame, and its cost scales
+with window area times template area. Learned features survive the appearance
+gap and cost the same whatever the window is.
+
+Why not the descriptor matcher in map_match.py: AKAZE/SIFT scored 0% on real
+flight imagery against this map. XFeat is trained for exactly that gap.
+
+Why XFeat and not SuperPoint/SuperGlue: Apache-2.0 (commercial use clear),
+and it runs real-time sparse inference on CPU, which matters because this
+Jetson's OpenCV has no CUDA (cv2.cuda.getCudaEnabledDeviceCount() == 0) and
+there is no torch wheel on it yet. NOTE for whoever reads map_db.py's comment
+about "XFeat exported to ONNX and run through TensorRT": upstream ships no
+such export, so that route does not exist. This module uses torch directly.
+
+The fit is TRANSLATION ONLY by default. Altitude gives scale and the compass
+gives rotation, both already applied by north_up_query, so translation is the
+only unknown left - and a looser model fits outliers on this imagery rather
+than correcting anything. XFEAT_ANISO=1 adds an anisotropic scale term; it is
+off by default because it introduced a 16.5% scale mismatch whose own code
+comment blamed it for "16 m that has never been explained".
+
+STATE, 19 Oct. It runs and it locates correctly on a synthetic pair: a patch
+cut from a stand-in map at a known pixel, upscaled by the inverse of the
+altitude scale and rotated, came back at 0.09 / 0.08 / 0.23 m of its true
+centre at yaw 0 / +12 / -35, with 76-84 inliers of 168-179 matches. A pure
+noise query was rejected with 0 inliers. On this Jetson's CPU a fix costs
+530-620 ms warm (the first is ~2.9 s, model load), so at fix_period 2.0 s the
+worker sits near 27% of a core - close to the 17% the 5 Oct report measured.
+
+WHAT THAT DOES NOT SETTLE, and the thresholds that are therefore still open:
+the synthetic pair is the SAME image on both sides, so it is an upper bound on
+agreement in every respect. Real flights matched a four-year-old satellite
+sheet over tree canopy and got 14 to 32 inliers above 140 m (5 Oct, with
+top_k 1024). Against that, min_score - an inlier RATIO of 0.25 - is the number
+most likely to be wrong, and wrong in the direction of rejecting good fixes.
+min_inliers of 12 sits just under that measured 14 and has no margin either.
+Both must be swept against a recorded flight, the way the NCC margin was swept
+over 50 frames with a +-150 m window, before this path is trusted in the air.
+"""
+from __future__ import annotations
+from dataclasses import dataclass
+import os
+import sys
+
+import numpy as np
+import cv2
+
+from map_match_ncc import north_up_query
+
+# One model instance per process. Loading is ~100 ms and the worker thread
+# calls locate() repeatedly, so it must not reload per fix.
+_MODEL = None
+_TORCH = None
+
+
+@dataclass
+class XFeatResult:
+    """Same shape as NccResult so MapFixWorker can build FixResult unchanged.
+
+    score  = inlier ratio, 0..1. How much of the matched set agrees on one
+             translation. This is the honest "is this a fix" number.
+    margin = agreement tightness, 0..1: 1 - MAD(residual)/tol. A wide but
+             numerous cluster is a weaker fix than a tight one of the same size.
+    """
+    ok: bool
+    lon: float = 0.0
+    lat: float = 0.0
+    score: float = 0.0
+    margin: float = 0.0
+    inliers: int = 0
+    total_matches: int = 0
+    reason: str = ""
+
+
+def _load():
+    """Import torch and build the model on first use.
+
+    Deliberately lazy: map_fix_worker imports this module at startup on an
+    aircraft that may not have torch installed, and an ImportError there would
+    take the whole VPS node down rather than just the map path.
+    """
+    global _MODEL, _TORCH
+    if _MODEL is not None:
+        return _MODEL
+    # XFeat is not on PyPI, so it is a checkout rather than an install:
+    #   git clone --depth 1 https://github.com/verlab/accelerated_features
+    # Apache-2.0, confirmed from the LICENSE file in that checkout, not from a
+    # fork's metadata. XFEAT_ROOT overrides the default location.
+    root = os.environ.get("XFEAT_ROOT") or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "third_party", "accelerated_features")
+    if root not in sys.path:
+        sys.path.insert(0, root)
+
+    import torch
+    from modules.xfeat import XFeat
+    _TORCH = torch
+    # XFeat picks its own device - torch.cuda.is_available() inside its
+    # __init__ - and takes no device argument. On this Jetson that resolves to
+    # CPU, which upstream states is enough for real-time sparse inference.
+    #
+    # top_k 1024: 5 Oct measured it doubling the inliers above 140 m (14 -> 32)
+    # and buying 13% of error for 1.9x the time per fix. Affordable because the
+    # fix period is 2 s and the worker sat at 17% of a core.
+    _MODEL = XFeat(top_k=1024)
+    return _MODEL
+
+
+def _as_3ch(img: np.ndarray) -> np.ndarray:
+    """XFeat's parse_input takes HxWxC and permutes NHWC->NCHW.
+
+    A 2-D greyscale array reaches its permute as 2 dimensions and raises
+    "input.dim() = 2 is not equal to len(dims) = 4". Everything upstream here
+    is single-channel - the camera is a mono global shutter and the map cache
+    stores grey - so the channel axis has to be added on this side. XFeat
+    converts back to luminance internally, so this costs a copy, not accuracy.
+    """
+    return img if img.ndim == 3 else cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
+
+def _equalise(img: np.ndarray) -> np.ndarray:
+    """CLAHE, same as the map features were built with.
+
+    The map and the camera differ in exposure, haze and sun angle by years.
+    Equalising local contrast on BOTH sides is what makes the descriptors
+    comparable at all; map_db.build() does the same to the map.
+    """
+    return cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(img)
+
+
+def _translation(src: np.ndarray, dst: np.ndarray, tol_px: float):
+    """Robust translation from matched points.
+
+    Median of the per-match offset, then count how many agree within tol_px.
+    A median survives the outlier rate this imagery produces, where RANSAC on a
+    richer model would rather fit the outliers.
+
+    Returns (offset, inlier_mask, mad). mad is the median absolute deviation of
+    the inlier residual, in pixels - the tightness of the cluster.
+    """
+    d = dst - src
+    off = np.median(d, axis=0)
+    r = np.linalg.norm(d - off, axis=1)
+    keep = r <= tol_px
+    if keep.sum() >= 3:
+        # Refit on the agreeing set only: the first median is pulled by
+        # outliers, and a second pass costs nothing.
+        off = np.median(d[keep], axis=0)
+        r = np.linalg.norm(d - off, axis=1)
+        keep = r <= tol_px
+    mad = float(np.median(r[keep])) if keep.any() else float(tol_px)
+    return off, keep, mad
+
+
+def locate(img_grey: np.ndarray, map_window: np.ndarray, geo_window, *,
+           altitude_m: float, focal_px: float, yaw_deg: float, map_gsd_m: float,
+           min_inliers: int = 12, min_score: float = 0.25,
+           min_margin: float = 0.20, tol_px: float = 4.0,
+           window_is_edges: bool = False) -> XFeatResult:
+    """Match one frame to a map window and read off lon/lat.
+
+    geo_window maps window pixel -> lon/lat, exactly as the NCC path uses it.
+
+    window_is_edges exists only for interface compatibility with the NCC
+    matcher, whose MapCache hands over a pre-computed edge image. XFeat needs
+    intensity, so an edge window is REFUSED rather than silently matched
+    against - a gradient-magnitude image has none of the texture the
+    descriptors were trained on, and matching it would produce confident
+    nonsense. The cache must be asked for a grey window on this path.
+    """
+    if window_is_edges:
+        return XFeatResult(False, reason="XFeat needs an intensity window, got edges")
+    if map_window is None or min(map_window.shape[:2]) < 32:
+        return XFeatResult(False, reason="map window too small")
+
+    try:
+        model = _load()
+    except Exception as e:                      # torch or weights missing
+        return XFeatResult(False, reason=f"xfeat unavailable: {e}")
+
+    # Scale from altitude, rotation from the compass. Same preparation the NCC
+    # path uses, so the two matchers see the identical query and can be scored
+    # against each other on the same recording.
+    q = north_up_query(img_grey, altitude_m=altitude_m, focal_px=focal_px,
+                       yaw_deg=yaw_deg, map_gsd_m=map_gsd_m)
+    if min(q.shape[:2]) < 32:
+        return XFeatResult(False, reason="query too small after rescaling")
+
+    try:
+        out = model.match_xfeat(_as_3ch(_equalise(q)),
+                                _as_3ch(_equalise(map_window)))
+    except Exception as e:
+        return XFeatResult(False, reason=f"xfeat match failed: {e}")
+    if out is None or len(out) < 2:
+        return XFeatResult(False, reason="no matches")
+    src, dst = np.asarray(out[0], float), np.asarray(out[1], float)
+    n_total = int(len(src))
+    if n_total < min_inliers:
+        return XFeatResult(False, total_matches=n_total,
+                           reason=f"only {n_total} matches")
+
+    off, keep, mad = _translation(src, dst, tol_px)
+    n_in = int(keep.sum())
+    ratio = n_in / max(n_total, 1)
+    margin = max(0.0, 1.0 - mad / float(tol_px))
+
+    # Where the query centre lands on the map, through that translation.
+    qc = np.array([q.shape[1] / 2.0, q.shape[0] / 2.0])
+    mc = qc + off
+    lon, lat = geo_window.to_lonlat(float(mc[0]), float(mc[1]))
+    lon, lat = float(lon), float(lat)
+
+    if os.environ.get("XFEAT_ANISO") == "1":
+        # Left reachable on purpose, as it was before: it is the only way to
+        # re-measure the scale mismatch it causes. It does not move lon/lat
+        # here - fitting it would, which is the fault - it only reports.
+        sx, sy = _aniso_scale(src[keep], dst[keep])
+        if sx and sy and min(sx, sy) > 0:
+            margin *= 1.0 - min(0.5, abs(sx - sy) / max(sx, sy))
+
+    # THE GATE. The previous XFeat path hard-coded ok=True and so declared
+    # every frame a fix - 189 of them on one flight - which is the single
+    # defect that most needs not to come back. A fix is a fix only if enough
+    # points agree, a real share of them agree, and they agree tightly.
+    if n_in < min_inliers:
+        return XFeatResult(False, lon, lat, ratio, margin, n_in, n_total,
+                           reason=f"only {n_in} inliers")
+    if ratio < min_score:
+        return XFeatResult(False, lon, lat, ratio, margin, n_in, n_total,
+                           reason=f"inlier ratio {ratio:.2f} below {min_score}")
+    if margin < min_margin:
+        return XFeatResult(False, lon, lat, ratio, margin, n_in, n_total,
+                           reason=f"cluster spread {mad:.1f} px too wide")
+    return XFeatResult(True, lon, lat, ratio, margin, n_in, n_total)
+
+
+def _aniso_scale(src: np.ndarray, dst: np.ndarray):
+    """Per-axis scale between two matched sets, about their own centroids.
+
+    Reporting only. See XFEAT_ANISO above.
+    """
+    if len(src) < 4:
+        return None, None
+    s = src - src.mean(axis=0)
+    d = dst - dst.mean(axis=0)
+    out = []
+    for i in (0, 1):
+        den = float(np.sum(s[:, i] * s[:, i]))
+        out.append(float(np.sum(s[:, i] * d[:, i]) / den) if den > 1e-9 else None)
+    return out[0], out[1]

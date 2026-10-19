@@ -71,9 +71,14 @@ stereo.depth.link(xout_depth.input)
 
 # 4. Onboard Bosch BNO086 9-Axis IMU (100 Hz Hardware Fusion)
 imu = pipeline.create(dai.node.IMU)
+# Same three reports, same rates and the same reasons as the daemon
+# (flight_daemon.py, "Onboard Bosch BNO086"): they share one packet, so
+# over-asking costs the whole stream, and GAME_ROTATION_VECTOR keeps the
+# magnetometer out of the rotation pipe. A ground tool that configured the
+# camera differently from the aircraft would measure a different camera.
 imu.enableIMUSensor(dai.IMUSensor.GYROSCOPE_CALIBRATED, 100)
-imu.enableIMUSensor(dai.IMUSensor.ACCELEROMETER_RAW, 100)
-imu.enableIMUSensor(dai.IMUSensor.ROTATION_VECTOR, 100)
+imu.enableIMUSensor(dai.IMUSensor.LINEAR_ACCELERATION, 100)
+imu.enableIMUSensor(dai.IMUSensor.GAME_ROTATION_VECTOR, 100)
 imu.setBatchReportThreshold(1)
 imu.setMaxBatchReports(10)
 

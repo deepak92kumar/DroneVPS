@@ -13,7 +13,12 @@ import numpy as np
 class VpsConfig:
     # --- FC link (reuses the existing bridge; same values the daemon uses) ---
     fc_port: str = "/dev/ttyTHS1"
-    fc_baud: int = 115200
+    # 921600, NOT 115200. Read from the FC itself in log 00000195.BIN:
+    #   SERIAL2_BAUD 921   SERIAL2_PROTOCOL 2 (MAVLink2)
+    # TELEM2 is where the companion sits, and flight_daemon.py's own comment
+    # records why it moved: at 115200 "the link was near full and the FC
+    # forwarded it to the RC link", which made parameter download crawl.
+    fc_baud: int = 921600
 
     # --- VIO -> BODY axis mapping (MEASURED 27 Sep, no longer a placeholder) ---
     # Derived from geometry, not from drift-prone motion tests:
@@ -42,6 +47,115 @@ class VpsConfig:
     # --- VIO health gating ---
     min_vio_rate_hz: float = 15.0  # below this we stop trusting X/Y
     send_rate_hz: float = 20.0     # how often we push VISION_POSITION_ESTIMATE
+
+    # ---------------------------------------------------------------------
+    # Values recovered from the 28 Sep - 13 Oct status reports after the SSD
+    # that held the live code was lost. Each one carries the date it was
+    # changed and whether it had flown, because that is the only provenance
+    # left for them - the commits themselves are gone.
+    # ---------------------------------------------------------------------
+
+    # --- map matcher ---
+    matcher: str = "xfeat"         # 4 Oct: NCC -> XFeat. Flown, kept.
+                                   # Map matching went 45% -> 75% on the swap.
+    map_min_alt_m: float = 60.0    # 3 Oct: 80 -> 60 m. Flown, kept. At 80 m the
+                                   # map never started. The map runs ABOVE this
+                                   # height and NOT below it, which is why the
+                                   # descent is uncorrected: error went 4.13 ->
+                                   # 26.0 m in the 12 s of a 6 m/s descent.
+    map_window_alt_frac: float = 0.60   # 4 Oct: window was a fixed 100 m, which
+                                   # had the matcher guessing outside what the
+                                   # camera could see. Now 0.60 x altitude.
+    fix_period_s: float = 2.0      # 5 Oct: 0.4 -> 2.0 s. At 0.4 s the map pushed
+                                   # a STATIONARY aircraft at 1.18 m/s above 80 m
+                                   # while the drift it exists to catch is
+                                   # 0.15-0.37 m/s. At 2 s it pushes 0.26, and the
+                                   # worker drops from 75% of a core to 17%.
+
+    # --- recorder ---
+    image_hz: float = 2.0          # 5 Oct: JPEGs gated separately from CSV rows
+                                   # at 4 Hz; 8 Oct: halved to 2 Hz. index.csv
+                                   # still logs EVERY frame - the rows carry the
+                                   # conclusions, the JPEGs only answer the few
+                                   # questions that need pixels back.
+
+    # --- velocity sent to the FC ---
+    # 4 Oct: the hover deadband was flat 0.5 m/s and became 0.35 + 0.005 x alt.
+    # Flown, kept. The phantom speed it suppresses grows with height, so the
+    # threshold has to as well. KNOWN COST, not yet solved: below 25 m this
+    # discards 49% of genuine motion, which is why the aircraft wanders under
+    # 10 m while its POSITION there is accurate to 2 cm.
+    hover_deadband_base_mps: float = 0.35
+    hover_deadband_per_m: float = 0.005
+
+    # --- camera (OAK-D Pro mono pair) ---
+    # Measured on this device 19 Oct: THE_800_P gives 1280x800 and 29.8-30.7 fps
+    # on both sockets over a SUPER (USB3) link, mono focal fx 791.7 / 795.1.
+    # 791.72 is what bench_workload.py and the matcher already use - do NOT
+    # confuse it with the 1943 px in map_db.py's docstring, which is the RGB
+    # sensor and is only an example there.
+    mono_fps: int = 30
+
+    # Stereo depth: ON, and for VIO ONLY.
+    #
+    # It is cheap where it was feared to be expensive. Measured 19 Oct on this
+    # camera: adding StereoDepth left left/right/depth all at 30.7 fps and the
+    # IMU at 104 Hz, for +2 C of chip temperature - because the depth is
+    # computed on the OAK's own Myriad X VPU, not on the Jetson. The 9 Oct
+    # figures (fps 25 -> 12.5, camera +12 C, main loop stalled 44 s and 30 s)
+    # were host-side contention with the flow loop, map worker and FC bridge
+    # all running, not the camera's own cost. One real warning did show up
+    # even alone: the worst frame gap went 35.2 -> 47.2 ms, already past one
+    # frame period at 30 fps, which is how those stalls begin.
+    #
+    # What it is NOT: a height source. That is the part 9 Oct reverted, and the
+    # report's own verdict was that it came out "worse than the baro it was
+    # meant to help". Height stays TF03 below lidar_max_alt_m, barometer above.
+    stereo_depth: bool = True
+    stereo_depth_as_height: bool = False   # keep False. See above.
+
+    # --- camera IMU (OAK-D Pro) ---
+    # 5 Oct config, with gyro at 100 Hz per the pilot's instruction rather than
+    # the 200 that report lists. 3 Oct measured why over-asking is not neutral:
+    # all three reports share one packet, so gyro at 400 dragged the whole
+    # stream to 57.8 Hz, and a calibrated gyro requested at 200 against a
+    # documented 100 Hz maximum delivered exactly 100 anyway.
+    imu_gyro_hz: int = 100
+    imu_rotation_vector_hz: int = 100     # GAME_ROTATION_VECTOR
+    imu_linear_accel_hz: int = 100        # LINEAR_ACCELERATION
+    imu_batch_reports: int = 1     # 3 Oct: batching 5 left 34.2% of frames with
+                                   # NO IMU sample at all; at 1 it is 1.1%, same
+                                   # camera rate, same gaps.
+    imu_magnetometer: bool = False  # 5 Oct: it measured clean, but
+                                   # ROTATION_VECTOR shares the rotation pipe and
+                                   # taking the magnetometer cost derotation and
+                                   # two flights. Stays off.
+
+    # --- height source ---
+    # 9 Oct: the TF03 went from not fitted to PRIMARY below ~56 m. Flown.
+    # 94% usable below 58 m (stuck 0.7%, out of range 5.3%, spikes 0.2%).
+    #
+    # READ FROM THE FLIGHT CONTROLLER, log 00000195.BIN (15 Oct, the last
+    # flight on the card and later than every status report):
+    #   RNGFND1_MAX     60      <- so 60, not the report's approximate 56
+    #   RNGFND1_TYPE    1       = ANALOG
+    #   RNGFND1_PIN     4
+    #   RNGFND1_SCALING 72.61   RNGFND1_OFFSET 0.606977  RNGFND1_RMETRIC 1
+    #   RNGFND1_GNDCLR  0.13    RNGFND1_ORIENT 25 (down)
+    #
+    # Note what that says: it is STILL on an analog pin. 5 Oct blamed the
+    # lidar's 253 cm reading against a true 86 cm on "a serial TF03 wired to an
+    # analog pin", so it is tempting to assume it was rewired to serial. It was
+    # not. What fixed it was calibrating the analog path - that SCALING and
+    # OFFSET - not changing the wiring. Moving it to a serial port is still
+    # available and still unmeasured.
+    lidar_max_alt_m: float = 60.0  # above this, height comes from the barometer
+
+    # --- heading ---
+    # NOT the camera. 4 Oct tested GAME_ROTATION_VECTOR's yaw for exactly this
+    # and it cannot do it. Heading is still the FC compass, which is the last
+    # hard dependency: the whole position solution rotates with it.
+    heading_from_camera: bool = False
 
     def R(self) -> np.ndarray:
         return np.asarray(self.R_vio_to_ned, float)
