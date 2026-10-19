@@ -54,8 +54,22 @@ class CuavMavlinkClient:
 
         # TF03 LiDAR Rangefinder Telemetry & Freshness Tracking
         # LiDAR still on airframe (~11cm). Downward OAK now under battery (~3cm lens-to-floor).
-        self.lidar_ground_clearance_m = 0.125   # measured 17 Sep: TF03 lens to ground
-        self.camera_ground_clearance_m = 0.035  # measured 17 Sep: camera lens to ground
+        # Measured on the ZD850 hexa, 19 Oct, aircraft standing on its gear.
+        # The quad read 0.125 / 0.035 (17 Sep); the ZD850's 350 mm landing gear
+        # more than doubles both. These are not cosmetic: lidar_ground_clearance
+        # is subtracted from every TF03 reading to get AGL, and
+        # camera_ground_clearance is the camera's lever arm in the landing path.
+        # At 110 m a 13 cm error is 0.1% and invisible; near the ground - which
+        # is exactly where the unexplained descent error lives - it is not.
+        self.lidar_ground_clearance_m = 0.26    # TF03 lens to ground
+        self.camera_ground_clearance_m = 0.17   # camera lens to ground
+        # What actually changes: AGL. drone_agl_from_lidar subtracts this from
+        # every TF03 reading, so the same reading is now 13.5 cm LOWER AGL than
+        # it was. The camera's HEIGHT above ground is unchanged, because the
+        # camera-to-lidar delta is still -0.09 m - it was -0.09 on the quad too
+        # (0.035 - 0.125), despite the old docstring here claiming +0.02 with
+        # the camera above the lidar. The docstring was wrong; the numbers were
+        # not. cam_lever_m in flight_daemon does change, by the same 13.5 cm.
         self.tf03_h_m = 0.00
         self.tf03_h_age_s = 999.0
         self.tf03_h_valid = False
@@ -602,10 +616,18 @@ class CuavMavlinkClient:
     def get_camera_height(self, max_age_s=0.25):
         """
         Thread-safe getter for camera height above ground H_cam.
-        Physical mounting:
-        - Camera lens to ground: 0.13m (13cm)
-        - TF03 LiDAR lens to ground: 0.11m (11cm)
-        - Delta: Camera is +0.02m (+2cm) above LiDAR lens.
+
+        Physical mounting on the ZD850 hexa, measured 19 Oct:
+        - TF03 LiDAR lens to ground: 0.26 m
+        - Camera lens to ground:     0.17 m
+        - Delta: the camera is 0.09 m BELOW the lidar lens.
+
+        The delta is the SAME as it was on the quad (0.035 - 0.125 = -0.09), so
+        this getter returns what it always did for a given TF03 reading. The
+        previous version of this docstring said 0.13 / 0.11 and "+0.02 above",
+        which contradicted the constants it was documenting. Trust the
+        constants.
+
         Returns: (cam_height_m, age_s, is_valid)
         """
         lidar_h, age_s, is_valid = self.get_tf03_height(max_age_s=max_age_s)

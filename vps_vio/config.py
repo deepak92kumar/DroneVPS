@@ -143,6 +143,12 @@ class VpsConfig:
     #   RNGFND1_SCALING 72.61   RNGFND1_OFFSET 0.606977  RNGFND1_RMETRIC 1
     #   RNGFND1_GNDCLR  0.13    RNGFND1_ORIENT 25 (down)
     #
+    # GNDCLR is now 0.26, read back off the FC on 19 Oct after the move to the
+    # ZD850 hexa - its 350 mm landing gear doubles the lidar's height above the
+    # ground. The matching code-side constants are in cuav_mavlink_bridge
+    # (lidar 0.26, camera 0.17), and on this airframe the camera sits BELOW the
+    # lidar rather than above it.
+    #
     # Note what that says: it is STILL on an analog pin. 5 Oct blamed the
     # lidar's 253 cm reading against a true 86 cm on "a serial TF03 wired to an
     # analog pin", so it is tempting to assume it was rewired to serial. It was
