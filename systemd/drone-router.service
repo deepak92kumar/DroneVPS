@@ -1,0 +1,29 @@
+[Unit]
+# Owns /dev/ttyTHS1 alone and hands it out over UDP. Everything else that
+# wants the flight controller is a client of this, which is what removes the
+# "two readers split one stream" failure that vps_vio/fc_port.py worked around
+# by stopping the recorder.
+Description=MAVLink router - sole owner of the FC serial line
+After=multi-user.target
+Before=drone-vps.service drone-rc-switch.service
+
+[Service]
+Type=simple
+User=abc
+# The port is root:dialout. usermod alone does not help a service, which gets
+# its groups fresh at start, so name the group here.
+SupplementaryGroups=dialout
+WorkingDirectory=/home/abc/Desktop/DRONE
+# 921600 is what the FC flies: SERIAL2_BAUD reads 921 in log 00000195.BIN.
+ExecStart=/usr/bin/python3 /home/abc/Desktop/DRONE/mavlink_router.py \
+    --port /dev/ttyTHS1 --baud 921600 --listen 127.0.0.1:14650
+Restart=always
+RestartSec=2
+# /run/drone, owned by abc, created at start and removed on stop. The liveness
+# file and the watchdog state live here rather than /tmp.
+RuntimeDirectory=drone
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+
+[Install]
+WantedBy=multi-user.target

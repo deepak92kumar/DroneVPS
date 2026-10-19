@@ -410,6 +410,11 @@ def main():
                     help="transmit VISION_POSITION_ESTIMATE (disarmed only)")
     ap.add_argument("--send-gps", action="store_true",
                     help="inject as GPS2 via GPS_INPUT, Stride-style (disarmed only)")
+    ap.add_argument("--liveness", default="",
+                    help="file to touch each loop so the watchdog can tell "
+                         "this node apart from a process that is merely alive. "
+                         "systemd Restart= only catches a CRASH; a node stuck "
+                         "waiting on the camera stays 'active' forever.")
     ap.add_argument("--send-vel", action="store_true",
                     help="also send horizontal velocity in GPS_INPUT. OFF by "
                          "default: this is the channel that reported 47.7 m/s "
@@ -517,6 +522,19 @@ def main():
                     break
                 sender.send(est["north"], est["east"], -est["alt"],
                             f["roll"], f["pitch"], f["yaw"])
+            if a.liveness:
+                # Written, not just touched: the mtime says the loop ran and
+                # the contents say what it was doing, so a watchdog log shows
+                # WHY it stalled rather than only that it did.
+                try:
+                    tmp = a.liveness + ".tmp"
+                    with open(tmp, "w") as lf:
+                        lf.write(f"t={est['t']:.2f} n={n} tracks={est['tracks']} "
+                                 f"sigma={est['sigma']:.1f} fixes={node.n_fix} "
+                                 f"flow={node.n_flow} vel={v.reason}\n")
+                    os.replace(tmp, a.liveness)   # atomic; never a half file
+                except OSError:
+                    pass
             if n % 200 == 0:
                 print(f"  {est['t']:7.1f}s  N {est['north']:8.1f}  E {est['east']:8.1f}  "
                       f"sigma {est['sigma']:5.1f}  tracks {est['tracks']:4d}  "

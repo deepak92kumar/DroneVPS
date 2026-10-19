@@ -1,0 +1,11 @@
+[Unit]
+Description=Check the VPS loop every 15 seconds
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=15
+AccuracySec=1s
+Unit=drone-watchdog.service
+
+[Install]
+WantedBy=timers.target

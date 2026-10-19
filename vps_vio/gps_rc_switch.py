@@ -33,19 +33,23 @@ from pymavlink import mavutil
 sys.path.insert(0, __import__('os').path.dirname(__import__('os').path.abspath(__file__)))
 from fc_port import exclusive_fc
 
-PORT, BAUD = "/dev/ttyTHS1", 115200
+# Defaults are the direct serial line, which is what this did before the
+# router existed. The systemd unit passes the router's UDP endpoint instead:
+# with one owner of the port there is no contention to work around.
+PORT, BAUD = "/dev/ttyTHS1", 921600
 
 
 class RcGpsSwitch:
     def __init__(self, channel=11, high_us=1750, allow_armed=False,
-                 require_vps_fix=True, stable_n=4):
+                 require_vps_fix=True, stable_n=4, port: str | None = None):
         self.ch = int(channel)
         self.high = int(high_us)
         self.allow_armed = bool(allow_armed)
         self.require_fix = bool(require_vps_fix)
         self.stable_n = int(stable_n)
 
-        self.m = mavutil.mavlink_connection(PORT, baud=BAUD, source_system=1,
+        self.m = mavutil.mavlink_connection(port or PORT, baud=BAUD,
+                                            source_system=1,
                                             source_component=221)
         if self.m.wait_heartbeat(timeout=20) is None:
             sys.exit("FC se heartbeat nahi aaya")
@@ -170,8 +174,12 @@ def main():
                     help="hawa mein bhi switch karne do (pehle zameen par test karo)")
     ap.add_argument("--no-fix-check", action="store_true",
                     help="VPS ka fix check mat karo (SAFAI NAHI - test ke liye)")
+    ap.add_argument("--port", default=PORT,
+                    help="serial device, or a pymavlink endpoint such as "
+                         "udpout:127.0.0.1:14650 to go through the router")
     a = ap.parse_args()
-    sw = RcGpsSwitch(a.channel, a.high_us, a.allow_armed, not a.no_fix_check)
+    sw = RcGpsSwitch(a.channel, a.high_us, a.allow_armed, not a.no_fix_check,
+                     port=a.port)
     try:
         sw.run()
     except KeyboardInterrupt:
@@ -179,5 +187,12 @@ def main():
 
 
 if __name__ == "__main__":
-    with exclusive_fc():
+    # exclusive_fc stops the recorder so two readers do not split one serial
+    # stream. Through the router there is only ever one reader of the port, so
+    # pausing anything would be pointless - and on a service that must stay up
+    # it would be harmful.
+    if any(a.startswith(("udp", "tcp")) for a in sys.argv[1:]):
         main()
+    else:
+        with exclusive_fc():
+            main()

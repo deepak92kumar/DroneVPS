@@ -1,0 +1,11 @@
+[Unit]
+# Oneshot: the timer runs it. Root, because it calls systemctl restart.
+Description=Restart the VPS node when its loop stalls
+After=drone-router.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /home/abc/Desktop/DRONE/drone_watchdog.py --once \
+    --unit drone-vps.service --liveness /run/drone/vps.alive \
+    --stale-after 15 --min-interval 60 --max-restarts 3 \
+    --state /run/drone/watchdog.state

@@ -1,0 +1,24 @@
+[Unit]
+# The VPS node: flow, map fixes, fusion, and the GPS_INPUT injection.
+Description=DroneVPS node (flow + map matching + GPS_INPUT)
+After=drone-router.service
+Requires=drone-router.service
+
+[Service]
+Type=simple
+User=abc
+WorkingDirectory=/home/abc/Desktop/DRONE/vps_vio
+# --send-vel is NOT here on purpose. Velocity is the 54% row and the channel
+# that caused four EKF failsafes on 28 Sep; turning it on is a deliberate act
+# with its own bench step, not a boot default.
+ExecStart=/usr/bin/python3 /home/abc/Desktop/DRONE/vps_vio/live_node.py \
+    --live --gps2 --liveness /run/drone/vps.alive
+Restart=always
+RestartSec=5
+# Restart= catches a crash. It does NOT catch a loop stuck on a camera frame,
+# which is what the liveness file above and drone-watchdog.timer are for.
+StandardOutput=append:/home/abc/Desktop/DRONE/flight_logs/vps_stdout.log
+StandardError=append:/home/abc/Desktop/DRONE/flight_logs/vps_stderr.log
+
+[Install]
+WantedBy=multi-user.target

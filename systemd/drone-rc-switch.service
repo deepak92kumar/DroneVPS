@@ -1,0 +1,19 @@
+[Unit]
+# Channel 11, three-position: the pilot chooses GPS1 or GPS2. It never falls
+# back on its own - that decision stays with the pilot.
+Description=RC GPS1/GPS2 switch watcher
+After=drone-router.service
+Requires=drone-router.service
+
+[Service]
+Type=simple
+User=abc
+WorkingDirectory=/home/abc/Desktop/DRONE/vps_vio
+# Through the router, so no serial contention and no exclusive_fc dance.
+ExecStart=/usr/bin/python3 /home/abc/Desktop/DRONE/vps_vio/gps_rc_switch.py \
+    --port udpout:127.0.0.1:14650 --channel 11
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
