@@ -982,7 +982,16 @@ class VpsNode:
         self.focal_y = float(focal_px if focal_y_px is None else focal_y_px)
         self.tracker = FlowTracker(max_corners=max_corners, K=K, D=D)
         self.fuser = MapFuser(flow_drift_frac=0.07, fix_sigma_m=12.0)
-        self.worker = MapFixWorker(cache, focal_px=focal_px, radius_m=radius_m)
+        # K's cx/cy go to the worker, so a map fix means the point under the
+        # camera rather than the point under the middle of the image. The two
+        # are 80 px apart on the leg-cropped frame = 11 m at 110 m, and
+        # FlowTracker has always used cx/cy, so this is also what stops the
+        # map path and the flow path disagreeing about where the aircraft is.
+        self.worker = MapFixWorker(
+            cache, focal_px=focal_px, radius_m=radius_m,
+            principal_xy=(None if K is None
+                          else (float(np.asarray(K).reshape(3, 3)[0, 2]),
+                                float(np.asarray(K).reshape(3, 3)[1, 2]))))
         self.fix_period = float(fix_period_s)
         self.origin = None            # (lon, lat)
         self.mlon = None

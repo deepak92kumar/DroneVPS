@@ -21,8 +21,24 @@ import numpy as np
 def north_up_query(img_grey: np.ndarray, *, altitude_m: float, focal_px: float,
                    yaw_deg: float, map_gsd_m: float,
                    map_gsd_x_m: float | None = None,
-                   keep: float = 0.95) -> np.ndarray:
+                   keep: float = 0.95, track_xy=None):
     """Rescale to the map's GSD and rotate north-up, then keep the centre.
+
+    With `track_xy` = (x, y), a pixel of the INPUT frame, this also returns
+    where that pixel ended up in the query it produces: (query, (x, y)).
+    Without it, just the query, as before.
+
+    That exists for one caller and one reason. Whoever matches this query gets
+    a translation, and turning that into a position means naming WHICH pixel of
+    the camera frame the position belongs to. Until 20 Oct everyone took the
+    geometric centre, because that is what the crop below is centred on - but
+    the point under the camera is the one the optical axis pierces, which is
+    the principal point (cx, cy), and this frame is the 130 px leg-crop whose
+    cx sits 80 px off its middle. 80 px is 11 m of ground at 110 m. The
+    transform has three stages that each move a pixel, so the only safe place
+    to follow one through them is here, inside the function that applies them:
+    anything that recomputed the chain outside would drift from it the next
+    time one of the stages changed.
 
     Rotation leaves black corners. Cropping them away entirely (keep 0.5-0.62)
     measured far worse than tolerating them - context is what makes the peak
@@ -41,8 +57,19 @@ def north_up_query(img_grey: np.ndarray, *, altitude_m: float, focal_px: float,
     scale = (altitude_m / float(focal_px)) / map_gsd_m
     q = cv2.resize(img_grey, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
     h, w = q.shape
+    # cv2's pixel centres: input u maps to (u + 0.5) * scale - 0.5. The half
+    # pixel is 0.07 px here against the 80 px this is for, but writing the
+    # convention down costs nothing and guessing it wrong later costs a day.
+    pt = (None if track_xy is None
+          else np.array([(float(track_xy[0]) + 0.5) * scale - 0.5,
+                         (float(track_xy[1]) + 0.5) * scale - 0.5], float))
     M = cv2.getRotationMatrix2D((w / 2, h / 2), -yaw_deg, 1.0)
     q = cv2.warpAffine(q, M, (w, h))
+    if pt is not None:
+        # The SAME M the image was warped by, so the point cannot disagree
+        # with the pixels. Rotation is about the geometric centre; the
+        # principal point is not at it, so it genuinely moves here.
+        pt = M @ np.array([pt[0], pt[1], 1.0])
 
     # The map's pixels are not square IN METRES, and that is a 16.5% error here.
     #
@@ -63,9 +90,21 @@ def north_up_query(img_grey: np.ndarray, *, altitude_m: float, focal_px: float,
     if map_gsd_x_m and abs(map_gsd_x_m - map_gsd_m) > 1e-9:
         # Map pixels are SMALLER in metres east-west, so the same ground
         # distance spans MORE of them: stretch x.
-        q = cv2.resize(q, None, fx=map_gsd_m / float(map_gsd_x_m), fy=1.0,
-                       interpolation=cv2.INTER_LINEAR)
+        kx = map_gsd_m / float(map_gsd_x_m)
+        q = cv2.resize(q, None, fx=kx, fy=1.0, interpolation=cv2.INTER_LINEAR)
         h, w = q.shape
+        if pt is not None:
+            # AFTER the rotation, exactly as the image is - the anisotropy
+            # lives in the map's axes, not the camera's. Applying it to the
+            # point before the rotation would reintroduce an error of the same
+            # size as the one this function already documents.
+            pt = np.array([(pt[0] + 0.5) * kx - 0.5, pt[1]], float)
 
     s = int(min(h, w) * keep) // 2
-    return q[h // 2 - s:h // 2 + s, w // 2 - s:w // 2 + s]
+    x0, y0 = w // 2 - s, h // 2 - s
+    out = q[y0:y0 + 2 * s, x0:x0 + 2 * s]
+    if pt is None:
+        return out
+    # Into the cropped query's own coordinates, which is the frame the matcher
+    # returns a translation in.
+    return out, (float(pt[0] - x0), float(pt[1] - y0))

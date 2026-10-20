@@ -58,9 +58,19 @@ class MapFixWorker:
                  radius_m: float = 150.0, window_alt_frac: float = 0.60,
                  min_alt_m: float = 60.0, fix_period_s: float = 2.0,
                  min_score: float | None = None,
-                 min_margin: float | None = None):
+                 min_margin: float | None = None,
+                 principal_xy=None):
         self.cache = cache
         self.focal_px = float(focal_px)
+        # (cx, cy) of the frames being handed in, when the caller knows them.
+        # A fix is consumed as the AIRCRAFT's position, and the pixel that
+        # corresponds to is the one the optical axis pierces, not the middle
+        # of the image - 80 px apart on this camera's leg-cropped frames,
+        # which is 11 m of ground at 110 m, in the same direction every frame.
+        # None keeps the old geometric-centre behaviour for a caller that has
+        # no K: wrong by that offset, but not silently different.
+        self.principal_xy = (None if principal_xy is None
+                             else (float(principal_xy[0]), float(principal_xy[1])))
         self.matcher = matcher.lower()
         self.radius_m = float(radius_m)
         self.window_alt_frac = float(window_alt_frac)
@@ -161,7 +171,8 @@ class MapFixWorker:
                         yaw_deg=yaw, map_gsd_m=self.cache.gsd,
                         map_gsd_x_m=getattr(self.cache, "gsd_x", None),
                         min_score=self.min_score, min_margin=self.min_margin,
-                        window_is_edges=(self._window_kind == "edges"))
+                        window_is_edges=(self._window_kind == "edges"),
+                        principal_xy=self.principal_xy)
             except Exception:
                 res = None
             out = None

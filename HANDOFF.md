@@ -347,19 +347,30 @@ Be honest about this with the pilot; they ask, and they are right to.
   `vps_vio/lidar_filter.py` cleans what the *companion* records and uses; a
   lidar spike below 42 m still reaches the height estimate.
 - **The router resyncs on about 0.71% of frames.** Low, not zero, unexplained.
-- **The matcher reports the IMAGE CENTRE, not the principal point — a ~11 m
-  systematic bias in the flying path.** `map_query.north_up_query` rotates
-  about `(w/2, h/2)` and never reads `cx`. The frames are the 130 px leg-crop,
-  so cx 494.89 sits 80.1 px from the geometric centre of 575; at 110 m and
-  0.139 m/px that is 11.1 m, and `live_node` feeds the match straight into
-  `MapFuser` as the aircraft's position. Measured by re-running the same 30
-  frames with the correction applied: **10.91 m median, 15.22 m max**, scaling
-  with altitude (~7 m at 70 m, ~15 m at 150 m). It is in the SAME DIRECTION on
-  every frame, which is the kind of error that never shows up as a worse match.
-  Whether the principal point is the right reference is a question about the
-  flying code, not about offline matching — but the offset is real and nothing
-  has decided it yet. `match_flight.py --pp-correct` applies it; the flight
-  path does not.
+- **The ~11 m principal-point bias is FIXED, and has not flown.** A map fix
+  used to report where the image's geometric centre landed, because
+  `north_up_query` rotates about `(w/2, h/2)` and never read `cx`, while
+  `live_node` feeds the result into `MapFuser` as the aircraft's position. The
+  aircraft is under the pixel the optical axis pierces — the principal point —
+  and on the 130 px leg-cropped frame cx 494.89 sits 80.1 px from the
+  geometric centre of 575, which is **11.4 m** of ground at 110 m (7.1 m at
+  70, 15.6 m at 150; it is a pixel offset, so metres per pixel is the
+  altitude). `flow_odom` has used K's cx/cy as its centre since 28 Sep, so for
+  as long as both paths have run they disagreed about where the aircraft was
+  by that much, and nothing in either could say so: the offset is in the same
+  direction on every frame, so every frame matched just as well.
+  `north_up_query` now tracks a pixel through its own three stages
+  (`track_xy`), `locate` takes `principal_xy`, `MapFixWorker` carries it and
+  `live_node` passes K's cx/cy. A caller with no K gets the old behaviour
+  rather than a silently different answer. `tests/test_principal_point.py`
+  pins the sign (applied backwards it doubles to 22 m and still matches), the
+  magnitude at three altitudes, the order relative to the anisotropy stretch,
+  and that it rotates with yaw. **What has NOT happened: no flight, and no
+  real frame.** It is a constant offset in the body frame, so in the map frame
+  it rotates with yaw, and `MapFuser`'s 0.5 m cap at 0.5 s gives the map 1 m/s
+  to walk it in — an 11 m step takes ~11 s of fixes, and a fast 180° yaw turn
+  moves the target ~23 m, which is ~23 s of walking. At hover pace that is
+  absorbed; whether it fights anything in a turn is unmeasured.
 - **No flight has been recorded with frames yet.** The camera CAN now be
   shared (§5) and it is bench-proven — 2132 rows, 138 images, every name a
   file — but bench frames are a room at `alt_rel` 0.1 m, so `analyse_flight.py`
@@ -446,7 +457,7 @@ tested only by their own small test directory. What is left is what runs.
 │   ├── rc_watch.py          which RC channel moves when you flip a switch
 │   └── map_match.py         older matcher, kept for offline comparison
 │
-├── tests/                   34 suites. Each prints PASS/FAIL, exits non-zero
+├── tests/                   35 suites. Each prints PASS/FAIL, exits non-zero
 │   │                        on failure, and its docstring names the real
 │   │                        failure it pins, with dates and numbers.
 │   ├── test_vio_gap_fill.py       the accelerometer filling the frame gap
@@ -461,6 +472,7 @@ tested only by their own small test directory. What is left is what runs.
 │   ├── test_frame_recording.py    a frame is dropped, never waited for
 │   ├── test_analyse_flight.py     an image joins back to its row's pose
 │   ├── test_match_flight.py       the wrong sheet is not "nothing matched"
+│   ├── test_principal_point.py    a fix is about the point under the camera
 │   ├── test_lidar_filter.py       spikes up and down
 │   ├── test_map_anisotropy.py     9/9 with the correction, 0/9 without
 │   ├── test_velocity_bridge.py    the 8 Oct collapse, pinned
@@ -538,7 +550,7 @@ nothing that a jumping clock can corrupt.
 # Is the aircraft ready?
 /data/DRONE/systemd/after_reboot_check.sh
 
-# Every test suite (34 of them). Each prints PASS/FAIL and exits non-zero.
+# Every test suite (35 of them). Each prints PASS/FAIL and exits non-zero.
 # test_analyse_flight builds AKAZE over the whole sheet: allow it ~30 s.
 cd /data/DRONE && for t in tests/test_*.py; do python3 "$t"; done
 

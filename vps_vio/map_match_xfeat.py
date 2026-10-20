@@ -184,7 +184,8 @@ def locate(img_grey: np.ndarray, map_window: np.ndarray, geo_window, *,
            altitude_m: float, focal_px: float, yaw_deg: float, map_gsd_m: float,
            map_gsd_x_m: float | None = None, min_inliers: int = 12, min_score: float = 0.25,
            min_margin: float = 0.20, tol_px: float = 4.0,
-           window_is_edges: bool = False) -> XFeatResult:
+           window_is_edges: bool = False,
+           principal_xy=None) -> XFeatResult:
     """Match one frame to a map window and read off lon/lat.
 
     geo_window maps window pixel -> lon/lat.
@@ -214,9 +215,26 @@ def locate(img_grey: np.ndarray, map_window: np.ndarray, geo_window, *,
     # Scale from altitude, rotation from the compass. Same preparation the NCC
     # path uses, so the two matchers see the identical query and can be scored
     # against each other on the same recording.
+    # WHICH PIXEL THE ANSWER IS ABOUT. A translation on its own does not say
+    # where the aircraft is; it says how far the query moved. The position
+    # belongs to the pixel the optical axis goes through - the principal point
+    # (cx, cy) - because that is the camera's own position projected onto the
+    # ground. The geometric centre is 80 px away from it on this camera, since
+    # the frames are the 130 px leg-crop, and 80 px is 11 m of ground at
+    # 110 m: a bias in the SAME direction on every frame, which never shows up
+    # as a worse match. flow_odom has always used K's cx/cy as its centre, so
+    # until 20 Oct the two paths disagreed about where the aircraft was.
+    #
+    # principal_xy stays optional and falls back to the geometric centre, so a
+    # caller that does not know K gets exactly the old behaviour rather than a
+    # silently different answer.
     q = north_up_query(img_grey, altitude_m=altitude_m, focal_px=focal_px,
                        yaw_deg=yaw_deg, map_gsd_m=map_gsd_m,
-                       map_gsd_x_m=map_gsd_x_m)
+                       map_gsd_x_m=map_gsd_x_m,
+                       track_xy=None if principal_xy is None else principal_xy)
+    qc_tracked = None
+    if principal_xy is not None:
+        q, qc_tracked = q
     if min(q.shape[:2]) < 32:
         return XFeatResult(False, reason="query too small after rescaling")
 
@@ -238,8 +256,9 @@ def locate(img_grey: np.ndarray, map_window: np.ndarray, geo_window, *,
     ratio = n_in / max(n_total, 1)
     margin = max(0.0, 1.0 - mad / float(tol_px))
 
-    # Where the query centre lands on the map, through that translation.
-    qc = np.array([q.shape[1] / 2.0, q.shape[0] / 2.0])
+    # Where that pixel lands on the map, through the translation just fitted.
+    qc = (np.array([q.shape[1] / 2.0, q.shape[0] / 2.0]) if qc_tracked is None
+          else np.array(qc_tracked, float))
     mc = qc + off
     lon, lat = geo_window.to_lonlat(float(mc[0]), float(mc[1]))
     lon, lat = float(lon), float(lat)
