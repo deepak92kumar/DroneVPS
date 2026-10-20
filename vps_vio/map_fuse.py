@@ -54,6 +54,7 @@ class MapFuser:
         self.n_capped = 0
         self.pos = np.zeros(2)               # North, East, metres from origin
         self.var = float(init_sigma_m) ** 2
+        self._init_var = float(init_sigma_m) ** 2
         self.k = float(flow_drift_frac)
         self.floor = float(flow_noise_floor_m)
         self.fix_var = float(fix_sigma_m) ** 2
@@ -62,6 +63,28 @@ class MapFuser:
         self.n_fix = self.n_rejected = 0
         self.consec_rejected = 0
         self.last_residual_m = 0.0
+
+    def reset_displacement(self) -> None:
+        """Zero the VIO's dead reckoning, because its starting point moved.
+
+        Read the class this way, because the name is misleading: `pos` is not
+        the map's. It is the displacement the VIO has accumulated - flow and
+        the accelerometer, through predict() - and the map's only part is
+        update(), which corrects it. Anchoring belongs to the VIO; the map
+        supplies absolute lat/lon and nothing else.
+
+        So this is a VIO operation and the map never calls it. It exists for
+        one case: the ORIGIN is re-taken at arm, and a displacement measured
+        from the old origin means nothing against the new one. Carrying it
+        over would appear as the aircraft having jumped by exactly the
+        distance the origin moved - which is the whole fault this is here to
+        prevent.
+
+        The uncertainty goes back to its initial value too: we have just been
+        placed on a fresh measurement, so we know where we are again.
+        """
+        self.pos = np.zeros(2)
+        self.var = self._init_var
 
     @property
     def sigma_m(self) -> float:

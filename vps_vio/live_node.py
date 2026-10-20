@@ -788,31 +788,45 @@ def accel_to_ne(ax: float, ay: float, yaw_deg: float):
 def choose_origin(cli_origin, scr_origin, gps_primary, gps_fix):
     """Where the origin may come from. Returns ((lon, lat), why) or (None, why).
 
-    Precedence, and the middle rule is the pilot's:
+    Precedence, and the middle rule is the pilot's, restated 20 Oct:
 
       1. --origin             an explicit instruction beats everything
-      2. SCR_USER1/2          the point typed on the RC
-      3. the live receiver    ONLY when GPS_PRIMARY == 0
+      2. the live receiver    but ONLY when GPS_PRIMARY == 0
+      3. SCR_USER1/2          the point typed on the RC
 
-    While the aircraft is on the VPS, the receiver is not an acceptable origin
-    whatever it is reporting. A receiver that happens to have a fix sitting on
-    the bench before arming must not quietly become the origin, because every
-    position afterwards is measured from it.
+    "arm karte samay agar gps par hai tho waha se lat long update kar lena,
+     agar vps par hai tab scr 12 se data lo"
 
-    GPS_PRIMARY of None - we could not ask - is treated as "on the VPS", not as
-    "on the receiver". Not knowing must never be the state that permits a
+    The receiver and SCR_USER swapped places, and the reason is three flights
+    of evidence. SCR_USER kept being left at a point 147-157 m from where the
+    aircraft actually stood, because it is typed by hand and the aircraft
+    moves. Every VPS position is measured from the origin, so switching to the
+    VPS with the origin 150 m out hands the EKF a 150 m step and the aircraft
+    flies off to "correct" it. The receiver, when the switch is on the
+    receiver, is simply where the aircraft IS.
+
+    This is not a return to the 13 Oct fault, which was the receiver winning
+    UNCONDITIONALLY and quietly adopting a stale site. Two things stop that
+    here: it wins only while GPS_PRIMARY is 0 - the pilot has the aircraft on
+    the receiver and is therefore already trusting it - and the origin is
+    re-taken at ARM (see reanchor_on_arm), when the aircraft is standing on
+    the ground at the place it is about to fly from.
+
+    On the VPS the receiver is still not an acceptable origin whatever it is
+    reporting, and GPS_PRIMARY of None - we could not ask - is still treated as
+    "on the VPS". Not knowing must never be the state that permits a
     GPS-derived origin.
     """
     if cli_origin is not None:
         return cli_origin, "--origin"
+    if gps_primary == 0 and gps_fix is not None:
+        return gps_fix, "the live receiver (GPS_PRIMARY=0)"
     if scr_origin is not None:
         return scr_origin, "SCR_USER1/2 (typed on the RC)"
     if gps_primary == 0:
-        if gps_fix is not None:
-            return gps_fix, "the live receiver (GPS_PRIMARY=0)"
         return None, "waiting for a receiver fix"
     if gps_primary == 1:
-        return None, "the aircraft is on the VPS"
+        return None, "the aircraft is on the VPS and SCR_USER1/2 is not set"
     return None, "GPS_PRIMARY could not be read"
 
 
@@ -1478,6 +1492,9 @@ def main():
     amsl_ref = AmslRef(a.site_alt)
 
     _origin_refused = [False]
+    # The armed flag as of the last frame, so the disarmed -> armed EDGE can be
+    # seen. None until the origin is first taken.
+    _armed_was = [None]
     errs, t_start, n = [], time.perf_counter(), 0
     last_sync = 0.0
     try:
@@ -1514,6 +1531,7 @@ def main():
                                        Notifier.SEV_CRIT)
                     continue
                 node.set_origin(*chosen)
+                _armed_was[0] = f.get("armed")
                 olon, olat = node.origin
                 covered = cache.covers(olon, olat)
                 print(f"origin from {why}: {olat:.6f}, {olon:.6f}")
@@ -1563,6 +1581,51 @@ def main():
                     f"VPS LIDAR ZERO OK {rng:.2f}m" if rng < 1.5
                     else f"LIDAR ZERO {rng:.1f}m - NO AUTO-DISARM"[:50],
                     Notifier.SEV_INFO if rng < 1.5 else Notifier.SEV_WARN)
+
+            # THE ORIGIN IS RE-TAKEN AT ARM. The pilot's instruction, and
+            # three flights of evidence behind it: SCR_USER1/2 was left 147,
+            # 148 and 157 m from where the aircraft actually stood, because it
+            # is typed by hand and the aircraft moves. Every VPS position is
+            # measured from the origin, so flipping to the VPS with the origin
+            # 150 m out hands the flight controller a 150 m step.
+            #
+            # At the moment of arming the aircraft is standing still on the
+            # ground at the place it is about to fly from, which is the one
+            # moment its position is certainly known. So:
+            #
+            #   on the receiver (GPS_PRIMARY 0) -> take the receiver's fix
+            #   on the VPS                      -> take SCR_USER1/2
+            #
+            # and the VIO's accumulated displacement goes back to zero,
+            # because it was measured from the origin that just moved.
+            # Anchoring is the VIO's job; the map only corrects it afterwards.
+            armed_now = f.get("armed")
+            if (armed_now is True and _armed_was[0] is not True
+                    and node.origin is not None):
+                src_now = watcher.value
+                new_o = why_o = None
+                if src_now == 0 and f["gps"]:
+                    new_o, why_o = f["gps"], "receiver at arm"
+                elif scr_origin is not None:
+                    new_o, why_o = scr_origin, "SCR_USER1/2 at arm"
+                if new_o is not None:
+                    moved = float(np.hypot(
+                        (new_o[1] - node.origin[1]) * M_PER_DEG_LAT,
+                        (new_o[0] - node.origin[0]) * node.mlon))
+                    node.set_origin(*new_o)
+                    node.fuser.reset_displacement()
+                    print(f"ARM: origin re-taken from {why_o}: "
+                          f"{new_o[1]:.6f}, {new_o[0]:.6f} "
+                          f"(moved {moved:.0f} m)", flush=True)
+                    notifier.event("reanchor", round(moved),
+                                   f"VPS ORIGIN {why_o} {moved:.0f}m"[:50],
+                                   Notifier.SEV_INFO if moved < 50
+                                   else Notifier.SEV_WARN)
+                else:
+                    notifier.event("reanchor", "none",
+                                   "VPS ORIGIN NOT RE-TAKEN AT ARM",
+                                   Notifier.SEV_WARN)
+            _armed_was[0] = armed_now
 
             gN = gE = err = None
             if f["gps"]:

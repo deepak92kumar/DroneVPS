@@ -36,10 +36,30 @@ def got(cli, scr, primary, fix):
     return o, why
 
 
-print("the typed point wins, on either source")
-for primary, label in ((ON_VPS, "on the VPS"), (ON_GPS, "on the receiver")):
-    o, why = got(None, SCR, primary, GPS)
-    check(f"SCR_USER used {label}", o == SCR, f"{o} / {why}")
+# CHANGED 20 Oct, at the pilot's instruction, and the reason is three flights:
+# SCR_USER1/2 was found 147, 148 and 157 m from where the aircraft actually
+# stood, every time, because it is typed by hand and the aircraft moves.
+# Every VPS position is measured from the origin, so flipping to the VPS with
+# the origin 150 m out hands the flight controller a 150 m step and it flies
+# off to "correct" it. When the switch is on the RECEIVER, the receiver is
+# simply where the aircraft is - so there it now wins.
+#
+# This test used to assert the opposite ("the typed point wins, on either
+# source"). The rule it pinned was real and is now deliberately gone; what
+# must NOT change is the rule below it - on the VPS the receiver is forbidden
+# whatever it is reporting - and that is still pinned, twice.
+print("on the VPS the typed point wins; on the receiver the receiver does")
+o, why = got(None, SCR, ON_VPS, GPS)
+check("SCR_USER used on the VPS", o == SCR, f"{o} / {why}")
+o, why = got(None, SCR, ON_GPS, GPS)
+check("the receiver used on the receiver, even with SCR_USER set",
+      o == GPS, f"{o} / {why}")
+o, why = got(None, SCR, ON_GPS, None)
+check("but SCR_USER still catches it when the receiver has no fix",
+      o == SCR, f"{o} / {why}")
+o, why = got(None, SCR, UNKNOWN, GPS)
+check("and an unreadable GPS_PRIMARY falls back to the typed point, "
+      "never the receiver", o == SCR, f"{o} / {why}")
 
 print("\nan explicit --origin beats everything")
 for primary in (ON_VPS, ON_GPS, UNKNOWN):
