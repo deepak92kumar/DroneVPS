@@ -297,7 +297,18 @@ class LiveSource:
                 # standstill. It has to be caught here: the bridge cannot tell
                 # a still aircraft from a dead accelerometer, and downstream
                 # accel_n would have counted up either way.
-                la = getattr(packet, "linearAcceleration", None)
+                # acceleroMeter, not linearAcceleration - there is no field
+                # by that name. Every accelerometer-family report lands in
+                # this one slot, and WHICH of them it carries is decided by
+                # enableIMUSensor above: we ask for LINEAR_ACCELERATION, so
+                # what arrives here has already had gravity removed.
+                #
+                # Reading a field that does not exist cost the whole feature
+                # silently: getattr returned None on every packet, accel_n sat
+                # at 0 for the entire run, and the velocity bridge went on
+                # being flow-only while the code read as though it were not.
+                # The CSV is what showed it.
+                la = getattr(packet, "acceleroMeter", None)
                 if la is not None:
                     ts = la.getTimestampDevice().total_seconds()
                     if self._t_accel is None or ts > self._t_accel:
@@ -508,6 +519,68 @@ class GpsInputSender:
         self.sent += 1
         if not (ign & self.IGN_VEL_HORIZ):
             self.sent_with_vel += 1
+
+
+# --------------------------------------------------------------------------- #
+# The estimate log's columns, and the row that fills them, as one pair.
+#
+# 20 Oct: seven columns were added to the ROW and not to the header. The file
+# still opened, every row was 39 fields wide under a 32-field header, and
+# everything past the 32nd column was silently attributed to the wrong name -
+# 1162 rows of it before anyone looked. A CSV that is wrong in that way is
+# worse than one that fails to open.
+#
+# They live here as a constant and a function so a test can run both and
+# compare their widths, instead of reading the source and hoping.
+CSV_COLUMNS = ["t", "north_m", "east_m", "lon", "lat", "sigma_m",
+    "tracks", "fix_used", "alt_m", "yaw_deg",
+    "gps_north_m", "gps_east_m", "err_m",
+    "vel_vn", "vel_ve", "vel_speed", "vel_valid",
+    "vel_sent_vn", "vel_sent_ve", "vel_deadbanded",
+    "vel_deadband", "vel_age_s", "vel_flow_updates",
+    "vel_bias_n", "vel_bias_e", "vel_bias_frozen",
+    "vel_reason",
+    # Derotation: what the FC said the tilt did, and what the
+    # camera's own gyro integrated over the same interval.
+    # Logged side by side because the gyro's axis mapping and
+    # sign are a GUESS until a recording settles them.
+    "fc_d_roll", "fc_d_pitch",
+    "gyro_d_roll", "gyro_d_pitch", "gyro_n",
+    # Added 20 Oct with the rows that carry them. The header
+    # was NOT updated at the time and 1162 rows were written
+    # 39 wide under a 32-wide header before it was noticed -
+    # a file that opens fine and is wrong in every column
+    # after the 32nd. test_csv_columns.py now pins the two
+    # together so the next addition cannot do it again.
+    "accel_n", "depth_med_m", "depth_dropped",
+    "n_dr", "src", "rngfnd_m", "alt_amsl_m"]
+
+
+def csv_row(est, f, v, gN, gE, err):
+    """One row, in CSV_COLUMNS order. Must be the same length as CSV_COLUMNS."""
+    return [f"{est['t']:.2f}", f"{est['north']:.2f}", f"{est['east']:.2f}",
+            f"{est['lon']:.7f}", f"{est['lat']:.7f}",
+            f"{est['sigma']:.1f}", est["tracks"], int(est["fix_used"]),
+            f"{est['alt']:.1f}", f"{est['yaw']:.1f}",
+            "" if gN is None else f"{gN:.2f}",
+            "" if gE is None else f"{gE:.2f}",
+            "" if err is None else f"{err:.2f}",
+            f"{v.vn:.3f}", f"{v.ve:.3f}", f"{v.speed_mps:.3f}",
+            int(v.valid), f"{v.sent_vn:.3f}", f"{v.sent_ve:.3f}",
+            int(v.deadbanded), f"{v.deadband_mps:.3f}",
+            f"{v.age_s:.3f}", v.flow_updates,
+            f"{v.bias_n:.5f}", f"{v.bias_e:.5f}",
+            int(v.bias_frozen), v.reason,
+            "" if est["fc_d_roll"] is None else f"{est['fc_d_roll']:.4f}",
+            "" if est["fc_d_pitch"] is None else f"{est['fc_d_pitch']:.4f}",
+            "" if est["gyro_d_roll"] is None else f"{est['gyro_d_roll']:.4f}",
+            "" if est["gyro_d_pitch"] is None else f"{est['gyro_d_pitch']:.4f}",
+            est["gyro_n"], est["accel_n"],
+            "" if est["depth_med_m"] is None else f"{est['depth_med_m']:.2f}",
+            est["depth_dropped"], est["n_dr"],
+            est.get("src") or "",
+            "" if f.get("rngfnd") is None else f"{f['rngfnd']:.2f}",
+            "" if f.get("alt_amsl") is None else f"{f['alt_amsl']:.2f}"]
 
 
 # --------------------------------------------------------------------------- #
@@ -1063,7 +1136,9 @@ def main():
                     help="seconds between VPS heartbeat lines on the radio")
     ap.add_argument("--no-scr-origin", action="store_true",
                     help="do not take the origin from SCR_USER1/2")
-    ap.add_argument("--out", help="estimate log CSV")
+    ap.add_argument("--out", help="estimate log CSV, or a DIRECTORY - a "
+                                  "directory gets a new numbered file per run, "
+                                  "the way the flight controller numbers its own")
     ap.add_argument("--send-fc", action="store_true",
                     help="transmit VISION_POSITION_ESTIMATE (disarmed only)")
     ap.add_argument("--send-gps", action="store_true",
@@ -1152,27 +1227,32 @@ def main():
 
     wr = None
     if a.out:
-        fh = open(a.out, "w", newline="")
+        out_path = a.out
+        if os.path.isdir(a.out) or a.out.endswith(os.sep):
+            # A numbered file, not a timestamped one. This Jetson has no
+            # battery-backed RTC: early boot runs on a stale clock that jumps
+            # forward when NTP lands, so a name built from the clock can
+            # collide with an older run or sort before it. ArduPilot numbers
+            # its own logs for the same reason, so follow it - find the highest
+            # index present and take the next.
+            os.makedirs(a.out, exist_ok=True)
+            n = 0
+            for f in os.listdir(a.out):
+                if f.startswith("vps_") and f.endswith(".csv"):
+                    try:
+                        n = max(n, int(f[4:-4]))
+                    except ValueError:
+                        pass
+            out_path = os.path.join(a.out, f"vps_{n + 1:05d}.csv")
+        fh = open(out_path, "w", newline="")
+        print(f"recording to {out_path}")
         wr = csv.writer(fh)
         # The velocity columns are not optional padding. The 8 Oct collapse -
         # 9.93 m/s in, 3.90 out - could not be diagnosed from any recording
         # because the state that caused it was never written down, and five
         # columns had to be added after the fact. Everything the bridge knows
         # goes in the row.
-        wr.writerow(["t", "north_m", "east_m", "lon", "lat", "sigma_m",
-                     "tracks", "fix_used", "alt_m", "yaw_deg",
-                     "gps_north_m", "gps_east_m", "err_m",
-                     "vel_vn", "vel_ve", "vel_speed", "vel_valid",
-                     "vel_sent_vn", "vel_sent_ve", "vel_deadbanded",
-                     "vel_deadband", "vel_age_s", "vel_flow_updates",
-                     "vel_bias_n", "vel_bias_e", "vel_bias_frozen",
-                     "vel_reason",
-                     # Derotation: what the FC said the tilt did, and what the
-                     # camera's own gyro integrated over the same interval.
-                     # Logged side by side because the gyro's axis mapping and
-                     # sign are a GUESS until a recording settles them.
-                     "fc_d_roll", "fc_d_pitch",
-                     "gyro_d_roll", "gyro_d_pitch", "gyro_n"])
+        wr.writerow(CSV_COLUMNS)
 
     # Reuse a sender's link if one exists. If none does - a read-only ground
     # run - open a link only through the ROUTER. A second opener of the serial
@@ -1287,30 +1367,7 @@ def main():
                 errs.append(err)
             v = est["vel"]
             if wr:
-                wr.writerow([f"{est['t']:.2f}", f"{est['north']:.2f}", f"{est['east']:.2f}",
-                             f"{est['lon']:.7f}", f"{est['lat']:.7f}",
-                             f"{est['sigma']:.1f}", est["tracks"], int(est["fix_used"]),
-                             f"{est['alt']:.1f}", f"{est['yaw']:.1f}",
-                             "" if gN is None else f"{gN:.2f}",
-                             "" if gE is None else f"{gE:.2f}",
-                             "" if err is None else f"{err:.2f}",
-                             f"{v.vn:.3f}", f"{v.ve:.3f}", f"{v.speed_mps:.3f}",
-                             int(v.valid), f"{v.sent_vn:.3f}", f"{v.sent_ve:.3f}",
-                             int(v.deadbanded), f"{v.deadband_mps:.3f}",
-                             f"{v.age_s:.3f}", v.flow_updates,
-                             f"{v.bias_n:.5f}", f"{v.bias_e:.5f}",
-                             int(v.bias_frozen), v.reason,
-                             "" if est["fc_d_roll"] is None else f"{est['fc_d_roll']:.4f}",
-                             "" if est["fc_d_pitch"] is None else f"{est['fc_d_pitch']:.4f}",
-                             "" if est["gyro_d_roll"] is None else f"{est['gyro_d_roll']:.4f}",
-                             "" if est["gyro_d_pitch"] is None else f"{est['gyro_d_pitch']:.4f}",
-                             est["gyro_n"], est["accel_n"],
-                             "" if est["depth_med_m"] is None
-                             else f"{est['depth_med_m']:.2f}",
-                             est["depth_dropped"], est["n_dr"],
-                             est.get("src") or "",
-                             "" if f.get("rngfnd") is None else f"{f['rngfnd']:.2f}",
-                             "" if f.get("alt_amsl") is None else f"{f['alt_amsl']:.2f}"])
+                wr.writerow(csv_row(est, f, v, gN, gE, err))
             notifier.tick(est["t"], est, node)
 
             # Gated on the source. GPS_PRIMARY=0 means the pilot asked for the

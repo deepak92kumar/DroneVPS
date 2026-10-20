@@ -17,6 +17,12 @@ WorkingDirectory=/data/DRONE/vps_vio
 # --fc-port and --send-gps, so even with the flag accepted it would have sat
 # there matching nothing against nothing and sending nowhere.
 #
+# --out is a DIRECTORY, so every run gets its own numbered file. Without it the
+# flying service recorded nothing at all: after a flight there was only the FC's
+# own dataflash, which knows what we SENT but nothing about why we sent it - no
+# sigma, no track count, no velocity-bridge state. The 8 Oct collapse could not
+# be diagnosed for exactly that reason.
+#
 # --fc-port goes through the router, not at the serial device: the router is
 # the one owner of /dev/ttyTHS1 and everything else is a UDP client of it.
 # --send-gps with --gps-id 1 is what makes the estimate arrive as GPS2.
@@ -25,6 +31,7 @@ ExecStart=/usr/bin/python3 /data/DRONE/vps_vio/live_node.py \
     --map /data/DRONE/bhh.tif \
     --fc-port udpout:127.0.0.1:14650 \
     --send-gps --gps-id 1 \
+    --out /data/DRONE/flight_logs/vps \
     --liveness /run/drone/vps.alive
 Restart=always
 RestartSec=5
