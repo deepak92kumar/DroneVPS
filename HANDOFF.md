@@ -4,6 +4,13 @@ Written 20 Oct 2026 for someone (or something) starting from zero. It assumes
 no knowledge of this project, this aircraft, or ArduPilot. Everything here was
 read off the hardware or measured on it; where a number is a guess it says so.
 
+**The aircraft has flown since this was written.** `FLIGHT_2026-10-20.md` is
+the full analysis of the first recorded flight — a 4.5 m hover that would not
+auto-disarm — and where this file and that one disagree, that one is newer.
+The short version: the flow path held 0.40 m against the real GPS over 47 s,
+the camera accelerometer works, the airframe's vibration is fine, and three
+things that were still quadcopter settings were found and fixed.
+
 ---
 
 ## 1. What this is
@@ -160,8 +167,30 @@ not the same question as *is the VPS currently sending*.
 state, both derotation estimates, the IMU sample counts, the stereo depth, the
 lidar, which source was live, and `frame_file`.
 
-**Images, as of 20 Oct.** `--save-frames HZ` (off by default, and the service
-does not pass it) saves camera frames from inside the navigating process, so a
+**Since the flight, three things changed here** — see `FLIGHT_2026-10-20.md`:
+
+- **The service now passes `--save-frames 4`.** It did not before, the flag is
+  off by default, and so the one real flight came back with a CSV, an empty
+  `frame_file` on every row, and not a single image. Measured after the
+  change: 3.75 Hz of frames (8 flow frames apart at 30 Hz), flow loop still
+  30.0 Hz, ~110 KB a frame, ~1.5 GB an hour.
+- **`<run>_imu.csv`**, one row per camera IMU sample at its own device
+  timestamp, 100 Hz gyro (rad/s) and 100 Hz accel (m/s²), camera frame,
+  `src` = `g` or `a`. The estimate CSV only ever carried the gyro *integrated
+  over a frame*, and a 33 ms integral cannot separate a 0.9 Hz airframe wobble
+  from a 47 Hz prop one — which is why "how much vibration is on the camera
+  IMU" had no answer after the flight. Bench noise floor, motors off: gyro
+  0.0002 rad/s rms, accel 0.014–0.018 m/s² rms. 100 Hz reaches 50 Hz, so the
+  47 Hz prop fundamental sits at the very edge and anything above it folds in:
+  read a number above ~40 Hz as "there is energy up there", never as an
+  amplitude. `--no-imu-log` turns it off.
+- **The logs are flushed and fsynced once a second** (`--sync-every`). Pulling
+  the battery takes the Jetson down with the FC, and on 20 Oct that left NUL
+  bytes at the tail of two runs — the rows were in the page cache and nothing
+  had asked for them to be on the disk. Measured: 0.64 ms median, 2.8 ms worst
+  idle, 14.1 ms worst under load, once a second against 59 ms a frame.
+
+**Images.** `--save-frames HZ` saves camera frames from inside the navigating process, so a
 flight can be map-matched offline afterwards. The run then gets a FOLDER of its
 own — `flight_logs/vps/vps_NNNNN/` holding `vps_NNNNN.csv`, `fNNNNNN.jpg`, and
 a `camera.txt` with fx/fy/cx/cy/crop_left and the distortion — and the
@@ -312,6 +341,48 @@ nothing, that is why.
 | `RNGFND1_OFFSET` / `SCALING` | 0.66537 / 72.61 | Calibrated 19 Oct against a measured 0.26 m |
 | `INS_USE3` / `INS_ACC3_ID` | 1 / 0 | Third IMU **enabled but physically absent** |
 
+### The land detector, and why the aircraft would not disarm (20 Oct)
+
+ArduPilot will not declare a multirotor landed unless *all* of these hold:
+
+```
+motor_at_lower_limit && throttle_mix_at_min && !large_angle_request
+&& !large_angle_error && accel_stationary && descent_rate_low
+&& rangefinder_check && WoW
+      rangefinder_check = no usable rangefinder, OR it reads under 2 m
+```
+
+`land_complete` starts true and is cleared at take-off; until it is earned
+back, `DISARM_DELAY` cannot fire and neither can a rudder disarm. **In any
+mode.** On 20 Oct the TF03's zero sat at 2.53 m while the aircraft was on the
+ground, so `rangefinder_check` never passed, `LDET.Count` never left 0, and
+the battery had to be pulled — while LOITER's position controller, still live
+because nothing had told it the aircraft was down, wound its integrator up to
+13.9° of lean and pushed the motors from 1150 to 1491 µs against the ground
+for 23 s.
+
+That zero wanders by one to two metres between power cycles (0.82, 2.53 and
+0.96 m measured on the same ground in one hour) because the sensor is the
+4–20 mA variant: 180 m across 2.4 V makes one millivolt 7.3 cm. The SCALE is
+right — hover minus ground came out 4.47 m against the EKF's 4.45 — only the
+zero drifts, and EK3 does not care because it uses the rangefinder relative to
+the take-off reference. The land detector's 2 m test is absolute, so it does.
+
+**So zero it at the field, every session, before the props go on:**
+
+```bash
+python3 /data/DRONE/vps_vio/lidar_zero.py            # report only
+python3 /data/DRONE/vps_vio/lidar_zero.py --apply    # write RNGFND1_OFFSET
+```
+
+It refuses while armed, goes through the router (never `/dev/ttyTHS1`), reads
+the true clearance from `RNGFND1_GNDCLR`, reads back every write, and says
+plainly whether the result is under 2 m. The aircraft must be on its landing
+legs on the ground, or `--true-m` must be given — a wrong number here writes a
+wrong calibration into the aircraft. `live_node` also announces the zero on
+the radio while disarmed (`LIDAR ZERO 2.5m - NO AUTO-DISARM`); it announces
+only, it blocks nothing.
+
 IMU bench test, aircraft stationary, 20 Oct:
 
 | | \|accel\| | noise | \|gyro\| |
@@ -328,7 +399,30 @@ Both present IMUs are healthy.
 
 Be honest about this with the pilot; they ask, and they are right to.
 
-- **Nothing in §6 has flown.** All of it is bench-verified only.
+- ~~**Nothing in §6 has flown.**~~ **Some of it has, as of 20 Oct** — one
+  4.5 m hover, 13 s, on the real GPS with the VPS recording alongside
+  (`flight_logs/vps/vps_00007.csv`, FC log `00000216.BIN`). What that flight
+  settled, and what it did not:
+  - **Flow dead reckoning held 0.40 m median against the real GPS over 47 s**
+    (p90 0.49, max 0.81). Read it for what it is: 4.5 m altitude, an almost
+    stationary aircraft, so it is a floor on the drift, not a bound on it.
+  - **The camera accelerometer works** — `accel_n` equals `gyro_n` and both
+    climb at 99.9/s. The `acceleroMeter` fix is confirmed in the air.
+  - **Airframe vibration is fine**: VibeZ p50 2.2–2.3 m/s², max 3.6, zero
+    clipping on both IMUs.
+  - **Two derotation faults the flight exposed.** `fc_d_roll` — the estimate
+    derotation actually flies on — was **exactly 0 on 87% of frames**: the FC
+    attitude snapshot updates at about 4 Hz against a 30 Hz flow loop, so the
+    correction arrives in lumps at the wrong frames and its rms reads 0.98
+    °/frame where the real motion is 0.42. And the camera gyro, which is
+    sampled properly at 100 Hz, comes out **sign-inverted** against the FC on
+    both axes (totals −2.83° vs +0.68° in roll, +0.87° vs −2.02° in pitch,
+    cumulative r = −0.80). Switching derotation to the camera gyro is the
+    right move for the timing — but the sign has to be fixed first, or it
+    doubles the error instead of removing it. Neither is fixed yet.
+  - Still untouched by that flight: map matching (no fixes below 60 m), the
+    XFeat thresholds, the 11 m principal-point correction, and anything above
+    5 m of altitude.
 - **Velocity is the live risk.** `EK3_SRC1_VELXY = 3` means the EKF *fuses* the
   velocity we send, and sending it is new. This is the channel that reported
   47.7 m/s during a 106 m hover on 28 Sep and caused four EKF failsafes.
@@ -493,6 +587,40 @@ tested only by their own small test directory. What is left is what runs.
 ├── third_party/accelerated_features/   XFeat checkout + weights
 └── bhh.tif                  the satellite sheet (gitignored, 91 MB)
 ```
+
+### The rest of the repository, which the tree above left out
+
+The pilot noticed, on 20 Oct, that this file documented the flying path and
+nothing else. There are 40-odd more files at the root and one whole directory.
+Most are from before the VPS existed; none of them run on a flight. Listed so
+that nobody has to wonder whether they matter.
+
+| | |
+|---|---|
+| `aruco_flow_rpi/` | 53 files — a separate Raspberry Pi ArUco/flow project |
+| `ZD850_hexa_conversion.pdf` | the quad → hexa conversion document |
+| `TF03_4-20mA_CUAV_X7_Wiring_Guide.md` / `.html` | the lidar's wiring, resistor and scaling maths. **Read this before touching the rangefinder** — it is where the 150 Ω, the 0.6–3.0 V and the 75 m/V come from, and it is why the UART is not an option on this variant |
+| `verify_before_flight.py` | pre-flight bench dashboard, pre-dates the VPS |
+| `check_stability.py`, `check_rc_mode.py`, `monitor_tf03_live.py`, `movement_test.py`, `depth_test.py`, `flow_shadow.py` | hand-carry and bench monitors |
+| `live_preview.py` (680 lines), `index.html`, `ground_status_server.py` | the ground status page |
+| `c12_precision_landing.py`, `generate_*_pad*.py`, `landing_pad_*.html`, `markers/` | the ArUco precision-landing feature, with `flight_daemon.py` |
+| `REC_START.sh` / `REC_STOP.sh` / `REC_STATUS.sh`, `launch_camera.sh` | the old recorder's wrappers, from before `--save-frames` |
+| `service_control.sh`, `setup_c12_network.sh`, `set_mode.py`, `set_tf03_params.py` | field helpers |
+| `test_camera.py`, `test_cuav_connection.py`, `test_oak_benchmark.py`, `test_tf03_uart.py` | four more tests, at the root, NOT part of the 35 in `tests/` |
+
+**Two of them will break the aircraft if run. Neither is obvious.**
+
+1. **`install_autostart.sh` installs `drone-vio.service`**, which runs
+   `flight_daemon.py` — and that opens the OAK-D. The camera permits one
+   owner, so enabling it means `drone-vps` and the ArUco daemon fight for the
+   camera and one of them loses on every boot. It is the *old* installer, from
+   when one process owned everything. Use `systemd/install.sh`. (Checked 20
+   Oct: `drone-vio.service` is NOT installed — systemd has only the five
+   correct units — and `drone-vio.service` / `drone-status.service` sit at the
+   root as files only.)
+2. **`tune_ekf_for_vio.py` sets `EK3_SRC1_POSXY = 6` and `EK3_SRC1_POSZ = 1`**
+   — the ExternalNav path that was rejected on 28 Sep. Running it silently
+   undoes the GPS2-injection design this whole project is built on.
 
 ### Camera sharing, as built (20 Oct, commit 1d84738)
 
