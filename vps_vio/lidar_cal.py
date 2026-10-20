@@ -21,12 +21,17 @@ import argparse, sys, time
 import numpy as np
 from pymavlink import mavutil
 
-PORT, BAUD = "/dev/ttyTHS1", 115200
+# The ROUTER, not the serial device. This file used to open /dev/ttyTHS1
+# directly, which is the one thing the project forbids: drone-router is the
+# sole owner of that port and a second opener splits the stream with it, so
+# running this while the services were up corrupted both sides. Found 20 Oct.
+PORT, BAUD = "udpout:127.0.0.1:14650", 115200
 
 
 class FC:
     def __init__(self):
-        self.m = mavutil.mavlink_connection(PORT, baud=BAUD)
+        self.m = mavutil.mavlink_connection(PORT, baud=BAUD, source_system=200)
+        self.m.mav.heartbeat_send(6, 8, 0, 0, 0)
         if self.m.wait_heartbeat(timeout=15) is None:
             sys.exit("no heartbeat from the flight controller")
         if bool(self.m.motors_armed()):
