@@ -286,9 +286,130 @@ Be honest about this with the pilot; they ask, and they are right to.
 - **The camera cannot be shared.** `live_node` and `record_flight` both open it
   exclusively, so saving images during a flight is not possible yet.
 
+
 ---
 
-## 9. Running it
+## 9. The code, file by file
+
+Twelve cuVSLAM-era modules were deleted on 20 Oct — that path was rejected on
+28 Sep and the files had been dead ever since, importing only each other and
+tested only by their own small test directory. What is left is what runs.
+
+```
+/data/DRONE
+├── mavlink_router.py        sole owner of /dev/ttyTHS1, UDP fan-out on :14650
+├── drone_watchdog.py        restarts drone-vps when its liveness file goes stale
+├── flight_daemon.py         the ArUco precision-landing daemon (separate feature)
+├── cuav_mavlink_bridge.py   FC telemetry bridge; holds the lidar/camera mount offsets
+├── HANDOFF.md               this file
+│
+├── systemd/
+│   ├── drone-router.service      ─┐
+│   ├── drone-vps.service          ├ enabled, start at boot
+│   ├── drone-rc-switch.service   ─┘
+│   ├── drone-watchdog.service / .timer
+│   ├── install.sh                install / enable / start / status
+│   ├── field_setup.sh            run ONCE as root: passwordless control +
+│   │                             persistent journal + reinstall the units
+│   └── after_reboot_check.sh     one screen: is the aircraft ready?
+│
+├── vps_vio/                 everything the VPS node is made of
+│   │
+│   │   ── the flying path ──
+│   ├── live_node.py         THE node. Camera, flow, fusion, GPS_INPUT, the
+│   │                        notifier, SourceWatcher, AmslRef, the CSV
+│   ├── flow_odom.py         FlowTracker (LK + RANSAC affine, undistortion,
+│   │                        the stereo plane gate) and shift_to_ne
+│   ├── velocity_bridge.py   flow + accelerometer -> velocity, with the bias
+│   │                        rule that caused the 8 Oct collapse
+│   ├── map_fuse.py          the position filter: predict, update, outlier
+│   │                        gate, and the 0.5 m cap on a correction
+│   ├── map_fix_worker.py    runs the matcher on its own thread, refuses
+│   │                        below 60 m
+│   ├── map_match_xfeat.py   XFeat. Sets torch to ONE thread (see §6)
+│   ├── map_query.py         rescale to the map's GSD and rotate north-up,
+│   │                        including the east-west anisotropy correction
+│   ├── map_cache.py         the GeoTIFF in RAM, and windows out of it
+│   ├── map_db.py            tiling and geo-referencing helpers
+│   ├── config.py            every measured constant, with the measurement
+│   │                        written beside it. READ THIS ONE.
+│   ├── lidar_filter.py      TF03 spike filter (companion-side only — §8)
+│   ├── single_instance.py   the file lock that stops two copies
+│   ├── fc_port.py           serial-port arbitration from before the router
+│   ├── gps_rc_switch.py     channel 6 -> GPS_PRIMARY, with the health check
+│   ├── record_flight.py     bench recorder: frames + 56-column telemetry.
+│   │                        Also holds Telemetry, which live_node uses
+│   ├── frame_writer.py      [IN PROGRESS] save frames from inside the
+│   │                        navigating process — see below
+│   │
+│   │   ── tools, not in the flight path ──
+│   ├── analyse_flight.py    map-matching accuracy of a recorded flight
+│   ├── bench_workload.py    time every stage, then all of them together
+│   ├── lidar_cal.py         calibrate the rangefinder against known heights
+│   ├── gps_switch.py        pick a GPS by hand and watch the other
+│   ├── rc_watch.py          which RC channel moves when you flip a switch
+│   └── map_match.py         older matcher, kept for offline comparison
+│
+├── tests/                   32 suites. Each prints PASS/FAIL, exits non-zero
+│   │                        on failure, and its docstring names the real
+│   │                        failure it pins, with dates and numbers.
+│   ├── test_vio_gap_fill.py       the accelerometer filling the frame gap
+│   ├── test_camera_k.py           rotation-as-translation, undistortion
+│   ├── test_stereo_gate.py        the plane gate, and when it refuses
+│   ├── test_source_gate.py        nothing reaches the FC while on GPS
+│   ├── test_switch_deadlock.py    the switch can still reach a silent VPS
+│   ├── test_client_registration.py  a listener that stops talking goes deaf
+│   ├── test_systemd_units.py      every ExecStart flag is real; no cycles
+│   ├── test_single_copy.py        one copy, and a kill -9 frees the lock
+│   ├── test_csv_columns.py        the log header matches its rows
+│   ├── test_lidar_filter.py       spikes up and down
+│   ├── test_map_anisotropy.py     9/9 with the correction, 0/9 without
+│   ├── test_velocity_bridge.py    the 8 Oct collapse, pinned
+│   └── …                          router, notifier, origin, markers, watchdog
+│
+├── flight_logs/
+│   ├── vps/vps_NNNNN.csv    one numbered file per run of the node
+│   ├── vps_stdout.log       the node's own output
+│   └── *.BIN                flight controller dataflash
+│
+├── third_party/accelerated_features/   XFeat checkout + weights
+└── bhh.tif                  the satellite sheet (gitignored, 91 MB)
+```
+
+### The camera-sharing work, in progress
+
+`live_node` and `record_flight` both call `dai.Device()`, and the OAK-D permits
+one owner — so on a flight, where navigation has to win, no images are ever
+recorded and there is nothing for offline map matching to work on. That is
+being fixed now, in `vps_vio/frame_writer.py`, and the shape is worth knowing
+because the constraint it works under applies to anything else added to that
+loop.
+
+The process that already holds the camera is the one that writes the frames;
+no second process, no socket, no shared memory — a channel between processes is
+one more thing that can block the flow loop. The rule the module is built
+around is that **a saved frame must never cost a flow update**:
+
+- `offer()` does no encoding, no disk work, and never waits. It hands a
+  reference to a bounded queue and returns.
+- The queue is small and uses `put_nowait`. When the disk or the encoder falls
+  behind, the frame is **dropped and counted**. There is no `put()` with a
+  timeout anywhere in the file, because a timeout is just a smaller stall.
+- Encoding runs on a daemon worker thread.
+
+The numbers behind that: the flow loop has ~59 ms a frame at 17 Hz and spends
+22 ms of it; JPEG encoding costs 9.5 ms a frame and PNG 30 ms, so encoding on
+the loop thread would eat a sixth to a half of the budget keeping the
+aircraft's position alive.
+
+Frames are named by the **CSV row index**, not by the clock — `offer()` takes
+the index the caller is about to write and returns the filename it chose, which
+the caller then puts in that row's `frame_file` column. One row, one image, and
+nothing that a jumping clock can corrupt.
+
+---
+
+## 10. Running it
 
 ```bash
 # Is the aircraft ready?
@@ -320,7 +441,7 @@ anyone noticed.
 
 ---
 
-## 10. How to work on this
+## 11. How to work on this
 
 The commit history is the real documentation. Each commit explains what was
 broken, what the measurement was, and why the fix is the fix. Read a few before
