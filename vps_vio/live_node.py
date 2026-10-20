@@ -1177,7 +1177,15 @@ def main():
     # Reuse a sender's link if one exists. If none does - a read-only ground
     # run - open a link only through the ROUTER. A second opener of the serial
     # device is precisely the contention the router exists to remove, and
-    # LiveSource's Telemetry cannot be used: it is read-only by contract.
+    # The notifier reuses the sender's connection rather than opening its own.
+    # Two reasons: the router registers UDP clients by address, so every extra
+    # socket is another client it has to keep and feed; and a connection that
+    # only ever receives gets dropped after 30 s, which is what left the RC
+    # switch deaf. Reusing a link that is already transmitting avoids both.
+    #
+    # LiveSource's Telemetry is deliberately not used here. It now sends a
+    # heartbeat to stay registered, but it still sends nothing that commands
+    # the aircraft, and STATUSTEXT from it would break that.
     _link = (gps_sender.m if gps_sender is not None
              else (sender.m if sender is not None else None))
     if _link is None and not a.no_notify:
