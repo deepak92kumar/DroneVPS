@@ -292,7 +292,30 @@ class Telemetry:
                     # Arming is what decides whether we are recording at all.
                     # Encoding and writing 30 JPEGs a second while the aircraft
                     # sits on the ground keeps a core busy for nothing.
+                    #
+                    # ONLY THE AUTOPILOT'S OWN HEARTBEAT. Everything on this
+                    # bus heartbeats every 5 s so the router does not drop it -
+                    # the RC switch, the notifier, the watchdog, any tool
+                    # someone runs - and every one of those carries base_mode 0,
+                    # which reads as DISARMED. Taking the last heartbeat from
+                    # anybody made `armed` flip false every five seconds.
+                    #
+                    # Measured cost on the 20 Oct 13:49 flight, the first one
+                    # where anything depended on this flag: the frame gate shut
+                    # once per 5 s, 846 images were saved where 980 were due
+                    # (14% lost), the radio said "FRAMES OFF - DISARMED" twenty
+                    # times while airborne, and one "LIDAR ZERO 3.4m - NO
+                    # AUTO-DISARM" went out at 1 m altitude from a check that
+                    # is only supposed to speak on the ground.
+                    #
+                    # A GCS-style heartbeat sets autopilot = MAV_AUTOPILOT_
+                    # INVALID and sits on a component other than 1; the
+                    # flight controller sets a real autopilot id on component
+                    # 1. That pair is the test.
                     from pymavlink import mavutil as _mu
+                    if (msg.get_srcComponent() != 1
+                            or msg.autopilot == _mu.mavlink.MAV_AUTOPILOT_INVALID):
+                        continue
                     self.state["armed"] = bool(
                         msg.base_mode & _mu.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
                     self.state["mode"] = msg.custom_mode
