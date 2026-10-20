@@ -280,6 +280,15 @@ class LiveSource:
         # Integrate the gyro over the interval this frame covers.
         d_roll = d_pitch = 0.0
         accel = []
+        # Every gyro sample kept, not just their integral. The integral is what
+        # derotation needs; the samples are what a VIBRATION number needs, and
+        # on 20 Oct there was no way to answer "how much was the camera itself
+        # shaking" because only the per-frame integral had ever been written
+        # down. 100 Hz is the BNO086's ceiling for GYROSCOPE_CALIBRATED, so
+        # this band reaches 50 Hz: the 47 Hz prop fundamental sits right at the
+        # edge of it and anything above folds in. Treat >40 Hz here as "there
+        # is energy up there", never as a calibrated amplitude.
+        gyro = []
         pk = self.q_imu.tryGet()
         while pk is not None:
             for packet in pk.packets:
@@ -330,10 +339,11 @@ class LiveSource:
                         # that is still a GUESS - but derotation runs off the
                         # FC attitude, so this pair is logged for comparison
                         # rather than flown on.
-                        gx, gy, _gz = self._to_cam(g.x, g.y, g.z)
+                        gx, gy, gz = self._to_cam(g.x, g.y, g.z)
                         d_roll += np.degrees(gx) * dt
                         d_pitch += np.degrees(gy) * dt
                         self._gyro_n += 1
+                        gyro.append((ts, gx, gy, gz))
                 self._t_gyro = ts
             pk = self.q_imu.tryGet()
 
@@ -348,7 +358,7 @@ class LiveSource:
                         pitch=None, gps=None, depth=depth, rngfnd=s.get("rngfnd"),
                         gyro_d_roll=d_roll, gyro_d_pitch=d_pitch,
                         gyro_n=self._gyro_n,
-                        accel=accel, accel_n=self._accel_n,
+                        accel=accel, accel_n=self._accel_n, gyro=gyro,
                         t=time.monotonic() - self.t0)
         gps = None
         if s.get("lat") not in (None, 0.0):
@@ -359,7 +369,7 @@ class LiveSource:
                     roll=s["roll"], pitch=s["pitch"], gps=gps, depth=depth,
                     gyro_d_roll=d_roll, gyro_d_pitch=d_pitch,
                     gyro_n=self._gyro_n,
-                    accel=accel, accel_n=self._accel_n,
+                    accel=accel, accel_n=self._accel_n, gyro=gyro,
                     t=time.monotonic() - self.t0, armed=bool(s.get("armed")))
 
 
@@ -563,6 +573,32 @@ CSV_COLUMNS = ["t", "north_m", "east_m", "lon", "lat", "sigma_m",
     # already in this row. An index, not a timestamp, because the
     # Jetson's clock jumps at boot.
     "frame_file"]
+
+
+IMU_LOG_COLUMNS = ["t_dev", "src", "x", "y", "z"]
+
+
+def imu_rows(f):
+    """One row per camera IMU SAMPLE, not one a frame.
+
+    The estimate CSV carries `gyro_d_roll` - the gyro integrated across the
+    frame interval. That is the right thing for derotation and the wrong thing
+    for vibration: a 33 ms integral cannot separate a 0.9 Hz airframe wobble
+    from a 47 Hz prop one, and on 20 Oct the pilot's question "how much
+    vibration was on the camera IMU" had no answer for exactly that reason.
+    So every sample is written at its own device timestamp.
+
+    `src` is "g" for gyro (rad/s) and "a" for the accelerometer (m/s2, gravity
+    already removed - LINEAR_ACCELERATION). Both are in the CAMERA frame, so
+    they are directly comparable with the FC's own IMU only after the 180
+    degrees between the two is accounted for.
+    """
+    for s in (f.get("gyro") or ()):
+        yield ("%.6f" % s[0], "g",
+               "%.6f" % s[1], "%.6f" % s[2], "%.6f" % s[3])
+    for s in (f.get("accel") or ()):
+        yield ("%.6f" % s[0], "a",
+               "%.5f" % s[1], "%.5f" % s[2], "%.5f" % s[3])
 
 
 def csv_row(est, f, v, gN, gE, err):
@@ -1201,6 +1237,35 @@ def main():
                          "frames and says so rather than stalling the flow "
                          "loop. Needs --out to be a DIRECTORY. Each saved "
                          "frame's name goes in that row's frame_file column.")
+    ap.add_argument("--frames-any-time", action="store_true",
+                    help="save frames whether or not the aircraft is armed. "
+                         "OFF by default: the pilot's rule is that images "
+                         "start at arm and stop at disarm, because the "
+                         "services run for as long as the Jetson is powered "
+                         "and the hour on the ground is 29 MB a minute of "
+                         "pictures of the same patch of ground. Use this for "
+                         "bench work, where nothing ever arms.")
+    ap.add_argument("--imu-log", dest="imu_log", action="store_true",
+                    default=True,
+                    help="write every camera IMU sample to <run>_imu.csv "
+                         "beside the estimate log (default ON). This is the "
+                         "only way to measure what the CAMERA is doing rather "
+                         "than what the airframe is doing: on 20 Oct the "
+                         "question 'how much vibration on the camera IMU' had "
+                         "no answer, because only the per-frame integral had "
+                         "ever been recorded.")
+    ap.add_argument("--no-imu-log", dest="imu_log", action="store_false",
+                    help="do not write the camera IMU log.")
+    ap.add_argument("--sync-every", type=float, default=1.0, metavar="SEC",
+                    help="flush and fsync the logs this often. 0 disables. "
+                         "Pulling the battery on 20 Oct left NUL bytes at the "
+                         "tail of two runs: the rows were in the kernel's "
+                         "page cache and the power went before they reached "
+                         "the disk. Measured on this machine: 0.64 ms median, "
+                         "2.8 ms worst idle and 14.1 ms worst under load, "
+                         "once a second against a 59 ms frame budget - so the "
+                         "amortised cost is 0.025 ms a frame and the worst "
+                         "single frame still fits.")
     ap.add_argument("--jpeg-quality", type=int, default=90,
                     help="quality of the saved frames. JPEG, not PNG: 9.5 ms "
                          "a frame against 30 (measured 20 Oct), and that CPU "
@@ -1279,6 +1344,8 @@ def main():
 
     wr = None
     fwriter = None
+    fh = None
+    imu_fh = imu_wr = None
     if a.out:
         out_path = a.out
         if os.path.isdir(a.out) or a.out.endswith(os.sep):
@@ -1306,6 +1373,21 @@ def main():
         # columns had to be added after the fact. Everything the bridge knows
         # goes in the row.
         wr.writerow(CSV_COLUMNS)
+
+        # The camera IMU at its own rate, beside the estimate log. 20 Oct's
+        # flight could not answer "how much was the CAMERA shaking" because
+        # only the per-frame integral of the gyro had ever been recorded, and
+        # an integral over 33 ms cannot tell a 0.9 Hz airframe wobble from a
+        # 47 Hz prop one. One row per sample, written inline: 100 rows a
+        # second cost 0.007 ms each (measured), which is 0.7 ms a second
+        # against a loop that has 59 ms a frame.
+        if a.imu_log:
+            imu_path = out_path[:-4] + "_imu.csv"
+            imu_fh = open(imu_path, "w", newline="")
+            imu_wr = csv.writer(imu_fh)
+            imu_wr.writerow(IMU_LOG_COLUMNS)
+            print(f"camera IMU log: {imu_path}  (gyro rad/s and accel m/s2, "
+                  f"camera frame, device timestamps)")
 
         if a.save_frames > 0:
             fwriter = FrameWriter(os.path.dirname(os.path.abspath(out_path)),
@@ -1373,6 +1455,7 @@ def main():
 
     _origin_refused = [False]
     errs, t_start, n = [], time.perf_counter(), 0
+    last_sync = 0.0
     try:
         while True:
             f = src.read()
@@ -1439,6 +1522,24 @@ def main():
                 else "GPS1 ON - VPS data blocked" if watcher.value == 0
                 else "SOURCE UNKNOWN - cannot read GPS_PRIMARY",
                 Notifier.SEV_INFO if watcher.value == 1 else Notifier.SEV_CRIT)
+
+            # The lidar's ZERO, announced on the radio while still on the
+            # ground. ArduPilot will not declare the aircraft landed unless
+            # the rangefinder reads under 2 m in absolute terms, and this
+            # sensor's zero wanders by one to two metres between power cycles
+            # (0.82, 2.53 and 0.96 m on the same ground on 20 Oct). On the
+            # 20 Oct flight it sat at 2.53 m, the land detector never fired,
+            # DISARM_DELAY never ran and the battery had to be pulled. This
+            # changes nothing and blocks nothing - it only says so, before
+            # take-off, while there is still time to run lidar_zero.py.
+            rng = f.get("rngfnd")
+            if rng is not None and f.get("armed") is False:
+                notifier.event(
+                    "lidarzero", rng < 1.5,
+                    f"VPS LIDAR ZERO OK {rng:.2f}m" if rng < 1.5
+                    else f"LIDAR ZERO {rng:.1f}m - NO AUTO-DISARM"[:50],
+                    Notifier.SEV_INFO if rng < 1.5 else Notifier.SEV_WARN)
+
             gN = gE = err = None
             if f["gps"]:
                 gN = (f["gps"][1] - node.origin[1]) * M_PER_DEG_LAT
@@ -1447,13 +1548,57 @@ def main():
                 errs.append(err)
             v = est["vel"]
             if fwriter is not None:
-                # After n, so the name carries the index of the row about to
-                # be written, and before csv_row, so that row names its own
-                # image. offer() encodes nothing and waits for nothing: if the
-                # writer is behind, this returns None and the frame is gone.
-                est["frame_file"] = fwriter.offer(f["img"], n) or ""
+                # ARMED ONLY, at the pilot's instruction (20 Oct). Images are
+                # wanted for the flight, not for the hour the aircraft sits on
+                # the ground with the services up: that hour is where the 29 MB
+                # a minute and the bench frames at alt 0.1 m come from, and
+                # every one of them is a frame offline matching has to be told
+                # to ignore.
+                #
+                # `armed` is the FC's own flag out of the telemetry snapshot.
+                # Three states, and the direction of each is deliberate:
+                # True keeps saving, False stops, and None - no FC, or a link
+                # that never carried a heartbeat - does NOT save, because
+                # "cannot tell" on the bench is the common case and a flight
+                # always has a link. If the link dies mid-flight the snapshot
+                # FREEZES rather than emptying (see Telemetry), so armed stays
+                # True and the recording continues, which is the safe way for
+                # that failure to fall.
+                armed = f.get("armed")
+                if armed is True:
+                    # After n, so the name carries the index of the row about
+                    # to be written, and before csv_row, so that row names its
+                    # own image. offer() encodes nothing and waits for
+                    # nothing: if the writer is behind, this returns None and
+                    # the frame is gone.
+                    est["frame_file"] = fwriter.offer(f["img"], n) or ""
+                elif not a.frames_any_time:
+                    est["frame_file"] = ""
+                else:
+                    est["frame_file"] = fwriter.offer(f["img"], n) or ""
+                notifier.event(
+                    "frames", bool(armed) or a.frames_any_time,
+                    f"VPS FRAMES ON {fwriter.hz:g}Hz" if (bool(armed)
+                                                          or a.frames_any_time)
+                    else "VPS FRAMES OFF - DISARMED",
+                    Notifier.SEV_INFO)
             if wr:
                 wr.writerow(csv_row(est, f, v, gN, gE, err))
+            if imu_wr is not None:
+                imu_wr.writerows(imu_rows(f))
+            # A row in the page cache is not a row on the disk. The battery
+            # comes out of this aircraft by hand, and when it did on 20 Oct
+            # the last block of two runs came back as NUL bytes.
+            if a.sync_every > 0 and est["t"] - last_sync >= a.sync_every:
+                last_sync = est["t"]
+                for h_ in (fh, imu_fh):
+                    if h_ is None:
+                        continue
+                    try:
+                        h_.flush()
+                        os.fsync(h_.fileno())
+                    except OSError:
+                        pass
             notifier.tick(est["t"], est, node)
 
             # Gated on the source. GPS_PRIMARY=0 means the pilot asked for the
@@ -1504,6 +1649,8 @@ def main():
             print(fwriter.close())
         if wr:
             fh.close()
+        if imu_fh is not None:
+            imu_fh.close()
 
     dt = time.perf_counter() - t_start
     print(f"\n{n} frames in {dt:.1f} s = {n/max(dt,1e-9):.1f} Hz processed")

@@ -23,6 +23,14 @@ WorkingDirectory=/data/DRONE/vps_vio
 # sigma, no track count, no velocity-bridge state. The 8 Oct collapse could not
 # be diagnosed for exactly that reason.
 #
+# --save-frames 4 was added 20 Oct, after the day's flight produced a CSV and
+# not one image: the flag is off by default and this unit did not pass it, so
+# frame_writer had never run on a flight. 4 Hz at the pilot's asking. Measured
+# cost: offer() 0.158 ms on the loop thread, the encode 10.4 ms on the worker
+# (= 4.2% of one core at 4 Hz), 123 KB a frame, so ~1.8 GB an hour against
+# 929 GB free. With this flag the run becomes a FOLDER - the CSV, the jpgs,
+# camera.txt and the camera IMU log in one place.
+#
 # --fc-port goes through the router, not at the serial device: the router is
 # the one owner of /dev/ttyTHS1 and everything else is a UDP client of it.
 # --send-gps with --gps-id 1 is what makes the estimate arrive as GPS2.
@@ -32,6 +40,7 @@ ExecStart=/usr/bin/python3 /data/DRONE/vps_vio/live_node.py \
     --fc-port udpout:127.0.0.1:14650 \
     --send-gps --gps-id 1 \
     --out /data/DRONE/flight_logs/vps \
+    --save-frames 4 \
     --liveness /run/drone/vps.alive
 Restart=always
 RestartSec=5
