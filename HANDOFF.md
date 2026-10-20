@@ -377,12 +377,17 @@ Be honest about this with the pilot; they ask, and they are right to.
   has still never been run on real aerial frames of this site. **There is no
   real map-matching accuracy number.** Getting one needs a flight above ~80 m
   with `--save-frames 2`, on a sheet that covers the site.
-- **`bhh.tif` is probably the wrong sheet.** Exactly: 30.88411–30.90332 N,
-  74.59762–74.63224 E, 7569×4200 at 0.509 m/px N-S and 0.437 E-W. `SCR_USER1/2`
-  in log `00000195.BIN` reads 30.7844, 74.6072 — 11.1 km from the near edge,
-  **12.2 km south and 0.7 km west of the sheet's centre**. Both readers say so
-  plainly now instead of reporting 0% matched, but the sheet for the current
-  site still has to be produced.
+- ~~`bhh.tif` is the wrong sheet~~ — **no longer true, checked 20 Oct 10:12.**
+  The sheet is 30.88411–30.90332 N, 74.59762–74.63224 E (7569×4200 at
+  0.509 m/px N-S, 0.437 E-W). `SCR_USER1/2` **now reads 30.896742, 74.613182**
+  and the node prints `sheet covers this point: YES` at every start, so the
+  pilot has since typed a take-off point that is on the sheet. The 30.7844 /
+  74.6072 that this entry used to quote is the STALE value from log
+  `00000195.BIN` — 12.2 km south of the sheet's centre — and it is what the
+  earlier commits in this work reasoned from. **Read the startup lines, not
+  this file**, before deciding a site: `grep -a "sheet covers" flight_logs/
+  vps_stdout.log`. Both offline readers still refuse an off-sheet run plainly
+  rather than reporting 0% matched.
 - **There is no aerial imagery on this machine at all.** After the SSD loss the
   only recording left anywhere is `flights/bench_210727`: 46 frames,
   `alt_rel_m` −6.78 to −6.74, `armed` 0 throughout, at 31.1638 N / 74.4345 E —
