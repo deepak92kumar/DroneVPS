@@ -704,7 +704,11 @@ CSV_COLUMNS = ["t", "north_m", "east_m", "lon", "lat", "sigma_m",
     # These three are GPS_RAW_INT - the receiver before the EKF touches it - and
     # they are the only independent truth in the file. gps1_err_m is the one to
     # read when judging a VPS flight.
-    "gps1_north_m", "gps1_east_m", "gps1_err_m"]
+    "gps1_north_m", "gps1_east_m", "gps1_err_m",
+    # Position steps refused as physically impossible, cumulative. A flight
+    # where this never moves saw no glitches; one where it climbs steadily is
+    # the pilot flying faster than STEP_MAX_SPEED_MPS, not a camera fault.
+    "n_step_rej"]
 
 
 IMU_LOG_COLUMNS = ["t_dev", "src", "x", "y", "z"]
@@ -762,7 +766,8 @@ def csv_row(est, f, v, gN, gE, err):
             f"{est['sigma_abs']:.1f}",
             "" if est.get("g1_north") is None else f"{est['g1_north']:.2f}",
             "" if est.get("g1_east") is None else f"{est['g1_east']:.2f}",
-            "" if est.get("g1_err") is None else f"{est['g1_err']:.2f}"]
+            "" if est.get("g1_err") is None else f"{est['g1_err']:.2f}",
+            est.get("n_step_rej", 0)]
 
 
 # --------------------------------------------------------------------------- #
@@ -1181,6 +1186,47 @@ class VpsNode:
     # with deliberate flow dropouts.
     DR_TRUST = 3.0
 
+    # THE POSITION STEP'S OWN CEILING, IN PIXELS.
+    #
+    # Why this exists. The position is ACCUMULATED - fuser.predict() adds each
+    # frame's displacement to a running total - so one bad flow frame does not
+    # produce one bad reading, it produces a permanent offset. vps_00016 has a
+    # single-sample 20.55 m step at 41.3 m altitude and it is still in that
+    # flight's position at the end. The map and the velocity were both already
+    # defended: a map fix beyond 3 sigma is dropped and an accepted one may
+    # move the estimate by at most max_correction_m = 0.5 m, and the velocity
+    # bridge has had a physical gate and an output slew since 20 Oct. The
+    # accumulating position had nothing.
+    #
+    # WHY PIXELS AND NOT m/s, which is what the pilot first asked for ("sabhi
+    # mode main 3-4 ms se jada ka speed"). A pixel is altitude / focal metres
+    # on the ground, so a fixed SPEED ceiling is a shrinking PIXEL ceiling as
+    # the aircraft climbs. 4 m/s works out at:
+    #
+    #     40 m   3.17 px/frame      90 m   1.41 px/frame
+    #     70 m   1.81 px/frame     110 m   1.15 px/frame
+    #
+    # and the flow tracker's own frame-to-frame noise is several pixels. So at
+    # the 80-90 m the next flight plans, a 4 m/s ceiling clips at barely over
+    # one pixel - below what the camera can even resolve - and would refuse
+    # 38-66% of steps above 20 m on the recordings. In pixels, which is the
+    # unit the error is actually constant in, the separation is clean:
+    #
+    #     normal steps      p50 3.18, p90 13.54, p95 22.39 px
+    #     the glitch        394 px in one frame
+    #     tracker's reach   31 winSize x 2^4 maxLevel = 496 px
+    #
+    # 50 px refuses 1.4% of 22738 recorded steps and kills the 394 px glitch.
+    #
+    # WHAT THIS DOES NOT DO, and it matters: it does not stop noise-driven
+    # drift at altitude. At 70-80 m the flow's own error is about 5.7 m/s, and
+    # nothing in the position path removes that - the position is an integral
+    # of flow. Correcting it is the MAP FIX's job, which is why MAP_MIN_ALT_M
+    # is 60 and why a VPS hold at 40 m is dead reckoning with no absolute
+    # reference at all. This gate catches glitches, not noise.
+    STEP_MAX_PX = 50.0
+    STEP_ESCAPE_N = 5
+
     def __init__(self, cache: MapCache, focal_px: float, *,
                  fix_period_s: float = 1.0, radius_m: float = 150.0,
                  max_corners: int = 300, K=None, D=None, focal_y_px=None):
@@ -1221,6 +1267,10 @@ class VpsNode:
         self.prev_att = None
         self.prev_t = None
         self.n_fix = self.n_flow = self.n_dr = 0
+        # Steps refused as physically impossible, and how many in a row - the
+        # second is what lets the gate stand down. See step_is_possible.
+        self.n_step_rejected = 0
+        self._step_refusals = 0
         # Flow AND acceleration on this path - step() pushes both. The bridge
         # still holds rather than dead-reckoning when no acceleration arrives,
         # which is what a replayed recording and a silent IMU both look like,
@@ -1274,6 +1324,61 @@ class VpsNode:
             origin = float(np.sqrt(self.fuser.fix_var))
         return float(np.hypot(origin, drift))
 
+    def gate_step(self, dn: float, de: float, dt: float | None,
+                  altitude_m: float):
+        """Bound one frame's displacement. Returns (dn, de, action).
+
+        action is "ok" for a step to use as measured, "refused" for one to drop
+        (the caller then treats the frame as a GAP), or "clipped" for one the
+        escape hatch let through at the ceiling.
+
+        WHY THE ESCAPE HATCH CLIPS instead of passing the raw step. A gate that
+        can refuse for ever is worse than the glitch it catches - if the
+        estimate itself has gone wrong, every correct measurement looks
+        impossible and the error is locked in - so after STEP_ESCAPE_N
+        consecutive refusals it has to concede. Passing the raw step at that
+        point is the wrong concession, and the aircraft's own recordings show
+        why: at 20-80 m altitude 38-66% of steps exceed the ceiling, because
+        the flow's error is constant in PIXELS and becomes metres times
+        altitude. Those are not glitches, they are noise, and under sustained
+        noise an escape hatch that passes raw steps admits the LARGEST one
+        every sixth frame - systematically the worst of them.
+
+        Clipping concedes the direction and keeps the bound: sustained real
+        motion still moves the position, at up to STEP_MAX_SPEED_MPS, while
+        sustained noise contributes at most that instead of the 95 m/s seen in
+        vps_00016. Nothing above the ceiling ever enters the position, which is
+        the pilot's instruction taken literally: "sabhi mode main 3-4 ms se
+        jada ka speed".
+
+        The cost is honest and it is the pilot's own stick. Flying faster than
+        the ceiling in AltHold or Stabilize makes the position under-report,
+        and that accumulates. LOIT_SPEED_MS is 3 m/s and ATC_ANGLE_MAX is 15
+        degrees, so nothing the position controller can command comes near it,
+        and n_step_rej is in the CSV so a flight shows how often it bit.
+
+        dt None, or outside a sane frame interval, means there is nothing to
+        judge the step against, so it is used as measured. Refusing on no
+        evidence would throw away the first flowed frame of every run.
+        """
+        if dt is None or not (0.0 < dt < 0.5) or not (altitude_m > 0.0):
+            return dn, de, "ok"
+        mag = float(np.hypot(dn, de))
+        # The ceiling in metres for THIS frame: pixels x metres-per-pixel.
+        ceiling = self.STEP_MAX_PX * (altitude_m / self.focal)
+        if mag <= ceiling:
+            self._step_refusals = 0
+            return dn, de, "ok"
+        self._step_refusals += 1
+        self.n_step_rejected += 1
+        if self._step_refusals > self.STEP_ESCAPE_N:
+            # Concede the direction, keep the bound. Re-armed so the next
+            # isolated glitch still dies rather than the gate standing open.
+            self._step_refusals = 0
+            k = ceiling / mag
+            return dn * k, de * k, "clipped"
+        return 0.0, 0.0, "refused"
+
     def to_lonlat(self, north: float, east: float):
         return (self.origin[0] + east / self.mlon,
                 self.origin[1] + north / M_PER_DEG_LAT)
@@ -1322,18 +1427,28 @@ class VpsNode:
             d = d - attitude_shift_px(self.prev_att, att)
             dn, de = shift_to_ne(d, altitude_m=f["alt"], focal_px=self.focal,
                                  yaw_deg=f["yaw"], focal_y_px=self.focal_y)
-            self.fuser.predict(dn, de)
-            self.n_flow += 1
-            # Velocity is the SAME displacement the fuser just consumed,
-            # divided by the frame interval. Deriving it here rather than in a
-            # second estimator means position and velocity cannot disagree
-            # about what the camera saw - and disagreement between them is
-            # what the EKF reads as a velocity innovation.
-            if self.prev_t is not None:
-                dt = f["t"] - self.prev_t
-                if 0.0 < dt < 0.5:
-                    self.vel.push_flow(f["t"], dn / dt, de / dt)
-            flowed = True
+            # ONE decision for both consumers. Until 21 Oct predict() ran here
+            # unconditionally and push_flow() below could then refuse the same
+            # displacement on its own physical gate - so the position swallowed
+            # steps the velocity had rejected, and the comment below claiming
+            # they "cannot disagree about what the camera saw" was not true.
+            # Asking once fixes both.
+            dt_step = (None if self.prev_t is None else f["t"] - self.prev_t)
+            dn, de, action = self.gate_step(dn, de, dt_step, f["alt"])
+            if action != "refused":
+                self.fuser.predict(dn, de)
+                self.n_flow += 1
+                # Velocity is the SAME displacement the fuser just consumed,
+                # divided by the frame interval. Deriving it here rather than
+                # in a second estimator means position and velocity cannot
+                # disagree about what the camera saw - and disagreement
+                # between them is what the EKF reads as a velocity innovation.
+                if dt_step is not None and 0.0 < dt_step < 0.5:
+                    self.vel.push_flow(f["t"], dn / dt_step, de / dt_step)
+                flowed = True
+            # else: flowed stays False, so the gap handling below carries the
+            # position on the accelerometer and grows the variance DR_TRUST
+            # times faster. A refused frame IS a lost frame.
 
         # Flow produced nothing this frame - tracking lost, too few corners, or
         # the first frame after a reset. THIS is the gap, and it is where the
@@ -1388,6 +1503,7 @@ class VpsNode:
                     gyro_d_roll=f.get("gyro_d_roll"),
                     gyro_d_pitch=f.get("gyro_d_pitch"),
                     gyro_n=f.get("gyro_n"), accel_n=f.get("accel_n"),
+                    n_step_rej=self.n_step_rejected,
                     depth_med_m=self.tracker.depth_med_m,
                     depth_dropped=self.tracker.depth_dropped,
                     n_dr=self.n_dr)
@@ -1423,8 +1539,24 @@ def main():
                     help="TELEM2 flies at 921600. Ignored for a udp endpoint.")
     ap.add_argument("--no-notify", action="store_true",
                     help="do not send STATUSTEXT to the radio")
-    ap.add_argument("--notify-period", type=float, default=10.0,
-                    help="seconds between VPS heartbeat lines on the radio")
+    # 3 s, not 10. The pilot confirmed on 21 Oct that companion STATUSTEXT does
+    # reach the handset - closing the 13 Oct open item - but called it "thora
+    # slow". Measured on the link that evening: exactly 10.02 s between lines,
+    # 0.10 lines a second, which is this default and nothing else.
+    #
+    # WARNINGS WERE NEVER SLOW, and that is worth separating. Notifier.event()
+    # fires the moment a value CHANGES, so LIDAR ZERO, FRAMES ON/OFF, the
+    # origin line and VPS HANDOVER all go out at once. This period governs only
+    # the periodic status line - tracks, sigma, fixes, source.
+    #
+    # The cost is bandwidth on the radio, and it is small: a STATUSTEXT is 50
+    # bytes of payload plus about 12 of MAVLink 2 framing, so 10 s is 6 B/s and
+    # 3 s is 21 B/s. A SiK radio at a 57600 air rate carries some 5-6 kB/s
+    # usable, so this is well under half a percent either way. Raise it with
+    # the flag if the link is ever the thing that is short.
+    ap.add_argument("--notify-period", type=float, default=3.0,
+                    help="seconds between VPS status lines on the radio "
+                         "(warnings are immediate regardless; default 3)")
     ap.add_argument("--no-scr-origin", action="store_true",
                     help="do not take the origin from SCR_USER1/2")
     ap.add_argument("--out", help="estimate log CSV, or a DIRECTORY - a "
@@ -1681,7 +1813,8 @@ def main():
     notifier = Notifier(_link, period_s=a.notify_period,
                         enabled=not a.no_notify)
     if notifier.enabled:
-        print(f"notifications ON, every {a.notify_period:.0f}s")
+        print(f"notifications ON: status line every {a.notify_period:.1f}s, "
+              f"warnings immediate")
 
     # The link the watcher listens on is the sender's, because that is the one
     # that owns the FC endpoint. With no sender there is nothing to gate, so

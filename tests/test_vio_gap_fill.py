@@ -100,6 +100,8 @@ def node():
     n.prev_att = None
     n.prev_t = None
     n.n_fix = n.n_flow = n.n_dr = 0
+    n.n_step_rejected = 0
+    n._step_refusals = 0
     n.vel = VelocityBridge()
     n.set_origin(74.613182, 30.896742)
     return n

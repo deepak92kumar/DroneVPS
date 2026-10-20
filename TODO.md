@@ -97,7 +97,7 @@ Ordered by what blocks what. Nothing below has flown unless it says so.
 
 | | what | why |
 |---|---|---|
-| ☐ | **Zero the lidar at the field, after the final power cycle** | the zero moved 0.66537 → 0.69663 → 0.70449 → 0.72316 V in one afternoon. Over 2 m and the aircraft will not auto-disarm. `lidar_zero.py --apply` |
+| ☐ | **Zero the lidar at the field, after the final power cycle** | the zero moved 0.66537 → 0.69663 → 0.70449 → 0.72316 V in one afternoon, and **overnight it drifted another +44.8 mV = +3.25 m**, which CLAMPED the reading at a flat 0.000 m. Re-zeroed on the bench 21 Oct to **0.67839 V**, now reading 0.260 m — but it will move again on the next power cycle. `lidar_zero.py --apply` now detects the clamp and walks the offset down to find the voltage, so it no longer needs several attempts |
 | ☑ | ~~Check whether companion messages reach the handset~~ **They do** (pilot, 21 Oct) | 13 Oct had it as *"Companion status lines still do not reach the radio link."* The pilot confirmed with the RC on that they arrive — *"massage aa raha hai"* — so `LIDAR ZERO`, `FRAMES ON/OFF`, the origin line and `VPS HANDOVER` all reach the handset. He notes they are **"thora slow"**, which still matters for a pre-take-off warning: not yet measured |
 | ☐ | **Set `SCR_USER1/2` at the actual take-off point** | still the VPS origin when on the VPS. The arm-time re-take covers the GPS case but not this one |
 
@@ -175,11 +175,18 @@ altitude. Everything about flying on the VPS waits on that answer.
 
 - **Emergency stop switch** (`RCx_OPTION = 31`). Offered, not taken. The pilot's
   rule is to ask before fitting a guard.
-- **Derotation runs off the FC attitude**, which is exactly 0 on 87% of frames
-  (it updates at ~4 Hz against a 30 Hz loop), and the camera gyro — sampled
-  properly at 100 Hz — is **sign-inverted** against the FC on both axes
-  (cumulative r = −0.80). Switching is right for the timing and wrong until
-  the sign is fixed.
+- **Derotation runs off the FC attitude**, which does not move on **89–95%**
+  of frames (it updates at ~4 Hz against a 30 Hz loop). The camera gyro is
+  **sign-inverted** against it on both axes — but the old r = −0.80 was a
+  confounded figure, comparing a one-frame gyro delta against an FC delta
+  spanning many frames. Measured properly on 21 Oct, summing the gyro over the
+  FC's own update interval, across three flights and both axes:
+  **r = −0.994 to −0.998, scale = −0.983 to −1.008.** So the gyro is accurate
+  to 1–2% and the sign is the *only* fault. Flipping it and derotating off the
+  gyro at 100 Hz is a real improvement to flow quality and it is a small
+  change — deliberately NOT made before the 21 Oct flight, because that flight
+  is the VPS test and the CSV already logs both deltas, so it supplies the
+  airborne comparison for free.
 - **Stereo depth reads 2.62 m at a true 4.5 m.** Only used for the plane gate.
 - **`EK3_SRC1_VELXY = 3`** — the EKF still fuses the velocity we send. The
   restored slew and accuracy are what make that safe; neither has flown.

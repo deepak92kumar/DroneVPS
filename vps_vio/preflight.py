@@ -41,18 +41,28 @@ SERVICES = ("drone-router", "drone-vps", "drone-rc-switch")
 # will declare the aircraft landed. 1.5 is that threshold with margin for the
 # sensor's own drift during one flight.
 LIDAR_MAX_M = 1.5
-# A LIVE sensor is noisy; a dead one is not. Measured 20 Oct, standing still on
-# the ground: sd 0.121 m with RNGFND1_RMETRIC 1, and sd 0.027 m after it was set
-# to 0. Both are far above zero. An unpowered analog pin reads a dead-flat
-# 0.000 m with sd 0.000, which every threshold below 2 m waves through - and on
-# 21 Oct, with the battery off the aircraft, a check written exactly that way
-# printed "OK, it would auto-disarm" about a rangefinder that was not there.
+# WHAT SEPARATES A LIVE SENSOR FROM A CLAMPED ONE, and the first answer here
+# was wrong. ArduPilot floors a negative analog distance at zero, so an offset
+# that has drifted above the sensor's voltage makes every reading a dead-flat
+# 0.000 m - which every threshold below 2 m waves through. A check written that
+# way printed "OK, it would auto-disarm" on 21 Oct about a rangefinder reading
+# nothing.
 #
-# The ADC's own quantisation is the floor to compare against: RNGFND1_SCALING
-# 72.61 makes one millivolt 7.3 cm, so a live sensor sitting on a single code
-# could read a constant - but it would read that code's VALUE, not zero. So
-# both tests are needed: it has to move, and it has to be above the floor.
-LIDAR_MIN_SD_M = 0.002
+# The first fix also demanded NOISE - sd above 2 mm, against the 0.027-0.121 m
+# a live sensor measured on 20 Oct. That was wrong, and the aircraft proved it
+# the same evening. Walking RNGFND1_OFFSET down in 25 mV steps moved the
+# reading 0.640 -> 2.450 -> ... -> 18.790 m, a straight line of slope 72.60 m/V
+# against RNGFND1_SCALING 72.61 with a 2.7 mm residual, from a pin sitting at
+# 0.68194 V steady to a tenth of a millivolt across eleven measurements. The
+# sensor was not just alive, it was excellent - and sd read 0.000 at every step
+# because it is QUIETER THAN ONE ADC CODE. 72.61 m/V makes a millivolt 7.3 cm,
+# so anything below that shows as exactly zero. The 0.121 m of 20 Oct was the
+# 5 V rail being divided in by RNGFND1_RMETRIC=1, and setting it to 0 removed
+# it.
+#
+# So noise is not the test. A clamped reading is exactly 0.000 and therefore
+# below RNGFND1_MIN; a live one reports its real distance. That is the whole
+# separation and it needs nothing else.
 # Expected after 20 Oct. A power cycle keeps these (they are in flash), but a
 # parameter reset or someone else's session does not.
 EXPECT = {
@@ -235,13 +245,14 @@ def flight_controller(port):
         # absent sensor, and calling that "ready to auto-disarm" is worse than
         # saying nothing - it is the one check standing between the pilot and
         # pulling the battery on the ground again.
-        alive = sd > LIDAR_MIN_SD_M and mean > max(rmin_now, 0.05)
+        alive = mean > max(rmin_now, 0.05)
         if not alive:
-            bad("lidar is ALIVE - nothing can be said about the zero",
-                f"{mean:.3f} m with sd {sd:.4f} over {len(rng)} samples. "
-                f"A live sensor on the ground measured sd 0.027-0.121 m. "
-                f"This reads flat at or below RNGFND1_MIN {rmin_now:.2f} - "
-                f"check power and wiring, not the offset")
+            bad("lidar reads NOTHING - the zero cannot be judged from here",
+                f"{mean:.3f} m (sd {sd:.4f}) over {len(rng)} samples, at or "
+                f"below RNGFND1_MIN {rmin_now:.2f}. ArduPilot floors a "
+                f"negative analog distance at zero, so RNGFND1_OFFSET is "
+                f"ABOVE the sensor's voltage and the true error is unknown. "
+                f"Run: python3 vps_vio/lidar_zero.py --apply")
         elif mean < LIDAR_MAX_M:
             ok("lidar zero - the aircraft will be able to auto-disarm",
                f"{mean:.2f} m on the ground, sd {sd:.3f} (needs < 2.00)")

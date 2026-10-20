@@ -72,11 +72,16 @@ check("widths match", len(row) == len(CSV_COLUMNS),
 # the EKF's fused position, which on a VPS flight is partly our own injection
 # returning. gps1_* are GPS_RAW_INT, the receiver before the EKF touches it,
 # and they are the only independent truth in the file.
-check("and there are the columns we expect", len(CSV_COLUMNS) == 44,
+#
+# 45 once n_step_rej joined them: position steps refused as physically
+# impossible, cumulative. The position is ACCUMULATED, so one bad flow frame is
+# a permanent offset rather than one bad reading - vps_00016 carries a
+# single-sample 20.55 m step to the end of the flight.
+check("and there are the columns we expect", len(CSV_COLUMNS) == 45,
       str(len(CSV_COLUMNS)))
-check("the raw receiver's three are the last three",
-      CSV_COLUMNS[-3:] == ["gps1_north_m", "gps1_east_m", "gps1_err_m"],
-      str(CSV_COLUMNS[-3:]))
+check("the raw receiver's three are together",
+      CSV_COLUMNS[-4:-1] == ["gps1_north_m", "gps1_east_m", "gps1_err_m"],
+      str(CSV_COLUMNS[-4:]))
 
 print("\nand with every optional value missing, which is the usual case")
 e = est(fc_d_roll=None, fc_d_pitch=None, gyro_d_roll=None, gyro_d_pitch=None,

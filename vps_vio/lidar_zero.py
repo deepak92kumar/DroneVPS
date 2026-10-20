@@ -136,6 +136,43 @@ class FC:
         return a, (float(np.mean(vcc)) if vcc else float("nan"))
 
 
+# A clamped reading is exactly 0.000, because ArduPilot floors a negative
+# analog distance. That is the whole test. An earlier version of this also
+# demanded NOISE, and the aircraft disproved it on 21 Oct: the pin sat at
+# 0.68194 V steady to a tenth of a millivolt, the search below moved the
+# reading 0.640 -> 18.790 m on a straight line of slope 72.60 m/V, and sd read
+# 0.000 at every single step - because 72.61 m/V makes one millivolt 7.3 cm and
+# the sensor is quieter than one ADC code. Requiring noise rejected a sensor
+# that was working perfectly.
+CLAMP_MEAN_M = 0.02
+
+
+def _unclamp(fc, offset, scaling, seconds, step_mv=25.0, tries=12):
+    """Walk RNGFND1_OFFSET down until the reading comes off zero.
+
+    Returns (samples, offset_used), or (None, _) with the original offset put
+    back. 25 mV is 1.8 m at this scaling - coarse on purpose, because the point
+    is to find the voltage, not to be gentle, and the zero is measured properly
+    once a reading exists.
+    """
+    original = offset
+    for i in range(1, tries + 1):
+        trial = original - i * step_mv / 1000.0
+        if trial < OFFSET_VOLT_RANGE[0]:
+            break
+        got = fc.set("RNGFND1_OFFSET", trial)
+        if got is None:
+            break
+        time.sleep(0.8)
+        d, _ = fc.read_distance(max(2.0, seconds / 3.0))
+        print(f"    offset {trial:.5f} V  ->  mean {d.mean():.3f} m  "
+              f"sd {d.std():.4f}")
+        if d.mean() > CLAMP_MEAN_M:
+            return d, trial
+    fc.set("RNGFND1_OFFSET", original)
+    return None, original
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -191,9 +228,47 @@ def main():
     print(f"\n  reported: n={len(d)}  mean {d.mean():.3f} m  "
           f"sd {d.std():.3f}  min {d.min():.2f}  max {d.max():.2f}"
           f"   board Vcc {vcc:.3f}")
-    print(f"  noise floor: sd {d.std():.3f} m = "
-          f"{1000.0 * d.std() / scaling:.1f} mV of ADC. This is the sensor, "
-          f"not the aircraft.")
+
+    # IS THE READING CLAMPED? This has to be asked before anything is said
+    # about the zero, and until 21 Oct it was not.
+    #
+    # ArduPilot clamps a negative analog distance to zero. So when the offset
+    # has drifted ABOVE the sensor's actual voltage, every reading comes back a
+    # dead-flat 0.000 m with sd 0.000 - and the arithmetic below then reads
+    # that as "the sensor says 0 m", computes an error of exactly the ground
+    # clearance, and writes a correction of a few millivolts. Measured on the
+    # bench that evening: true 0.260 m against a clamped 0.000 gives -3.6 mV,
+    # when the real voltage could be anywhere below the offset and the error
+    # could be a hundred millivolts. Applying it leaves the reading still
+    # clamped, and the pilot repeats the whole procedure at the field.
+    #
+    # A live sensor is noisy: sd 0.121 m with RNGFND1_RMETRIC 1 and 0.027 m
+    # after it was set to 0, both far above zero. And RNGFND1_SCALING 72.61
+    # makes one millivolt 7.3 cm, so a live sensor resting on a single ADC code
+    # could read a constant - but it would read that code's value, not zero.
+    # Both tests are needed.
+    clamped = float(d.mean()) <= CLAMP_MEAN_M
+    if clamped:
+        print(f"  *** CLAMPED at {d.mean():.3f} m. "
+              f"ArduPilot floors a negative "
+              f"analog distance at zero, so RNGFND1_OFFSET {offset:.5f} V is "
+              f"ABOVE the sensor's actual voltage and the true error is unknown "
+              f"from here, not {1000.0 * (float(d.mean()) - true_m) / scaling:+.1f} mV. ***")
+        if not a.apply:
+            print("\n  Pass --apply and this will walk the offset DOWN until a "
+                  "reading appears, then measure the zero properly.")
+            return 0
+        d, offset = _unclamp(fc, offset, scaling, a.seconds)
+        if d is None:
+            sys.exit("\n*** the reading never came off zero. That is not a "
+                     "drifted zero - check the sensor's power and wiring. "
+                     "RNGFND1_OFFSET has been put back. ***")
+        print(f"\n  off the clamp: mean {d.mean():.3f} m  sd {d.std():.3f} "
+              f"at RNGFND1_OFFSET {offset:.5f} V")
+    else:
+        print(f"  noise floor: sd {d.std():.3f} m = "
+              f"{1000.0 * d.std() / scaling:.1f} mV of ADC. This is the sensor, "
+              f"not the aircraft.")
 
     err = float(d.mean()) - true_m
     new_offset = offset + err / scaling
