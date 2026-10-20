@@ -41,8 +41,41 @@ import time
 
 
 def _default_encode(path, img, params):
+    """Write one frame, and make sure it is really on the disk.
+
+    TWO FAULTS LIVED IN THE THREE LINES THIS REPLACES, and the 20 Oct 16:38
+    flight shows both. 86 of its 1151 saved frames are ZERO BYTES - not
+    truncated, empty - they are the last 86, consecutive, spanning the final
+    23 seconds, and the last readable frame carries the same timestamp as the
+    first empty one. The writer reported every one of them as written.
+
+    cv2.imwrite RETURNS FALSE on failure; it does not raise. So the worker's
+    `except Exception` could never fire, `failed` stayed at 0, and a row's
+    frame_file named a file no one could open. Any real write failure - a full
+    disk, a read-only filesystem, a bad path - was invisible by construction.
+    Checking the return value is the whole fix for that, and it is checked
+    whether or not the other fault is what bit here.
+
+    THE DATA WAS NEVER FLUSHED. ext4 delays allocation, so a written file's
+    bytes can sit in the page cache for up to 30 s with only its name on the
+    disk. The battery was pulled at the end of that flight. 23 seconds of
+    unflushed frames is exactly what that leaves behind, and it is the same
+    failure the estimate CSVs showed as NUL tails on the same day - those got a
+    per-second fsync on 20 Oct and the frames did not.
+
+    So the bytes are encoded in memory and written through a file this function
+    owns, with fsync before it closes. The cost is one fsync per frame at 4 Hz,
+    which this Jetson's NVMe does in well under the 250 ms budget; the
+    alternative is losing the end of every flight that ends with the battery.
+    """
     import cv2
-    cv2.imwrite(path, img, params)
+    ok, buf = cv2.imencode(os.path.splitext(path)[1] or ".jpg", img, params)
+    if not ok:
+        raise OSError(f"could not encode {path}")
+    with open(path, "wb") as fh:
+        fh.write(buf.tobytes())
+        fh.flush()
+        os.fsync(fh.fileno())
 
 
 class FrameWriter:
@@ -88,7 +121,7 @@ class FrameWriter:
         self._q: "queue.Queue" = queue.Queue(maxsize=self.maxsize)
         self.saved = 0        # handed to the worker and written
         self.dropped = 0      # offered, wanted, and thrown away: queue full
-        self.failed = 0       # reached the worker and the write raised
+        self.failed = 0       # reached the worker and the write did not land
         self.skipped = 0      # not wanted: the rate gate said not yet
         # Frames that were accepted - so their names ARE in the CSV - and then
         # lost because the disk was still behind when close() ran out of time.
@@ -152,6 +185,15 @@ class FrameWriter:
                 # worker swallows it, counts it, and takes the next one. A
                 # full disk must not end a flight's navigation.
                 self.failed += 1
+                # And it leaves no stub behind. A zero-byte file whose name is
+                # in the CSV sends an offline run map-matching against nothing
+                # and reports it as an unreadable image rather than a missing
+                # one - which is how 86 lost frames read as a matcher problem.
+                try:
+                    if os.path.exists(path) and os.path.getsize(path) == 0:
+                        os.unlink(path)
+                except OSError:
+                    pass
             finally:
                 self._q.task_done()
 

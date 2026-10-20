@@ -327,7 +327,7 @@ def fix_one(worker, img, *, lon, lat, alt, yaw, timeout=120.0):
 
 def run(folder: str, map_path: str, *, out_csv: str | None = None,
         csv_path: str | None = None, every: int = 1, limit: int = 0,
-        min_alt: float = 60.0, radius_m: float = 150.0,
+        min_alt: float = 60.0, radius_m: float = 150.0, gps_prior: bool = False,
         min_score: float | None = None, min_margin: float | None = None,
         pp_correct: bool = False, quiet: bool = False) -> dict:
     """Match a run folder and return the summary as a dict.
@@ -371,7 +371,9 @@ def run(folder: str, map_path: str, *, out_csv: str | None = None,
     # Before any matching. A take-off point off the sheet makes every frame
     # fail for one reason that is not about the matcher, and the 11 km case is
     # the normal one on this machine, not an edge case.
-    priors = [(_num(r.get("lon")), _num(r.get("lat"))) for _, r in named]
+    priors = [(gps_lonlat(r) or (None, None)) if gps_prior
+              else (_num(r.get("lon")), _num(r.get("lat")))
+              for _, r in named]
     inside = [p for p in priors if None not in p and cache.covers(p[0], p[1])]
     if not inside:
         have = [p for p in priors if None not in p]
@@ -429,6 +431,31 @@ def run(folder: str, map_path: str, *, out_csv: str | None = None,
             wr.writerow(match_row(r, idx, res, lon=lon, lat=lat, gps=gps,
                                   d_vps=d_vps, d_gps=d_gps, reason=reason,
                                   fix_s=fix_s))
+
+        # THE PRIOR DECIDES WHICH PATCH OF SHEET IS EVEN LOOKED AT, and the
+        # window is clip(0.60 x altitude, 40, radius) - 42 m at 70 m. So a
+        # prior that is wrong by more than that puts the true place outside the
+        # search entirely, and the matcher is being asked a different question
+        # than the one it is being judged on.
+        #
+        # That is not hypothetical. On vps_00019 the origin was left at a stale
+        # SCR_USER1/2 and every estimate was 153 m out, which is why every
+        # matched row in the baseline run came back 150-160 m from the recorded
+        # GPS - the same 153 m, not a matcher error. --gps-prior swaps in the
+        # recorded GPS so the two questions can be told apart:
+        #
+        #   estimate prior  "could the aircraft have fixed itself from here"
+        #   GPS prior       "can this imagery match this sheet at all"
+        #
+        # It is not what the aircraft does and never can be; it is a
+        # measurement of the matcher with the prior fault removed.
+        if gps_prior:
+            if gps is None:
+                summary["no_prior"] += 1
+                note("no recorded GPS to search around")
+                emit(reason="no recorded GPS to search around")
+                continue
+            lon, lat = gps
 
         path = os.path.join(folder, name)
         if not os.path.exists(path):
@@ -602,6 +629,16 @@ def main(argv=None):
                          "measures something the aircraft would not do.")
     ap.add_argument("--radius", type=float, default=150.0, metavar="M",
                     help="largest search window, as MapFixWorker's radius_m")
+    ap.add_argument("--gps-prior", action="store_true",
+                    help="search around the RECORDED GPS instead of the "
+                         "flight's own estimate. The window is 0.60 x altitude "
+                         "(42 m at 70 m), so an estimate that was 153 m out - "
+                         "which vps_00013/16/19 all were, on a stale "
+                         "SCR_USER1/2 - put the true place outside the search "
+                         "and the matcher never saw it. This separates 'can "
+                         "the imagery match the sheet' from 'was the prior "
+                         "good enough to look in the right place'. Not what "
+                         "the aircraft does")
     ap.add_argument("--min-score", type=float, default=None,
                     help="inlier-ratio gate, default XFeat's 0.25. This is the "
                          "number most likely to be wrong and wrong towards "
@@ -624,6 +661,7 @@ def main(argv=None):
     try:
         s = run(a.folder, a.map, out_csv=a.out, csv_path=a.csv, every=a.every,
                 limit=a.limit, min_alt=a.min_alt, radius_m=a.radius,
+                gps_prior=a.gps_prior,
                 min_score=a.min_score, min_margin=a.min_margin,
                 pp_correct=a.pp_correct)
     except RuntimeError as e:

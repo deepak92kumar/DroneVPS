@@ -104,6 +104,14 @@ check("that is more than an unsynced writer leaves", with_sync > no_sync,
 
 # And the defence has to be cheap enough to sit in the flow loop, which has
 # ~59 ms a frame and already spends 22 of them.
+#
+# The threshold is the frame budget MINUS what the loop already uses, not a
+# round number. 20 ms was the round number, and on this Jetson a quiet run
+# measures 12-14 ms against it - 40% of margin on a machine that also runs the
+# camera, the matcher and whatever else is on it. It duly failed once, under
+# load from an offline matching run on the same disk, and that failure said
+# nothing about the code. What matters is whether one fsync can overrun a
+# frame; 37 ms is what is actually left after the loop's own 22.
 d = tempfile.mkdtemp()
 fh = open(os.path.join(d, "cost.csv"), "w", newline="")
 wr = csv.writer(fh)
@@ -117,8 +125,8 @@ for i in range(300):
         os.fsync(fh.fileno())
         worst = max(worst, (time.perf_counter() - t0) * 1e3)
 fh.close()
-check("one flush+fsync stays well inside a frame budget", worst < 20.0,
-      f"worst {worst:.2f} ms against 59 ms a frame")
+check("one flush+fsync fits in what a frame has left", worst < 37.0,
+      f"worst {worst:.2f} ms against 59 ms a frame, 22 of it already spent")
 
 # ---------------------------------------------------------------- 2. the unit
 
