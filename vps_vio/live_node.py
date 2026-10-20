@@ -25,6 +25,7 @@ from map_cache import MapCache
 from map_fix_worker import MapFixWorker
 from map_fuse import MapFuser
 from velocity_bridge import VelocityBridge
+from frame_writer import FrameWriter, next_run_number
 import single_instance
 
 M_PER_DEG_LAT = 111_320.0
@@ -553,7 +554,15 @@ CSV_COLUMNS = ["t", "north_m", "east_m", "lon", "lat", "sigma_m",
     # after the 32nd. test_csv_columns.py now pins the two
     # together so the next addition cannot do it again.
     "accel_n", "depth_med_m", "depth_dropped",
-    "n_dr", "src", "rngfnd_m", "alt_amsl_m"]
+    "n_dr", "src", "rngfnd_m", "alt_amsl_m",
+    # The saved image for THIS row, or empty on the rows where no
+    # frame was saved (most of them - the gate saves a couple a
+    # second out of 17). This column is the whole point of writing
+    # frames from inside the navigating process: offline map
+    # matching needs heading and height per image, and they are
+    # already in this row. An index, not a timestamp, because the
+    # Jetson's clock jumps at boot.
+    "frame_file"]
 
 
 def csv_row(est, f, v, gN, gE, err):
@@ -580,7 +589,8 @@ def csv_row(est, f, v, gN, gE, err):
             est["depth_dropped"], est["n_dr"],
             est.get("src") or "",
             "" if f.get("rngfnd") is None else f"{f['rngfnd']:.2f}",
-            "" if f.get("alt_amsl") is None else f"{f['alt_amsl']:.2f}"]
+            "" if f.get("alt_amsl") is None else f"{f['alt_amsl']:.2f}",
+            est.get("frame_file") or ""]
 
 
 # --------------------------------------------------------------------------- #
@@ -1170,7 +1180,40 @@ def main():
                          "doing - see AmslRef. Without this it is taken from "
                          "the real receiver's first 3D fix.")
     ap.add_argument("--gps-id", type=int, default=1, help="0 = GPS1, 1 = GPS2")
+    ap.add_argument("--save-frames", type=float, default=0.0, metavar="HZ",
+                    help="also save camera frames, this many a second, into "
+                         "the run's own folder beside the estimate CSV. OFF "
+                         "by default. The OAK-D permits one owner, so "
+                         "record_flight.py cannot run while this node is "
+                         "flying and the images the pilot wants for offline "
+                         "map matching were never recorded; this is how they "
+                         "get recorded. Encoding is on a worker thread behind "
+                         "a bounded queue, so a disk that falls behind drops "
+                         "frames and says so rather than stalling the flow "
+                         "loop. Needs --out to be a DIRECTORY. Each saved "
+                         "frame's name goes in that row's frame_file column.")
+    ap.add_argument("--jpeg-quality", type=int, default=90,
+                    help="quality of the saved frames. JPEG, not PNG: 9.5 ms "
+                         "a frame against 30 (measured 20 Oct), and that CPU "
+                         "is shared with flow and XFeat.")
+    ap.add_argument("--frame-queue", type=int, default=8, metavar="N",
+                    help="frames allowed to be waiting on the encoder. Small "
+                         "on purpose - a longer queue does not rescue a slow "
+                         "disk, it only delays noticing, and each queued "
+                         "frame is ~0.9 MB held away from the map cache.")
     a = ap.parse_args()
+
+    if a.save_frames > 0:
+        # A directory that does not exist yet is still a directory: make it,
+        # so this works on a machine where flight_logs/vps has never been
+        # written rather than refusing a path that is plainly a folder.
+        if a.out and not os.path.exists(a.out) and not a.out.endswith(".csv"):
+            os.makedirs(a.out, exist_ok=True)
+        if not (a.out and (os.path.isdir(a.out) or a.out.endswith(os.sep))):
+            ap.error("--save-frames needs --out to be a DIRECTORY: the images "
+                     "and the estimate CSV go in one numbered folder per run, "
+                     "so an image can be matched back to the row that holds "
+                     "its heading and height.")
 
     # One copy, whoever started it. What was here asked systemctl whether a
     # unit called "drone-vio" was active; no such unit exists - they are
@@ -1226,24 +1269,25 @@ def main():
                    radius_m=a.radius, max_corners=a.corners)
 
     wr = None
+    fwriter = None
     if a.out:
         out_path = a.out
         if os.path.isdir(a.out) or a.out.endswith(os.sep):
-            # A numbered file, not a timestamped one. This Jetson has no
-            # battery-backed RTC: early boot runs on a stale clock that jumps
-            # forward when NTP lands, so a name built from the clock can
-            # collide with an older run or sort before it. ArduPilot numbers
-            # its own logs for the same reason, so follow it - find the highest
-            # index present and take the next.
+            # A numbered file, not a timestamped one - see next_run_number for
+            # why the clock cannot be trusted to name a run on this machine.
             os.makedirs(a.out, exist_ok=True)
-            n = 0
-            for f in os.listdir(a.out):
-                if f.startswith("vps_") and f.endswith(".csv"):
-                    try:
-                        n = max(n, int(f[4:-4]))
-                    except ValueError:
-                        pass
-            out_path = os.path.join(a.out, f"vps_{n + 1:05d}.csv")
+            stem = f"vps_{next_run_number(a.out):05d}"
+            if a.save_frames > 0:
+                # With frames, the run gets a FOLDER of its own and the CSV
+                # goes inside it, so one flight is one directory holding its
+                # images and the rows that describe them. Without frames
+                # nothing changes: the CSV sits in a.out exactly as before,
+                # which is what the systemd unit has been writing all along.
+                run_dir = os.path.join(a.out, stem)
+                os.makedirs(run_dir, exist_ok=True)
+                out_path = os.path.join(run_dir, stem + ".csv")
+            else:
+                out_path = os.path.join(a.out, stem + ".csv")
         fh = open(out_path, "w", newline="")
         print(f"recording to {out_path}")
         wr = csv.writer(fh)
@@ -1253,6 +1297,33 @@ def main():
         # columns had to be added after the fact. Everything the bridge knows
         # goes in the row.
         wr.writerow(CSV_COLUMNS)
+
+        if a.save_frames > 0:
+            fwriter = FrameWriter(os.path.dirname(os.path.abspath(out_path)),
+                                  hz=a.save_frames, quality=a.jpeg_quality,
+                                  maxsize=a.frame_queue)
+            print(f"saving frames at {a.save_frames:g} Hz into "
+                  f"{fwriter.folder} (queue {a.frame_queue}; a frame is "
+                  f"dropped, never waited for)")
+            # The intrinsics the frames were taken with, in the same shape
+            # ReplaySource already reads, so the folder can be replayed and so
+            # offline map matching is not left guessing at fx or at where cx
+            # went. cx moves with the crop and the saved frames ARE cropped -
+            # they are the same pixels flow ran on, leg removed.
+            try:
+                K = getattr(src, "K", None)
+                with open(os.path.join(fwriter.folder, "camera.txt"), "w") as cf:
+                    if K is not None:
+                        cf.write(f"fx={K[0][0]:.4f} fy={K[1][1]:.4f} "
+                                 f"cx={K[0][2]:.4f} cy={K[1][2]:.4f} "
+                                 f"crop_left={getattr(src, 'crop_left', 0)}\n")
+                    else:
+                        cf.write(f"fx={src.focal:.4f}\n")
+                    D = getattr(src, "D", None)
+                    if D is not None:
+                        cf.write("D=" + " ".join(f"{x:.6f}" for x in D) + "\n")
+            except Exception as e:
+                print(f"  (could not write camera.txt: {e})")
 
     # Reuse a sender's link if one exists. If none does - a read-only ground
     # run - open a link only through the ROUTER. A second opener of the serial
@@ -1366,6 +1437,12 @@ def main():
                 err = float(np.hypot(est["north"] - gN, est["east"] - gE))
                 errs.append(err)
             v = est["vel"]
+            if fwriter is not None:
+                # After n, so the name carries the index of the row about to
+                # be written, and before csv_row, so that row names its own
+                # image. offer() encodes nothing and waits for nothing: if the
+                # writer is behind, this returns None and the frame is gone.
+                est["frame_file"] = fwriter.offer(f["img"], n) or ""
             if wr:
                 wr.writerow(csv_row(est, f, v, gN, gE, err))
             notifier.tick(est["t"], est, node)
@@ -1411,6 +1488,11 @@ def main():
         print("\nstopped")
     finally:
         node.stop()
+        if fwriter is not None:
+            # Before the CSV closes, and bounded: queued frames get a few
+            # seconds to land, and then we stop regardless. A node that hangs
+            # on a slow disk at shutdown is a node that does not come back.
+            print(fwriter.close())
         if wr:
             fh.close()
 

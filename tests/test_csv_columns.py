@@ -55,7 +55,11 @@ print("the header and a full row are the same width")
 row = csv_row(est(), dict(rngfnd=0.26, alt_amsl=300.7), Vel(), 1.0, 2.0, 0.5)
 check("widths match", len(row) == len(CSV_COLUMNS),
       f"header {len(CSV_COLUMNS)}, row {len(row)}")
-check("and there are the columns we expect", len(CSV_COLUMNS) == 39,
+# 39 until 20 Oct, when frame_file was added: live_node now saves camera
+# frames during a live run (the OAK-D has one owner, so the only process that
+# can record them is the one navigating), and that column is what ties a saved
+# image to the row holding the heading and height it was taken at.
+check("and there are the columns we expect", len(CSV_COLUMNS) == 40,
       str(len(CSV_COLUMNS)))
 
 print("\nand with every optional value missing, which is the usual case")
@@ -75,7 +79,7 @@ check("no spaces or commas in a name", not bad, str(bad))
 
 print("\nthe columns that were missed are actually present")
 for c in ("accel_n", "depth_med_m", "depth_dropped", "n_dr", "src",
-          "rngfnd_m", "alt_amsl_m"):
+          "rngfnd_m", "alt_amsl_m", "frame_file"):
     check(f"{c} is in the header", c in CSV_COLUMNS)
 
 print("\na written file parses back at a single width")
