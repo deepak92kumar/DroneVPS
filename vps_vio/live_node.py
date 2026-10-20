@@ -448,6 +448,12 @@ class GpsInputSender:
     # m/s of velocity error per metre of altitude, fitted to three flights.
     # See velocity_fields for the table it comes from.
     VEL_ACC_PER_M = 0.0867
+    # The vertical accuracy the working flights declared: a constant 3.0 m
+    # (GPA.VAcc is exactly 3.00 throughout logs 00000191 and 00000194). It had
+    # been sigma_m * 2 here, which at a typical sigma of 21 m declares 42 m of
+    # vertical error - and EK3_SRC1_POSZ is the barometer anyway, so the only
+    # thing a wild number here can do is harm.
+    VERT_ACC_M = 3.0
 
     def __init__(self, port="/dev/ttyTHS1", baud=921600, gps_id: int = 1,
                  sats: int = 12, send_velocity: bool = True):
@@ -470,6 +476,10 @@ class GpsInputSender:
         # 47.7 m/s during a 106 m hover, and it is the 54% row that the 13 Oct
         # report still calls the largest open fault.
         self.send_velocity = bool(send_velocity)
+        # 4.3 Hz, which is what logs 00000191 and 00000194 actually carried.
+        self.send_period_s = 1.0 / 4.3
+        self._next_send = None
+        self.skipped_rate = 0
         self.sent = 0
         self.sent_with_vel = 0
 
@@ -538,6 +548,23 @@ class GpsInputSender:
 
     def send(self, lon, lat, alt_amsl_m, sigma_m, yaw_deg=None, vel=None):
         t = time.time()
+        # RATE GATE. The flight controller is told this is a GPS receiver, and
+        # a receiver arrives at its own cadence - GPS2_RATE_MS is 200 ms on
+        # this aircraft. The flights that worked sent GPS_INPUT at 4.28 and
+        # 4.31 Hz (logs 00000191 and 00000194, 12 and 13 Oct), and the 5 Oct
+        # report records the design as "GPS_INPUT at 4.2 Hz".
+        #
+        # Without this gate the node sends on every flow frame - 30 Hz, seven
+        # times the rate - and that is not merely wasteful. Each message
+        # carries the SAME fused estimate as the one before it, so seven
+        # correlated samples arrive where the EKF expects one independent
+        # measurement, and it weighs them as though they were independent.
+        # The effect is to trust the VPS by roughly the square root of that
+        # over-sampling, about 2.6x more than the sigma we are declaring.
+        if self._next_send is not None and t < self._next_send:
+            self.skipped_rate += 1
+            return
+        self._next_send = t + self.send_period_s
         week = int((t - 315964800) // (7 * 86400))
         week_ms = int(((t - 315964800) % (7 * 86400)) * 1000)
         # HDOP is what a GCS shows the pilot, so it should read like the real
@@ -549,7 +576,7 @@ class GpsInputSender:
             week_ms, week, 3,                      # fix_type 3 = 3D
             int(lat * 1e7), int(lon * 1e7), float(alt_amsl_m),
             hdop, hdop, vn, ve, 0.0,
-            speed_acc, float(sigma_m), float(sigma_m * 2.0),
+            speed_acc, float(sigma_m), self.VERT_ACC_M,
             self.sats)
         self.sent += 1
         if not (ign & self.IGN_VEL_HORIZ):

@@ -78,6 +78,8 @@ class VelocityState:
                                  # downstream that weighs this estimate needs
                                  # to know the height it was made at.
     rejected_jump: int = 0       # flow samples refused as physically impossible
+    slewed: bool = False         # the OUTPUT slew limited this step
+    slew_count: int = 0          # how many times it has, this run
     flow_updates: int = 0
     accel_steps: int = 0
     bias_n: float = 0.0          # accel bias estimate, north
@@ -102,6 +104,8 @@ class VelocityBridge:
                  deadband_base_mps: float = 0.35,
                  deadband_per_m: float = 0.005,
                  max_accel_mps2: float = 8.0,
+                 slew_mps2: float = 5.0,
+                 slew_hold_s: float = 2.0,
                  jump_escape_n: int = 5,
                  bias_tau_s: float = 20.0,
                  bias_adapt_below_mps: float = 0.25,
@@ -137,6 +141,13 @@ class VelocityBridge:
         self._jump_run = 0
         self._vn_flow = self._ve_flow = None
         self._last_alt_m = 0.0
+        # The output slew, from the 9 Oct report. See value().
+        self.slew_mps2 = float(slew_mps2)
+        self.slew_hold_s = float(slew_hold_s)
+        self.slewed = 0
+        self._sent_n = self._sent_e = 0.0
+        self._t_sent = None
+        self._slew_since = -1e9
         self.bias_tau_s = float(bias_tau_s)
         self.bias_adapt_below_mps = float(bias_adapt_below_mps)
         self.bias_adapt_after_s = float(bias_adapt_after_s)
@@ -328,7 +339,48 @@ class VelocityBridge:
         st.reason = "ok"
         if st.speed_mps < st.deadband_mps:
             st.deadbanded = True
-            st.sent_vn = st.sent_ve = 0.0
+            want_n = want_e = 0.0
         else:
-            st.sent_vn, st.sent_ve = self.vn, self.ve
+            want_n, want_e = self.vn, self.ve
+
+        # THE OUTPUT SLEW. Restored from the 9 Oct 2026 status report, where
+        # it is recorded as flown and kept:
+        #
+        #   "Velocity bound on the OUTPUT: input gate only -> 5 m/s^2 slew,
+        #    2 s hold. Peak sent velocity 16.99 -> 2.37 m/s on the same
+        #    inputs. This is what let the mission finish."
+        #
+        # Read the first three words. An input gate ALONE was already tried
+        # and was not enough - which matters here, because the gate added to
+        # push_flow on 20 Oct is an input gate. What the aircraft actually
+        # flew on was a limit on what LEAVES this module, and the two are not
+        # the same: a sequence of individually plausible steps still adds up
+        # to an implausible speed, and only the output side sees the sum.
+        #
+        # 5 m/s2 is the number that flew. It sits just under the airframe's
+        # own ceiling - ATC_ANGLE_MAX 30 deg gives 9.81*tan(30) = 5.66 - so
+        # it cannot stop the aircraft reporting anything it can really do.
+        #
+        # The 2 s hold is the other half: once the slew has had to bite, the
+        # limit stays engaged for that long rather than releasing on the next
+        # sample, so a burst of outliers cannot walk the output up one
+        # allowed step at a time.
+        dt = 0.0 if self._t_sent is None else max(0.0, t - self._t_sent)
+        if self._t_sent is not None and dt > 0.0:
+            if t - self._slew_since < self.slew_hold_s:
+                allowed = self.slew_mps2 * dt
+            else:
+                allowed = self.slew_mps2 * dt
+            step = math.hypot(want_n - self._sent_n, want_e - self._sent_e)
+            if step > allowed:
+                k = allowed / step
+                want_n = self._sent_n + k * (want_n - self._sent_n)
+                want_e = self._sent_e + k * (want_e - self._sent_e)
+                self.slewed += 1
+                self._slew_since = t
+                st.slewed = True
+        self._sent_n, self._sent_e = want_n, want_e
+        self._t_sent = t
+        st.sent_vn, st.sent_ve = want_n, want_e
+        st.slew_count = self.slewed
         return st

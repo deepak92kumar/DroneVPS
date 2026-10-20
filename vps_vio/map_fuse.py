@@ -26,7 +26,13 @@ class MapFuser:
     def __init__(self, *,
                  flow_drift_frac: float = 0.04,
                  flow_noise_floor_m: float = 0.15,
-                 fix_sigma_m: float = 30.0,
+                 # 20, not 30. The 9 Oct report settled it with the fix's own
+                 # lat/lon logged for the first time: "the map's median error
+                 # is 20.0 m against our own 6.6 m ... The code's
+                 # fix_sigma_m = 20 was already right." 30 came back with the
+                 # rebuild and makes the filter trust every fix less than the
+                 # measurement says it should.
+                 fix_sigma_m: float = 20.0,
                  gate_sigmas: float = 3.0,
                  max_sigma_m: float = 400.0,
                  init_sigma_m: float = 2.0,
