@@ -1458,7 +1458,7 @@ class VpsNode:
             dt_step = (None if self.prev_t is None else f["t"] - self.prev_t)
             dn, de, action = self.gate_step(dn, de, dt_step, f["alt"])
             if action != "refused":
-                self.fuser.predict(dn, de)
+                self.fuser.predict(dn, de, dt=dt_step)
                 self.n_flow += 1
                 # Velocity is the SAME displacement the fuser just consumed,
                 # divided by the frame interval. Deriving it here rather than
@@ -1490,7 +1490,8 @@ class VpsNode:
             dt = f["t"] - self.prev_t
             v = self.vel.value(f["t"], f["alt"])
             if 0.0 < dt < 0.5 and v.valid:
-                self.fuser.predict(v.vn * dt, v.ve * dt, trust=self.DR_TRUST)
+                self.fuser.predict(v.vn * dt, v.ve * dt, trust=self.DR_TRUST,
+                                   dt=dt)
                 self.n_dr += 1
 
         self.prev_att = att

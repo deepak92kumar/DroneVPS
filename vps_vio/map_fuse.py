@@ -26,6 +26,30 @@ class MapFuser:
     def __init__(self, *,
                  flow_drift_frac: float = 0.04,
                  flow_noise_floor_m: float = 0.15,
+                 # THE TIME TERM, per square-root second, used when predict()
+                 # is told how long the step took. flow_noise_floor_m above is
+                 # the same thing expressed PER FRAME, which is what it had
+                 # always been, and that is a defect: variance adds per call,
+                 # so the same aircraft standing still declared a different
+                 # uncertainty at a different loop rate -
+                 #
+                 #     12 Hz   4.49 m after a minute
+                 #     17 Hz   5.19 m
+                 #     30 Hz   6.67 m
+                 #
+                 # and this class's own docstring says the uncertainty grows
+                 # "with the distance travelled, because flow error
+                 # accumulates with distance, not time".
+                 #
+                 # 0.25 is measured, not chosen. The true drift - VIO against
+                 # the FC's GPS-driven position, constant offset removed - is a
+                 # random walk, and fitting sigma = F*sqrt(elapsed) over the
+                 # recorded flights gives F = 0.049-0.072 at p50 and
+                 # 0.159-0.217 at p95. The per-frame floor at 30 Hz behaves as
+                 # F = 0.15*sqrt(30) = 0.822, which is 3.8x the measured p95.
+                 # 0.25 sits above p95 - so the declared figure is never
+                 # optimistic - and is loop-rate independent.
+                 flow_noise_rate_m_per_sqrt_s: float = 0.25,
                  # 20, not 30. The 9 Oct report settled it with the fix's own
                  # lat/lon logged for the first time: "the map's median error
                  # is 20.0 m against our own 6.6 m ... The code's
@@ -63,6 +87,7 @@ class MapFuser:
         self._init_var = float(init_sigma_m) ** 2
         self.k = float(flow_drift_frac)
         self.floor = float(flow_noise_floor_m)
+        self.noise_rate = float(flow_noise_rate_m_per_sqrt_s)
         self.fix_var = float(fix_sigma_m) ** 2
         self.gate = float(gate_sigmas)
         self.max_var = float(max_sigma_m) ** 2
@@ -97,18 +122,39 @@ class MapFuser:
         return float(np.sqrt(self.var))
 
     def predict(self, d_north: float, d_east: float,
-                trust: float = 1.0) -> np.ndarray:
+                trust: float = 1.0, dt: float | None = None) -> np.ndarray:
         """Advance the estimate by one step. trust scales how fast it doubts.
 
         trust is 1.0 for a step optical flow measured. A step DEAD RECKONED
         from the accelerometer between frames deserves worse, because nothing
         outside the IMU saw it happen - the caller passes a larger number and
         the variance grows by that much more.
+
+        dt is how long the step covered, in seconds. WITH it, the two error
+        sources add in VARIANCE and the time one is a rate: a distance term
+        that grows with how far the aircraft went, and a time term that grows
+        with how long it has been since anything absolute was seen. That is
+        the honest shape, and it does not depend on the loop rate.
+
+        WITHOUT dt the old per-frame behaviour is kept exactly, because that is
+        what the 27 Sep sweep calibrated and what every caller that has not
+        been updated still expects. The difference is not cosmetic: the
+        per-frame floor made a still aircraft's declared sigma climb 0.82 m a
+        second at 30 Hz against a measured drift of 0.16-0.22 m per root
+        second, so the flight controller was told the VPS was getting worse
+        nearly four times faster than it was - and an EKF that is told that
+        leans on its accelerometer instead, which is how a stationary aircraft
+        on the bench came to read 18.8 m from home.
         """
         step = np.array([d_north, d_east], float)
         self.pos = self.pos + step
-        grow = trust * (self.k * float(np.linalg.norm(step)) + self.floor)
-        self.var = min(self.var + grow ** 2, self.max_var)
+        dist = self.k * float(np.linalg.norm(step))
+        if dt is None:
+            grow_var = (trust * (dist + self.floor)) ** 2
+        else:
+            grow_var = (trust ** 2) * (dist ** 2
+                                       + (self.noise_rate ** 2) * max(dt, 0.0))
+        self.var = min(self.var + grow_var, self.max_var)
         return self.pos
 
     def update(self, fix_north: float, fix_east: float,

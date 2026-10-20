@@ -159,6 +159,25 @@ altitude. Everything about flying on the VPS waits on that answer.
 | ☑ | The speed accuracy is fitted on the bridge's OUTPUT | `0.6 + 0.025 x alt`, never more than 0.044 m/s optimistic across 5–70 m |
 | ☐ | **None of the four has flown.** The next flight is what tests them | |
 
+## 6b — The sigma only ever grew, and the reports had already said so
+
+8 Oct: *"Sigma at takeoff, flight 159: 28 m at 1 m altitude — it never resets
+at arm; **parked it reached 71 m**"* and *"Sigma, same height climbing vs
+descending: 6.31 m vs 30.21 m. **It only ever grows.**"* The reset-at-arm half
+was fixed on 20 Oct. The growth was fixed on 21 Oct.
+
+3 Oct reached the opposite conclusion — *"sigma grows 2 to 16 m across a
+window ... **The number is honest**; the threshold has not been raised to
+match"* — and proposed raising `GPS_HDOP_GOOD` instead. That was reasoning, not
+measurement: it had no per-frame truth to check honesty against. Fitting the
+real drift as a random walk over the recorded flights gives **F = 0.159–0.217
+m/√s at p95**, against the per-frame floor's **0.822 at 30 Hz** — 3.8× too
+fast, and loop-rate dependent (12 Hz gave 4.49 m a minute, 30 Hz gave 6.67).
+
+| | |
+|---|---|
+| ☐ | **`GPS_HDOP_GOOD` is still 2.50** and we send an HDOP of 19.8, so **100% of samples are above it** — worse than 3 Oct's 46%, not better. `ARMING_SKIPCHK = 6156` skipping the GPS check is the workaround that hides it. Lowering sigma does not fix this: the absolute floor is the map's own 20 m error, and 2.50 is a threshold built for a satellite receiver |
+
 ## 7 — Things that need no flight and keep being deferred
 
 | | what | evidence |
