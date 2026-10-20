@@ -230,24 +230,55 @@ def _num(s):
         return None
 
 
-def gps_lonlat(row) -> tuple | None:
-    """The recorded GPS for a row, as lon/lat, or None if it had no fix.
+def gps_lonlat(row, prefer_raw: bool = True) -> tuple | None:
+    """The recorded truth for a row, as lon/lat, or None if there was none.
 
-    The CSV stores GPS as gps_north_m/gps_east_m: metres from the run's origin,
-    and the origin itself is NOT in the file. Rather than reconstruct it - which
-    would need the first row's own position and would inherit every rounding in
-    it - the GPS position is taken as the estimate's own lon/lat plus the
-    north/east DIFFERENCE between the two, both of which are on the row. The
-    difference is a few metres, so the only error this makes is the change in
-    metres-per-degree over those few metres, which is nanometres.
+    THE RAW RECEIVER FIRST, and this is not a preference, it is a correctness
+    fix made on 21 Oct. gps_north_m/gps_east_m are NOT the GPS: they are
+    derived from GLOBAL_POSITION_INT, which is the EKF's FUSED position. On
+    every recording that existed before that date it made no difference,
+    because all of them ran with src = GPS1 and the source gate blocked our
+    injection entirely, so the EKF genuinely was GPS-driven. The moment the
+    aircraft flies ON the VPS, the EKF is driven by what we inject and those
+    columns measure the VPS against itself.
+
+    gps1_north_m/gps1_east_m come from GPS_RAW_INT - the receiver before the
+    EKF touches it - and are the only independent truth in the file. They are
+    used when present; the older pair is the fallback for the recordings made
+    before they existed.
+
+    Either way the origin is NOT in the file, and reconstructing it would
+    inherit every rounding in the first row. So the position is taken as the
+    estimate's own lon/lat plus the north/east DIFFERENCE between the two, both
+    of which are on the row. That difference is metres, so the only error is
+    the change in metres-per-degree across it: nanometres.
     """
-    gn, ge = _num(row.get("gps_north_m")), _num(row.get("gps_east_m"))
     n, e = _num(row.get("north_m")), _num(row.get("east_m"))
     lon, lat = _num(row.get("lon")), _num(row.get("lat"))
-    if None in (gn, ge, n, e, lon, lat):
+    if None in (n, e, lon, lat):
+        return None
+    gn = ge = None
+    if prefer_raw:
+        gn, ge = _num(row.get("gps1_north_m")), _num(row.get("gps1_east_m"))
+    if None in (gn, ge):
+        gn, ge = _num(row.get("gps_north_m")), _num(row.get("gps_east_m"))
+    if None in (gn, ge):
         return None
     return (lon + (ge - e) / (M_PER_DEG_LAT * math.cos(math.radians(lat))),
             lat + (gn - n) / M_PER_DEG_LAT)
+
+
+def truth_source(rows) -> str:
+    """Which column the truth came from, so a run says it rather than implying it."""
+    raw = sum(1 for r in rows if _num(r.get("gps1_north_m")) is not None)
+    fused = sum(1 for r in rows if _num(r.get("gps_north_m")) is not None)
+    if raw:
+        return (f"GPS_RAW_INT, the raw receiver ({raw} rows have it"
+                + (f", {fused} also have the EKF's)" if fused else ")"))
+    if fused:
+        return (f"GLOBAL_POSITION_INT, the EKF's FUSED position ({fused} rows) - "
+                "independent only where src was GPS1")
+    return "nothing - no position to compare against"
 
 
 def metres_between(lon1, lat1, lon2, lat2) -> float:
@@ -342,6 +373,9 @@ def run(folder: str, map_path: str, *, out_csv: str | None = None,
     csv_path = csv_path or find_csv(folder)
     cam = read_camera(folder)
     rows = list(csv.DictReader(open(csv_path, newline="")))
+    # Say what the error is measured AGAINST, every run. The two candidates are
+    # not equally good and the difference is invisible in the numbers.
+    print(f"truth for d_gps_m: {truth_source(rows)}")
     named = [(i + 1, r) for i, r in enumerate(rows) if (r.get("frame_file") or "").strip()]
     named = named[::max(1, every)]
     if limit:

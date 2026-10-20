@@ -145,6 +145,10 @@ class Telemetry:
                           # flight controller is only ever as good as the point
                           # we started from. See GPS_RAW_INT below.
                           gps1_hacc=None,
+                          # The raw receiver's own lat/lon, independent of the
+                          # EKF. See GPS_RAW_INT below for why this is separate
+                          # from lat/lon.
+                          gps1_lat=None, gps1_lon=None,
                           # The FC's own accelerometer vibration, and what the
                           # motors were doing when it was measured. One without
                           # the other says nothing: vibration at idle and
@@ -288,8 +292,25 @@ class Telemetry:
                     hacc_m = None
                     if hacc is not None and 0 < hacc < 100000 and msg.fix_type >= 3:
                         hacc_m = hacc / 1000.0
+                    # THE RAW RECEIVER'S OWN POSITION, which is not the same
+                    # thing as `lat`/`lon` above. Those come from
+                    # GLOBAL_POSITION_INT, which is the EKF's FUSED output - and
+                    # on a VPS flight the EKF is being driven by what we inject,
+                    # so measuring ourselves against it is measuring ourselves
+                    # against ourselves. It went unnoticed until 21 Oct because
+                    # every flight with real travel so far had src = GPS1, where
+                    # the source gate blocks our injection entirely and the EKF
+                    # really was GPS-driven.
+                    #
+                    # GPS_RAW_INT is the receiver before any of that. It is the
+                    # only independent truth this aircraft carries, so it gets
+                    # its own fields and its own CSV columns.
+                    lat1 = lon1 = None
+                    if msg.fix_type >= 3 and msg.lat != 0:
+                        lat1, lon1 = msg.lat / 1e7, msg.lon / 1e7
                     self.state.update(fix=msg.fix_type, sats=msg.satellites_visible,
                                       gps1_hacc=hacc_m,
+                                      gps1_lat=lat1, gps1_lon=lon1,
                                       gps1_alt=(msg.alt / 1000.0
                                                 if msg.fix_type >= 3 else None))
                 elif t == "VIBRATION":

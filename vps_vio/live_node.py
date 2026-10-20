@@ -367,6 +367,13 @@ class LiveSource:
                     alt_amsl=s.get("alt_amsl"), rngfnd=s.get("rngfnd"),
                     gps1_alt=s.get("gps1_alt"), gps1_fix=s.get("fix"),
                     gps1_hacc=s.get("gps1_hacc"),
+                    # The RAW receiver, separate from `gps` above. `gps` is
+                    # GLOBAL_POSITION_INT - the EKF's fused position - which on
+                    # a VPS flight is partly our own injection coming back. This
+                    # one is the receiver itself and is the only independent
+                    # truth on board.
+                    gps1_raw=((s["gps1_lon"], s["gps1_lat"])
+                              if s.get("gps1_lat") not in (None, 0.0) else None),
                     roll=s["roll"], pitch=s["pitch"], gps=gps, depth=depth,
                     gyro_d_roll=d_roll, gyro_d_pitch=d_pitch,
                     gyro_n=self._gyro_n,
@@ -685,7 +692,19 @@ CSV_COLUMNS = ["t", "north_m", "east_m", "lon", "lat", "sigma_m",
     # The sigma actually SENT: the origin's own error folded in with the
     # fuser's drift. sigma_m above is the drift alone, and on the three
     # stale-origin flights of 20 Oct it declared 14 m against a true 151 m.
-    "sigma_abs_m"]
+    "sigma_abs_m",
+    # THE RAW RECEIVER, added 21 Oct, and the reason matters. gps_north_m /
+    # gps_east_m / err_m above are NOT the GPS: they come from
+    # GLOBAL_POSITION_INT, which is the EKF's fused position. On every flight so
+    # far that was harmless, because they all ran with src = GPS1 and the source
+    # gate blocked our injection, so the EKF really was GPS-driven. The moment
+    # the aircraft flies ON the VPS, the EKF is driven by what we send and those
+    # columns measure us against ourselves.
+    #
+    # These three are GPS_RAW_INT - the receiver before the EKF touches it - and
+    # they are the only independent truth in the file. gps1_err_m is the one to
+    # read when judging a VPS flight.
+    "gps1_north_m", "gps1_east_m", "gps1_err_m"]
 
 
 IMU_LOG_COLUMNS = ["t_dev", "src", "x", "y", "z"]
@@ -740,7 +759,10 @@ def csv_row(est, f, v, gN, gE, err):
             "" if f.get("rngfnd") is None else f"{f['rngfnd']:.2f}",
             "" if f.get("alt_amsl") is None else f"{f['alt_amsl']:.2f}",
             est.get("frame_file") or "",
-            f"{est['sigma_abs']:.1f}"]
+            f"{est['sigma_abs']:.1f}",
+            "" if est.get("g1_north") is None else f"{est['g1_north']:.2f}",
+            "" if est.get("g1_east") is None else f"{est['g1_east']:.2f}",
+            "" if est.get("g1_err") is None else f"{est['g1_err']:.2f}"]
 
 
 # --------------------------------------------------------------------------- #
@@ -1902,6 +1924,18 @@ def main():
                 gE = (f["gps"][0] - node.origin[0]) * node.mlon
                 err = float(np.hypot(est["north"] - gN, est["east"] - gE))
                 errs.append(err)
+            # And the same against the RAW receiver, which is a different
+            # measurement and the only independent one. err above is against
+            # GLOBAL_POSITION_INT, the EKF's own fused position; once the
+            # aircraft flies on the VPS that is partly our own output returning,
+            # and comparing against it flatters us. This pair does not.
+            est["g1_north"] = est["g1_east"] = est["g1_err"] = None
+            if f.get("gps1_raw"):
+                g1 = f["gps1_raw"]
+                est["g1_north"] = (g1[1] - node.origin[1]) * M_PER_DEG_LAT
+                est["g1_east"] = (g1[0] - node.origin[0]) * node.mlon
+                est["g1_err"] = float(np.hypot(est["north"] - est["g1_north"],
+                                               est["east"] - est["g1_east"]))
             v = est["vel"]
             if fwriter is not None:
                 # ARMED ONLY, at the pilot's instruction (20 Oct). Images are

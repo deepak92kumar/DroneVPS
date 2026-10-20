@@ -66,8 +66,17 @@ check("widths match", len(row) == len(CSV_COLUMNS),
 # Logging both is the only way a flight can show which of the two was wrong:
 # on the three stale-origin flights of 20 Oct the drift figure read 14 m
 # against a true error of 151 m, all of it the origin's.
-check("and there are the columns we expect", len(CSV_COLUMNS) == 41,
+#
+# 44 since 21 Oct, when the RAW receiver got its own three. gps_north_m /
+# gps_east_m / err_m are not the GPS - they come from GLOBAL_POSITION_INT,
+# the EKF's fused position, which on a VPS flight is partly our own injection
+# returning. gps1_* are GPS_RAW_INT, the receiver before the EKF touches it,
+# and they are the only independent truth in the file.
+check("and there are the columns we expect", len(CSV_COLUMNS) == 44,
       str(len(CSV_COLUMNS)))
+check("the raw receiver's three are the last three",
+      CSV_COLUMNS[-3:] == ["gps1_north_m", "gps1_east_m", "gps1_err_m"],
+      str(CSV_COLUMNS[-3:]))
 
 print("\nand with every optional value missing, which is the usual case")
 e = est(fc_d_roll=None, fc_d_pitch=None, gyro_d_roll=None, gyro_d_pitch=None,

@@ -98,7 +98,7 @@ Ordered by what blocks what. Nothing below has flown unless it says so.
 | | what | why |
 |---|---|---|
 | ☐ | **Zero the lidar at the field, after the final power cycle** | the zero moved 0.66537 → 0.69663 → 0.70449 → 0.72316 V in one afternoon. Over 2 m and the aircraft will not auto-disarm. `lidar_zero.py --apply` |
-| ☐ | **Check whether companion messages reach the handset** | 13 Oct: *"Companion status lines still do not reach the radio link."* Every "you will see it on the radio" in this project rests on this being true, and it is unverified |
+| ☑ | ~~Check whether companion messages reach the handset~~ **They do** (pilot, 21 Oct) | 13 Oct had it as *"Companion status lines still do not reach the radio link."* The pilot confirmed with the RC on that they arrive — *"massage aa raha hai"* — so `LIDAR ZERO`, `FRAMES ON/OFF`, the origin line and `VPS HANDOVER` all reach the handset. He notes they are **"thora slow"**, which still matters for a pre-take-off warning: not yet measured |
 | ☐ | **Set `SCR_USER1/2` at the actual take-off point** | still the VPS origin when on the VPS. The arm-time re-take covers the GPS case but not this one |
 
 ## 2 — The next flight (GPS only, no VPS switch)
@@ -163,6 +163,7 @@ altitude. Everything about flying on the VPS waits on that answer.
 
 | | what | evidence |
 |---|---|---|
+| ☐ | **Measure how slow the radio messages are** | they arrive (above), but a `LIDAR ZERO - NO AUTO-DISARM` that lands 20 s late is read after the aircraft is already up. Needs the notifier's own rate limiting and `SRx_EXTRA3`/STATUSTEXT rate checked against a stopwatch |
 | ☐ | **A surveyed ground point** | asked for on 10, 12 **and** 13 Oct and never done. *"GPS1 itself wandered 2.4 to 27.4 m this morning while the aircraft stood still. Whether the sheet or the receiver is wrong about the ground cannot be settled from the aircraft."* Every error figure in this project — including 20 Oct's judgement that the camera frame matches `bhh.tif` — is measured against that receiver |
 | ☐ | **Battery current sensor** | reports 17.3 A with the motors merely ticking over. Until it is calibrated every mAh figure is fiction, and `BATT_FS_VOLTSRC = 1` (sag-compensated failsafe, the correct fix for the voltage question) cannot be used |
 | ☐ | **Decide `ARMING_SKIPCHK = 6156`** | compass, GPS lock, hardware safety switch and GPS configuration pre-arm checks are all skipped |
