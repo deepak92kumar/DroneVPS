@@ -176,6 +176,14 @@ same path the aircraft flies** — and takes a live_node run folder, with
 `--min-score`/`--min-margin` to score the thresholds §8 still calls unverified.
 `analyse_flight.py` is the older AKAZE tool, kept because its numbers are
 comparable with earlier runs, and it now takes **either** recorder's folder.
+
+Two things to know before editing `match_flight.py`: `MapFixWorker` must be
+built with `fix_period_s=0.0` offline or its rate gate silently drops frames
+into `skipped_period`; and driving it one job at a time is race-free only
+because `_result` and `_job` are set under one lock, so "not busy ⇒ the result
+is final". Its results land in `match_results.csv` **inside the run folder**,
+which is why the estimate log is located by `vps_*.csv` and `match*` is
+excluded — a second pass otherwise finds two CSVs and may read the wrong one.
 **Scored against the receiver, not the estimate**: the CSV's `lat`/`lon` is
 what the VPS believed, which on an injecting flight is partly what the aircraft
 then flew on, so the truth is `gps_north_m`/`gps_east_m` (the real receiver, in
@@ -242,6 +250,40 @@ to 400 but is deliberately matched to 100: the reports share one packet, asking
 for more was measured dragging the whole stream down, and six samples per 60 ms
 gap already integrate to below the sensor's own noise.
 
+### What offline matching measures, and what it still cannot (20 Oct)
+
+Measured with `match_flight.py` on 30 frames cut from `bhh.tif` itself — a 6×5
+grid across the sheet, random yaw, alt 70–150 m, the position prior deliberately
+drifted 7.8 m:
+
+| | |
+|---|---|
+| matched | 30/30 |
+| error vs the planted truth | median **0.32 m**, p90 0.74 m, max 0.78 m |
+| error vs the VPS estimate on the same rows | median 7.71 m = the planted drift |
+| inliers by altitude | 146 @ 70 m, 255 @ 90, 393 @ 110, 436 @ 130, 446 @ 150 |
+| inlier ratio | 0.75–0.87 throughout |
+| fix cost on this Orin | **320 ms** median warm, 2573 ms for the first (model load) |
+
+Read that 0.32 m for what it is: **the same imagery on both sides.** It is an
+upper bound on agreement and says nothing about a real camera over real trees
+against a four-year-old sheet. What it does pin is the *join* — the 7.71 m
+recovers exactly the drift that was planted, which is only possible if
+`frame_file`, the heading, and the `gps_north_m`/`gps_east_m` sign
+reconstruction are all right.
+
+**The yaw sign, settled empirically.** A camera frame is the north-up ground
+patch rotated by **−yaw**. At yaw 0/+30/−45/+120, −yaw recovers the centre to
+0.22–0.34 m on 360–409 inliers of 437–478; +yaw gives **0–2 inliers**. Worth
+having written down, because it is the one convention that fails silently as
+"the matcher doesn't work".
+
+**The thresholds are still unverified and this path cannot verify them.** Every
+one of those 30 frames clears `min_inliers` 12 and `min_score` 0.25 by more
+than an order of magnitude (range 140–495 inliers), so nothing here touches the
+gates. Real flights measured **14–32** inliers above 140 m. The gates can only
+be swept on real imagery, and there is none on this machine (§8).
+
 ---
 
 ## 7. The flight controller, as configured
@@ -305,16 +347,36 @@ Be honest about this with the pilot; they ask, and they are right to.
   `vps_vio/lidar_filter.py` cleans what the *companion* records and uses; a
   lidar spike below 42 m still reaches the height estimate.
 - **The router resyncs on about 0.71% of frames.** Low, not zero, unexplained.
+- **The matcher reports the IMAGE CENTRE, not the principal point — a ~11 m
+  systematic bias in the flying path.** `map_query.north_up_query` rotates
+  about `(w/2, h/2)` and never reads `cx`. The frames are the 130 px leg-crop,
+  so cx 494.89 sits 80.1 px from the geometric centre of 575; at 110 m and
+  0.139 m/px that is 11.1 m, and `live_node` feeds the match straight into
+  `MapFuser` as the aircraft's position. Measured by re-running the same 30
+  frames with the correction applied: **10.91 m median, 15.22 m max**, scaling
+  with altitude (~7 m at 70 m, ~15 m at 150 m). It is in the SAME DIRECTION on
+  every frame, which is the kind of error that never shows up as a worse match.
+  Whether the principal point is the right reference is a question about the
+  flying code, not about offline matching — but the offset is real and nothing
+  has decided it yet. `match_flight.py --pp-correct` applies it; the flight
+  path does not.
 - **No flight has been recorded with frames yet.** The camera CAN now be
   shared (§5) and it is bench-proven — 2132 rows, 138 images, every name a
   file — but bench frames are a room at `alt_rel` 0.1 m, so `analyse_flight.py`
   has still never been run on real aerial frames of this site. **There is no
   real map-matching accuracy number.** Getting one needs a flight above ~80 m
   with `--save-frames 2`, on a sheet that covers the site.
-- **`bhh.tif` is probably the wrong sheet.** It spans 30.884–30.903 N /
-  74.598–74.632 E; `SCR_USER1/2` in log `00000195.BIN` reads 30.7844, 74.6072 —
-  11.1 km south. `analyse_flight.py` now says so plainly instead of reporting
-  0% matched, but the sheet for the current site still has to be produced.
+- **`bhh.tif` is probably the wrong sheet.** Exactly: 30.88411–30.90332 N,
+  74.59762–74.63224 E, 7569×4200 at 0.509 m/px N-S and 0.437 E-W. `SCR_USER1/2`
+  in log `00000195.BIN` reads 30.7844, 74.6072 — 11.1 km from the near edge,
+  **12.2 km south and 0.7 km west of the sheet's centre**. Both readers say so
+  plainly now instead of reporting 0% matched, but the sheet for the current
+  site still has to be produced.
+- **There is no aerial imagery on this machine at all.** After the SSD loss the
+  only recording left anywhere is `flights/bench_210727`: 46 frames,
+  `alt_rel_m` −6.78 to −6.74, `armed` 0 throughout, at 31.1638 N / 74.4345 E —
+  about 31 km north of the sheet. So neither reader can be pointed at real
+  frames by anyone, and **the real map-match accuracy remains unmeasured.**
 
 
 ---
