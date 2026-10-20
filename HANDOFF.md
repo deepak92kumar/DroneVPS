@@ -156,9 +156,31 @@ not the same question as *is the VPS currently sending*.
 ## 5. Recording
 
 `drone-vps` writes one numbered CSV per run to `flight_logs/vps/vps_NNNNN.csv`
-— 39 columns: position, sigma, track count, every piece of velocity-bridge
+— 40 columns: position, sigma, track count, every piece of velocity-bridge
 state, both derotation estimates, the IMU sample counts, the stereo depth, the
-lidar, and which source was live.
+lidar, which source was live, and `frame_file`.
+
+**Images, as of 20 Oct.** `--save-frames HZ` (off by default, and the service
+does not pass it) saves camera frames from inside the navigating process, so a
+flight can be map-matched offline afterwards. The run then gets a FOLDER of its
+own — `flight_logs/vps/vps_NNNNN/` holding `vps_NNNNN.csv`, `fNNNNNN.jpg`, and
+a `camera.txt` with fx/fy/cx/cy/crop_left and the distortion — and the
+`frame_file` column names the image saved for that row, empty on the rows where
+none was saved. That column is the whole join: the row already carries the yaw,
+alt and position the frame was taken at. Without the flag nothing moves; the
+CSV lands in `flight_logs/vps/` exactly as before.
+
+Read it back with one of two offline matchers, and mind which matcher each
+one is: **`match_flight.py` uses XFeat through `MapCache`/`MapFixWorker` — the
+same path the aircraft flies** — and takes a live_node run folder, with
+`--min-score`/`--min-margin` to score the thresholds §8 still calls unverified.
+`analyse_flight.py` is the older AKAZE tool, kept because its numbers are
+comparable with earlier runs, and it now takes **either** recorder's folder.
+**Scored against the receiver, not the estimate**: the CSV's `lat`/`lon` is
+what the VPS believed, which on an injecting flight is partly what the aircraft
+then flew on, so the truth is `gps_north_m`/`gps_east_m` (the real receiver, in
+metres from an origin the CSV never writes — `read_flight` recovers it as
+`lat - north_m/111320`). Rows with no fix are counted, not quietly dropped.
 
 It records **whatever the switch is set to**. On a GPS flight you still get the
 full VPS estimate alongside, with `src = GPS1`, which is exactly how you compare
@@ -283,8 +305,16 @@ Be honest about this with the pilot; they ask, and they are right to.
   `vps_vio/lidar_filter.py` cleans what the *companion* records and uses; a
   lidar spike below 42 m still reaches the height estimate.
 - **The router resyncs on about 0.71% of frames.** Low, not zero, unexplained.
-- **The camera cannot be shared.** `live_node` and `record_flight` both open it
-  exclusively, so saving images during a flight is not possible yet.
+- **No flight has been recorded with frames yet.** The camera CAN now be
+  shared (§5) and it is bench-proven — 2132 rows, 138 images, every name a
+  file — but bench frames are a room at `alt_rel` 0.1 m, so `analyse_flight.py`
+  has still never been run on real aerial frames of this site. **There is no
+  real map-matching accuracy number.** Getting one needs a flight above ~80 m
+  with `--save-frames 2`, on a sheet that covers the site.
+- **`bhh.tif` is probably the wrong sheet.** It spans 30.884–30.903 N /
+  74.598–74.632 E; `SCR_USER1/2` in log `00000195.BIN` reads 30.7844, 74.6072 —
+  11.1 km south. `analyse_flight.py` now says so plainly instead of reporting
+  0% matched, but the sheet for the current site still has to be produced.
 
 
 ---
@@ -339,18 +369,22 @@ tested only by their own small test directory. What is left is what runs.
 │   ├── gps_rc_switch.py     channel 6 -> GPS_PRIMARY, with the health check
 │   ├── record_flight.py     bench recorder: frames + 56-column telemetry.
 │   │                        Also holds Telemetry, which live_node uses
-│   ├── frame_writer.py      [IN PROGRESS] save frames from inside the
-│   │                        navigating process — see below
+│   ├── frame_writer.py      save frames from inside the navigating process
+│   │                        without ever stalling the flow loop — see below
 │   │
 │   │   ── tools, not in the flight path ──
-│   ├── analyse_flight.py    map-matching accuracy of a recorded flight
+│   ├── match_flight.py      offline map matching with the FLYING matcher
+│   │                        (XFeat via MapFixWorker); scores the error
+│   │                        against the recorded GPS, and the thresholds
+│   ├── analyse_flight.py    the older AKAZE accuracy tool, from EITHER
+│   │                        recorder's folder (§5)
 │   ├── bench_workload.py    time every stage, then all of them together
 │   ├── lidar_cal.py         calibrate the rangefinder against known heights
 │   ├── gps_switch.py        pick a GPS by hand and watch the other
 │   ├── rc_watch.py          which RC channel moves when you flip a switch
 │   └── map_match.py         older matcher, kept for offline comparison
 │
-├── tests/                   32 suites. Each prints PASS/FAIL, exits non-zero
+├── tests/                   34 suites. Each prints PASS/FAIL, exits non-zero
 │   │                        on failure, and its docstring names the real
 │   │                        failure it pins, with dates and numbers.
 │   ├── test_vio_gap_fill.py       the accelerometer filling the frame gap
@@ -362,6 +396,9 @@ tested only by their own small test directory. What is left is what runs.
 │   ├── test_systemd_units.py      every ExecStart flag is real; no cycles
 │   ├── test_single_copy.py        one copy, and a kill -9 frees the lock
 │   ├── test_csv_columns.py        the log header matches its rows
+│   ├── test_frame_recording.py    a frame is dropped, never waited for
+│   ├── test_analyse_flight.py     an image joins back to its row's pose
+│   ├── test_match_flight.py       the wrong sheet is not "nothing matched"
 │   ├── test_lidar_filter.py       spikes up and down
 │   ├── test_map_anisotropy.py     9/9 with the correction, 0/9 without
 │   ├── test_velocity_bridge.py    the 8 Oct collapse, pinned
@@ -369,6 +406,8 @@ tested only by their own small test directory. What is left is what runs.
 │
 ├── flight_logs/
 │   ├── vps/vps_NNNNN.csv    one numbered file per run of the node
+│   ├── vps/vps_NNNNN/       a run recorded WITH frames: that CSV, the
+│   │                        images, and camera.txt, in one folder
 │   ├── vps_stdout.log       the node's own output
 │   └── *.BIN                flight controller dataflash
 │
@@ -376,14 +415,14 @@ tested only by their own small test directory. What is left is what runs.
 └── bhh.tif                  the satellite sheet (gitignored, 91 MB)
 ```
 
-### The camera-sharing work, in progress
+### Camera sharing, as built (20 Oct, commit 1d84738)
 
 `live_node` and `record_flight` both call `dai.Device()`, and the OAK-D permits
-one owner — so on a flight, where navigation has to win, no images are ever
-recorded and there is nothing for offline map matching to work on. That is
-being fixed now, in `vps_vio/frame_writer.py`, and the shape is worth knowing
-because the constraint it works under applies to anything else added to that
-loop.
+one owner — so on a flight, where navigation had to win, no images were ever
+recorded and offline map matching had nothing to work on. `record_flight.py`
+had existed since September and had never once run on a flight. That is fixed
+in `vps_vio/frame_writer.py`, and the shape is worth knowing because the
+constraint it works under applies to anything else added to that loop.
 
 The process that already holds the camera is the one that writes the frames;
 no second process, no socket, no shared memory — a channel between processes is
@@ -402,6 +441,28 @@ The numbers behind that: the flow loop has ~59 ms a frame at 17 Hz and spends
 the loop thread would eat a sixth to a half of the budget keeping the
 aircraft's position alive.
 
+**What it actually costs, measured 20 Oct** — real camera, real FlowTracker on
+the real cropped 1150×800 frames, A/B/A/B at 30 s each so run order cannot be
+the answer (1760 frames without frame saving, 1774 with, at 2 Hz):
+
+| | p50 | p90 | mean | rate |
+|---|---|---|---|---|
+| no frames | 20.52 ms | 27.30 ms | 22.30 ms | 29.9 Hz |
+| 2 Hz frames | 20.35 ms | 26.54 ms | 21.97 ms | 30.0 Hz |
+
+The difference is *negative* and smaller than the gap between two runs of the
+same condition (A0 vs A2: 0.09 ms at p50), so the honest statement is that the
+cost is under this machine's run-to-run noise — not that it is free. What is
+directly measurable is `offer()` on the loop thread: **0.158 ms** on the calls
+that queue a frame, **0.0156 ms** on the ones the rate gate refuses, 0.0247 ms
+a frame amortised — 0.04% of a 59 ms budget. The encode it hands off is 10.4 ms
+p50 on the worker (`cv2.imwrite`, quality 90) = 2.1% of one core at 2 Hz,
+123 KB a frame, 0.28 GB for a 20 minute flight. Zero dropped at 2 Hz.
+
+Two things these numbers do **not** cover: the bench runs at `alt_rel` ~0, so
+XFeat submitted **0 map fixes** in both conditions and the matcher's CPU is not
+in them; and 2 Hz is a guess at what offline matching wants, not a measurement.
+
 Frames are named by the **CSV row index**, not by the clock — `offer()` takes
 the index the caller is about to write and returns the filename it chose, which
 the caller then puts in that row's `frame_file` column. One row, one image, and
@@ -415,12 +476,23 @@ nothing that a jumping clock can corrupt.
 # Is the aircraft ready?
 /data/DRONE/systemd/after_reboot_check.sh
 
-# Every test suite (32 of them). Each prints PASS/FAIL and exits non-zero.
+# Every test suite (34 of them). Each prints PASS/FAIL and exits non-zero.
+# test_analyse_flight builds AKAZE over the whole sheet: allow it ~30 s.
 cd /data/DRONE && for t in tests/test_*.py; do python3 "$t"; done
 
 # Stop the service to free the camera for bench work, then put it back
 sudo systemctl stop drone-vps     # no password needed
 sudo systemctl start drone-vps
+
+# Record a flight WITH images (off by default; the service does not pass it).
+# One folder per run: flight_logs/vps/vps_NNNNN/ = the CSV, the jpgs, camera.txt
+python3 vps_vio/live_node.py --live --map /data/DRONE/bhh.tif \
+    --fc-port udpout:127.0.0.1:14650 --send-gps --gps-id 1 \
+    --out /data/DRONE/flight_logs/vps --save-frames 2
+
+# Map-match it afterwards with the matcher that flies, and score it
+python3 vps_vio/match_flight.py /data/DRONE/flight_logs/vps/vps_00003 \
+    --map /data/DRONE/bhh.tif
 
 # What the node is doing right now
 tail -f /data/DRONE/flight_logs/vps_stdout.log
