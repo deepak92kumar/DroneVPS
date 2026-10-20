@@ -45,7 +45,7 @@ class Tegra:
                                       stdout=subprocess.PIPE, text=True)
             threading.Thread(target=self._read, daemon=True).start()
         except Exception as e:
-            print(f"  (tegrastats nahi chala: {e})")
+            print(f"  (tegrastats did not run: {e})")
         return self
 
     def _read(self):

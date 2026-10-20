@@ -207,7 +207,7 @@ class RcGpsSwitch:
         print(f"ch{self.ch}:  <={self.low} = real GPS  |  "
               f"{self.low+1}-{self.high-1} = centre, no action  |  "
               f">={self.high} = VPS")
-        print(f"abhi GPS_PRIMARY={self.applied}  GPS2_TYPE={t2}  "
+        print(f"now GPS_PRIMARY={self.applied}  GPS2_TYPE={t2}  "
               f"armed-switching={'ON' if self.allow_armed else 'OFF (ground only)'}\n",
               flush=True)
 

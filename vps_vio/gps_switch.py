@@ -37,10 +37,10 @@ class FC:
     def __init__(self, require_disarmed=False):
         self.m = mavutil.mavlink_connection(PORT, baud=BAUD)
         if self.m.wait_heartbeat(timeout=20) is None:
-            sys.exit("FC se heartbeat nahi aaya")
+            sys.exit("no heartbeat from the flight controller")
         self.armed = bool(self.m.motors_armed())
         if require_disarmed and self.armed:
-            sys.exit("*** ARMED HAI - parameter nahi badlunga. Pehle disarm karo. ***")
+            sys.exit("*** ARMED - refusing to change a parameter. Disarm first. ***")
         self.m.mav.request_data_stream_send(self.m.target_system,
                                             self.m.target_component,
                                             mavutil.mavlink.MAV_DATA_STREAM_ALL, 5, 1)
@@ -93,7 +93,7 @@ def gap_m(a, b):
 def line(tag, msg, active):
     mark = ">>" if active else "  "
     if msg is None:
-        return f" {mark} {tag}: koi data nahi"
+        return f" {mark} {tag}: no data"
     return (f" {mark} {tag}: {FIX.get(msg.fix_type, msg.fix_type):9s} "
             f"sats {msg.satellites_visible:2d}  hdop {msg.eph/100.0:5.2f}  "
             f"{msg.lat/1e7:10.6f}, {msg.lon/1e7:10.6f}"
@@ -116,7 +116,7 @@ def show(fc):
     print(line("GPS2 (VPS) ", g2, not act1))
     d = gap_m(g1, g2)
     print(f"\n dono ke beech ka fark: " +
-          (f"{d:.1f} m" if d is not None else "naapa nahi ja sakta (kisi ek ka fix nahi)"))
+          (f"{d:.1f} m" if d is not None else "cannot be measured (one of them has no fix)"))
 
 
 def main():

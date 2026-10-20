@@ -15,11 +15,11 @@ from fc_port import exclusive_fc
 def main():
     m = mavutil.mavlink_connection("/dev/ttyTHS1", baud=115200)
     if m.wait_heartbeat(timeout=20) is None:
-        sys.exit("FC se heartbeat nahi aaya")
+        sys.exit("no heartbeat from the flight controller")
     m.mav.request_data_stream_send(m.target_system, m.target_component,
                                    mavutil.mavlink.MAV_DATA_STREAM_ALL, 10, 1)
     print("Switch hilao - jo channel badlega wo yahan dikhega.")
-    print("Ctrl-C se band karo, phir positions ka summary aayega.\n")
+    print("Ctrl-C to stop; a summary of the positions follows.\n")
     base = None
     seen: dict[int, collections.Counter] = {}
     last: dict[int, int] = {}
@@ -27,7 +27,7 @@ def main():
         while True:
             msg = m.recv_match(type="RC_CHANNELS", blocking=True, timeout=2)
             if msg is None:
-                print("  (RC signal nahi aa raha - remote on hai?)", flush=True)
+                print("  (no RC signal - is the transmitter on?)", flush=True)
                 continue
             vals = {i: getattr(msg, f"chan{i}_raw", 0) for i in range(1, 17)}
             if base is None:
@@ -46,7 +46,7 @@ def main():
         pass
     print("\n=== jo channel hile ===")
     if not seen:
-        print("  koi nahi")
+        print("  none")
     for i in sorted(seen):
         pos = sorted(v for v, n in seen[i].items() if n > 3)
         print(f"  ch{i:<2d} : {len(pos)} position -> {pos}")

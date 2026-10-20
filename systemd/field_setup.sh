@@ -31,10 +31,16 @@ TMP=$(mktemp)
   echo "# DroneVPS: let $USER_NAME control the flight services without a"
   echo "# password, so a reboot in the field needs no keyboard. Scoped to"
   echo "# these units and these verbs only."
-  for u in "${UNITS[@]}"; do
-    for verb in start stop restart status enable disable is-active is-enabled; do
-      echo "$USER_NAME ALL=(root) NOPASSWD: $SYSTEMCTL $verb $u"
-    done
+  # Both spellings. sudoers matches the command line LITERALLY, so a rule
+  # written for "drone-vps.service" does not match "systemctl restart
+  # drone-vps" - which is how anyone actually types it. The first attempt had
+  # only the long form and silently kept prompting for everything except
+  # daemon-reload. The glob covers both and cannot reach outside drone-*,
+  # because a sudoers wildcard does not match a "/" and the argument count
+  # still has to match, so "restart drone-vps ssh" is not allowed.
+  for verb in start stop restart status enable disable is-active is-enabled \
+              is-failed reset-failed show cat; do
+    echo "$USER_NAME ALL=(root) NOPASSWD: $SYSTEMCTL $verb drone-*"
   done
   echo "$USER_NAME ALL=(root) NOPASSWD: $SYSTEMCTL daemon-reload"
   echo "$USER_NAME ALL=(root) NOPASSWD: /usr/bin/journalctl -u drone-*"
@@ -66,6 +72,23 @@ systemctl daemon-reload
 systemctl enable drone-router.service drone-vps.service \
                  drone-rc-switch.service drone-watchdog.timer >/dev/null 2>&1
 echo "   reinstalled and enabled"
+
+echo
+echo "== check: no password needed for the drone services"
+# Whether sudo ASKED is a different question from whether the command
+# succeeded: "systemctl is-active" exits 3 for a stopped unit, which the exit
+# code alone reads as a refusal. Look for sudo's own words instead.
+asks_for_password() {
+    out=$(sudo -u "$USER_NAME" sudo -n "$@" 2>&1)
+    case "$out" in *"password is required"*) return 0;; *) return 1;; esac
+}
+for c in "is-active drone-vps" "restart drone-router" "stop drone-vps.service"; do
+    printf '   sudo systemctl %-26s ' "$c"
+    asks_for_password $SYSTEMCTL $c && echo "STILL PROMPTS" || echo "ok"
+done
+printf '   %-41s ' "sudo systemctl restart ssh (must fail)"
+asks_for_password $SYSTEMCTL restart ssh && echo "refused, correct" \
+    || echo "ALLOWED - TOO BROAD"
 
 echo
 echo "== check: nothing may be ordered after a target that wants it"
