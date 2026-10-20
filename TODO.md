@@ -21,6 +21,10 @@ made the VPS look more trustworthy than it is.
 | | was (rebuild) | now | evidence |
 |---|---|---|---|
 | GPS_INPUT rate | 30 Hz | **4.3 Hz** | logs 191/194 carried 4.28 and 4.31 Hz |
+| the rate gate's own arithmetic | `= t + period`, 3.913 Hz | **`+= period`, 4.299 Hz live** | replayed on all thirteen recordings' real timestamps |
+| horizontal accuracy | the drift alone | **origin error AND drift** | the three 20 Oct flights declared 14 m against a true 151 m, all of it the origin's |
+| `fix_sigma_m` in the flying code | 12 | **20** | `live_node` overrode MapFuser's default, its docstring and the test, all of which said 20 |
+| speed accuracy | `0.0867 x alt`, fitted on RAW flow | **`0.6 + 0.025 x alt`** | re-fitted on what leaves the SLEW; the old one over-stated by 3x |
 | velocity output slew | none | **5 m/s², 2 s hold** | 9 Oct: *"input gate only → … 16.99 to 2.37 m/s. This is what let the mission finish"* |
 | vertical accuracy sent | sigma × 2 (~42 m) | **3.0 m constant** | `GPA.VAcc` is exactly 3.00 through both logs |
 | speed accuracy sent | flat 0.4 m/s | **0.0867 × altitude** | flights sent 0.93–1.55; measured σ = 0.0867·alt over three flights |
@@ -120,7 +124,7 @@ altitude. Everything about flying on the VPS waits on that answer.
 
 | | what | evidence |
 |---|---|---|
-| ☐ | **Velocity to the FC** — 54% on 13 Oct, *"still the largest open fault"* | the slew and the altitude-scaled accuracy are restored but **not flown**. The 20 Oct CSV still shows 24.6 m/s before them |
+| ☐ | **Velocity to the FC** — 54% on 13 Oct, *"still the largest open fault"* | the slew and an altitude-scaled accuracy are restored but **not flown**. Replayed through the restored path the 20 Oct flight's worst is 9.77 m/s against log 194's 8.30, and the declared accuracy now tracks the measured output (1.62 m/s p50 against 194's 0.93). At 60–200 m, 78.6% of messages carry a velocity against 194's 60% |
 | ☐ | **The descent below 60 m** | no absolute reference exists down there; the step cap is 0.5 m per fix, so 5 s buys 2.5 m against a 29 m error |
 | ☐ | **Heading / yaw** — 55%, *"compass calibration is still the pilot's next step"* | measured 20 Oct: field 509/518 mG, offsets under 50, the two compasses agree to 1.8°, and the EKF's yaw resets moved yaw by −1.2° and −0.02°. **So the compass is healthy and this may now be closed** — but it was listed open |
 | ☐ | **Map coverage** — 64% | `bhh.tif` is 3.31 × 2.14 km. A 3–5 km mission leaves it |
@@ -142,6 +146,16 @@ altitude. Everything about flying on the VPS waits on that answer.
 | ☐ | Read the phase lag again | 20 Oct took it −65° → **−55°** and the gain 0.90 → 0.68. If it is still there, `ATC_ANG_RLL_P`/`PIT_P` 4.5 → 3.5 is the next lever |
 | ☐ | Then Autotune | it measures the response instead of reasoning about it. `AUTOTUNE_AXES=7`, `AGGR=0.075` are already set |
 | ☐ | `MOT_THST_EXPO` 0.67 → ~0.71 | ArduPilot's table interpolates 0.71 for 16"; it should really come off a thrust stand |
+
+## 6a — Settled on 20 Oct by measurement, not yet flown
+
+| | what | evidence |
+|---|---|---|
+| ☑ | The rate gate holds 4.3 Hz | 4.299 Hz measured on the live bus over 90 s, no gaps. Was 3.913 |
+| ☑ | The declared horizontal accuracy carries the origin's error | 21.08 m live against log 194's 21.36. The drift alone reads 3.80 m |
+| ☑ | `fix_sigma_m` is 20 in the flying code too | it said 12; no effect on the 20 Oct flights, which took no fixes at all |
+| ☑ | The speed accuracy is fitted on the bridge's OUTPUT | `0.6 + 0.025 x alt`, never more than 0.044 m/s optimistic across 5–70 m |
+| ☐ | **None of the four has flown.** The next flight is what tests them | |
 
 ## 7 — Things that need no flight and keep being deferred
 
@@ -166,3 +180,7 @@ altitude. Everything about flying on the VPS waits on that answer.
 - **Stereo depth reads 2.62 m at a true 4.5 m.** Only used for the plane gate.
 - **`EK3_SRC1_VELXY = 3`** — the EKF still fuses the velocity we send. The
   restored slew and accuracy are what make that safe; neither has flown.
+- **The deadband sends nothing below `0.35 + 0.005 x alt`.** Measured over all
+  thirteen recordings it suppresses 98.5% of messages — but 44,539 of the
+  77,540 are at 0–2 m, the aircraft standing on the bench. At 60–200 m it
+  suppresses 21.4%. Working as designed; left alone.

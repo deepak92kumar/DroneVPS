@@ -366,6 +366,7 @@ class LiveSource:
         return dict(img=self._crop(fr.getCvFrame()), alt=s["alt_rel"], yaw=s["yaw"],
                     alt_amsl=s.get("alt_amsl"), rngfnd=s.get("rngfnd"),
                     gps1_alt=s.get("gps1_alt"), gps1_fix=s.get("fix"),
+                    gps1_hacc=s.get("gps1_hacc"),
                     roll=s["roll"], pitch=s["pitch"], gps=gps, depth=depth,
                     gyro_d_roll=d_roll, gyro_d_pitch=d_pitch,
                     gyro_n=self._gyro_n,
@@ -447,7 +448,38 @@ class GpsInputSender:
     IGN_VEL_HORIZ, IGN_VEL_VERT, IGN_SPEED_ACC = 8, 16, 32
     # m/s of velocity error per metre of altitude, fitted to three flights.
     # See velocity_fields for the table it comes from.
-    VEL_ACC_PER_M = 0.0867
+    # Speed accuracy: a floor plus a small altitude term. 0.0867 x altitude was
+    # fitted on the RAW flow, before the 5 m/s^2 output slew was put back, and
+    # the slew is what removes most of that error - so the old coefficient now
+    # declares roughly three times the error the aircraft actually sends.
+    #
+    # Re-measured on the thirteen recorded VPS flights, sigma of what LEAVES the
+    # bridge (hovers, where the true speed is about zero so the reported speed
+    # IS the error):
+    #
+    #     altitude      5      15      25      38      52      70 m
+    #     raw        0.07    0.87    2.16    4.57    4.30    5.46 m/s
+    #     slewed     0.56    0.69    0.63    1.17    1.20    2.39 m/s
+    #
+    # The slewed column is nearly flat, because the slew bounds the rate of
+    # change rather than the magnitude - it is not proportional to height the
+    # way the raw flow error is. Four models against those six numbers:
+    #
+    #                             rms error   worst under-statement
+    #     0.0867 x alt  (was)         2.305        +0.128 m/s
+    #     0.0305 x alt                0.233        +0.259
+    #     flat 1.20                   0.636        +1.194
+    #     0.6 + 0.025 x alt           0.432        +0.044
+    #
+    # The last one is chosen on the under-statement column, not the rms. An
+    # accuracy declared to an EKF is a promise, and the failure that matters is
+    # claiming to be better than you are - 0.0305 x alt fits more tightly but
+    # under-states by a quarter of a metre per second somewhere, and the flat
+    # model under-states by 1.2. This one is never more than 0.044 m/s optimistic
+    # across the whole range, and at 70 m it declares 2.35 m/s against a measured
+    # 2.39 - against log 00000194's p50 of 0.93 on a quieter day.
+    VEL_ACC_FLOOR = 0.6
+    VEL_ACC_PER_M = 0.025
     # The vertical accuracy the working flights declared: a constant 3.0 m
     # (GPA.VAcc is exactly 3.00 throughout logs 00000191 and 00000194). It had
     # been sigma_m * 2 here, which at a typical sigma of 21 m declares 42 m of
@@ -478,6 +510,8 @@ class GpsInputSender:
         self.send_velocity = bool(send_velocity)
         # 4.3 Hz, which is what logs 00000191 and 00000194 actually carried.
         self.send_period_s = 1.0 / 4.3
+        # Seeded on the first send, then advanced by exactly one period each
+        # time - see the gate in send() for why that distinction is worth 0.4 Hz.
         self._next_send = None
         self.skipped_rate = 0
         self.sent = 0
@@ -543,7 +577,9 @@ class GpsInputSender:
         # 70 m it says 6.1 - and the EKF then weighs it accordingly instead of
         # being lied to. The staleness term stays: between flow updates this is
         # dead reckoning on the camera accelerometer.
-        acc = max(0.4, self.VEL_ACC_PER_M * max(0.0, vel.altitude_m)) + 2.0 * vel.age_s
+        acc = (self.VEL_ACC_FLOOR
+               + self.VEL_ACC_PER_M * max(0.0, vel.altitude_m)
+               + 2.0 * vel.age_s)
         return ign, float(vel.sent_vn), float(vel.sent_ve), float(acc), "sent"
 
     def send(self, lon, lat, alt_amsl_m, sigma_m, yaw_deg=None, vel=None):
@@ -564,7 +600,29 @@ class GpsInputSender:
         if self._next_send is not None and t < self._next_send:
             self.skipped_rate += 1
             return
-        self._next_send = t + self.send_period_s
+        # Advance from the DEADLINE, not from now. `_next_send = t + period`
+        # looks equivalent and is not: the gate can only fire on a frame, the
+        # frames arrive every 30 ms, so each send lands a little after its
+        # deadline and starting the next period from there loses that remainder
+        # every time. Measured over the thirteen recorded VPS flights, on their
+        # real frame timestamps:
+        #
+        #     _next_send = t + period        3.913 Hz
+        #     _next_send += period           4.295 Hz      target 4.30
+        #
+        # and log 00000194, which flew, carried 4.31 Hz. The first form is not
+        # a rounding difference, it is a systematic 9% shortfall.
+        #
+        # After a real gap - a stalled camera, a reconnect - the deadline would
+        # be far in the past and the gate would then fire on every frame until
+        # it caught up, which is the 30 Hz burst this gate exists to prevent.
+        # So a deadline already behind is restarted from the present instead.
+        if self._next_send is None:
+            self._next_send = t + self.send_period_s
+        else:
+            self._next_send += self.send_period_s
+            if self._next_send < t:
+                self._next_send = t + self.send_period_s
         week = int((t - 315964800) // (7 * 86400))
         week_ms = int(((t - 315964800) % (7 * 86400)) * 1000)
         # HDOP is what a GCS shows the pilot, so it should read like the real
@@ -623,7 +681,11 @@ CSV_COLUMNS = ["t", "north_m", "east_m", "lon", "lat", "sigma_m",
     # matching needs heading and height per image, and they are
     # already in this row. An index, not a timestamp, because the
     # Jetson's clock jumps at boot.
-    "frame_file"]
+    "frame_file",
+    # The sigma actually SENT: the origin's own error folded in with the
+    # fuser's drift. sigma_m above is the drift alone, and on the three
+    # stale-origin flights of 20 Oct it declared 14 m against a true 151 m.
+    "sigma_abs_m"]
 
 
 IMU_LOG_COLUMNS = ["t_dev", "src", "x", "y", "z"]
@@ -677,7 +739,8 @@ def csv_row(est, f, v, gN, gE, err):
             est.get("src") or "",
             "" if f.get("rngfnd") is None else f"{f['rngfnd']:.2f}",
             "" if f.get("alt_amsl") is None else f"{f['alt_amsl']:.2f}",
-            est.get("frame_file") or ""]
+            est.get("frame_file") or "",
+            f"{est['sigma_abs']:.1f}"]
 
 
 # --------------------------------------------------------------------------- #
@@ -1082,7 +1145,18 @@ class VpsNode:
         # and correct, NOT because it is a fix for anything.
         self.focal_y = float(focal_px if focal_y_px is None else focal_y_px)
         self.tracker = FlowTracker(max_corners=max_corners, K=K, D=D)
-        self.fuser = MapFuser(flow_drift_frac=0.07, fix_sigma_m=12.0)
+        # fix_sigma_m 20, not 12. This line said 12 while MapFuser's own default,
+        # its docstring and tests/test_restored_from_flown_logs.py all said 20 -
+        # so the flying code was quietly using a number the evidence does not
+        # support. The 9 Oct report settled it with the fix's own lat/lon logged
+        # for the first time: "the map's median error is 20.0 m against our own
+        # 6.6 m ... the code's fix_sigma_m = 20 was already right."
+        #
+        # It made no difference to the 20 Oct flights because they took no fixes
+        # at all (replayed: sigma p50 11.15 m at 12, 11.00 m at 20), but it
+        # decides how far each fix moves the aircraft the moment fixes return,
+        # and 12 trusts the map almost three times as much as it has earned.
+        self.fuser = MapFuser(flow_drift_frac=0.07, fix_sigma_m=20.0)
         # K's cx/cy go to the worker, so a map fix means the point under the
         # camera rather than the point under the middle of the image. The two
         # are 80 px apart on the leg-cropped frame = 11 m at 110 m, and
@@ -1095,6 +1169,7 @@ class VpsNode:
                                 float(np.asarray(K).reshape(3, 3)[1, 2]))))
         self.fix_period = float(fix_period_s)
         self.origin = None            # (lon, lat)
+        self.origin_sigma_m = None    # how well that point is known, metres
         self.mlon = None
         self._next_fix = 0.0
         self.prev_att = None
@@ -1106,9 +1181,52 @@ class VpsNode:
         # and says how stale it is either way.
         self.vel = VelocityBridge()
 
-    def set_origin(self, lon: float, lat: float):
+    def set_origin(self, lon: float, lat: float, sigma_m: float | None = None):
+        """Place the origin, and record how well that point is known.
+
+        sigma_m is the ORIGIN'S OWN ERROR, and carrying it is the whole point
+        of the argument. Everything this node reports is origin + displacement,
+        and until 20 Oct the accuracy declared to the flight controller was the
+        displacement's alone. Measured on the three VPS flights of 20 Oct, with
+        the origin left at a stale SCR_USER1/2:
+
+            declared sigma   p50 14.00 m    p95 22.30 m
+            TRUE error       p50 151.11 m   p95 154.53 m
+
+        and the true error exceeded the declared sigma in 76.3% of samples. Take
+        the constant offset out and the drift is covered properly - p95 16.11 m
+        against a declared 14.10, exceeded 8.9% of the time where an honest
+        one-sigma claim is exceeded about 32%. So the shape was never wrong. The
+        origin's error was simply absent, and it was the entire 151 m.
+
+        None means unknown, which is not the same as zero: a point typed into
+        SCR_USER1/2 by hand has no stated accuracy at all, and that is exactly
+        the case that was 147-157 m out. absolute_sigma_m falls back to the
+        map's own error there, because nothing better has measured it.
+        """
         self.origin = (float(lon), float(lat))
+        self.origin_sigma_m = None if sigma_m is None else float(sigma_m)
         self.mlon = M_PER_DEG_LAT * float(np.cos(np.radians(lat)))
+
+    @property
+    def absolute_sigma_m(self) -> float:
+        """What to declare to the flight controller: origin error AND drift.
+
+        The fuser's sigma is the uncertainty of the DISPLACEMENT - it starts at
+        init_sigma_m and grows with distance travelled. The absolute position is
+        origin + displacement, so the two uncertainties add in quadrature and
+        the result can never be better than the origin.
+
+        When the origin's accuracy is unknown the map's own error stands in. It
+        is the best this system can ever know absolutely, so declaring better
+        than it with nothing measured is a claim nothing supports. Log 00000194,
+        which flew, declared 21.36 m p50 - the same order as this floor.
+        """
+        drift = float(self.fuser.sigma_m)
+        origin = self.origin_sigma_m
+        if origin is None:
+            origin = float(np.sqrt(self.fuser.fix_var))
+        return float(np.hypot(origin, drift))
 
     def to_lonlat(self, north: float, east: float):
         return (self.origin[0] + east / self.mlon,
@@ -1210,7 +1328,14 @@ class VpsNode:
 
         lon, lat = self.to_lonlat(*self.fuser.pos)
         return dict(north=float(self.fuser.pos[0]), east=float(self.fuser.pos[1]),
-                    lon=lon, lat=lat, sigma=self.fuser.sigma_m, tracks=ntrk,
+                    lon=lon, lat=lat, sigma=self.fuser.sigma_m,
+                    # Two sigmas, and the difference is the whole 20 Oct
+                    # finding. `sigma` is the fuser's own - the uncertainty of
+                    # the DISPLACEMENT this node has measured. `sigma_abs` adds
+                    # the origin's error, which is what makes it the uncertainty
+                    # of the POSITION, and that is the one the flight controller
+                    # is told. Both are logged so a flight can be audited.
+                    sigma_abs=self.absolute_sigma_m, tracks=ntrk,
                     fix_used=fix_used, alt=f["alt"], yaw=f["yaw"], t=f["t"],
                     vel=self.vel.value(f["t"], f["alt"]),
                     fc_d_roll=fc_dr, fc_d_pitch=fc_dp,
@@ -1557,11 +1682,19 @@ def main():
                                        "VPS NO ORIGIN - SET SCR_USER1/2",
                                        Notifier.SEV_CRIT)
                     continue
-                node.set_origin(*chosen)
+                # Only the live receiver states its own accuracy. --origin and
+                # SCR_USER1/2 are both typed, so they get None and
+                # absolute_sigma_m falls back to the map's own error.
+                boot_sigma = (f.get("gps1_hacc")
+                              if why.startswith("the live receiver") else None)
+                node.set_origin(*chosen, sigma_m=boot_sigma)
                 _armed_was[0] = f.get("armed")
                 olon, olat = node.origin
                 covered = cache.covers(olon, olat)
                 print(f"origin from {why}: {olat:.6f}, {olon:.6f}")
+                print(f"  this point is known to "
+                      f"{'no stated accuracy' if boot_sigma is None else f'{boot_sigma:.1f} m'}"
+                      f", so the FC is told {node.absolute_sigma_m:.1f} m at the start")
                 notifier.event("origin", why, f"VPS ORIGIN {why}"[:50],
                                Notifier.SEV_INFO)
                 notifier.event("sheet", covered,
@@ -1631,19 +1764,31 @@ def main():
                     and node.origin is not None):
                 src_now = watcher.value
                 new_o = why_o = None
+                # The receiver states its own accuracy and SCR_USER1/2 cannot:
+                # one is a measurement, the other is typed. Measured in the
+                # recent logs, GPS1 reported 1.08 to 3.01 m with a lock and
+                # UINT32_MAX without one (the reader discards that), so taking
+                # the origin from the receiver is worth about 2 m of declared
+                # uncertainty. A hand-typed point gets None, which
+                # absolute_sigma_m reads as the map's own error - and the three
+                # flights that flew on a stale SCR_USER were 147-157 m out.
+                new_sigma = None
                 if src_now == 0 and f["gps"]:
                     new_o, why_o = f["gps"], "receiver at arm"
+                    new_sigma = f.get("gps1_hacc")
                 elif scr_origin is not None:
                     new_o, why_o = scr_origin, "SCR_USER1/2 at arm"
                 if new_o is not None:
                     moved = float(np.hypot(
                         (new_o[1] - node.origin[1]) * M_PER_DEG_LAT,
                         (new_o[0] - node.origin[0]) * node.mlon))
-                    node.set_origin(*new_o)
+                    node.set_origin(*new_o, sigma_m=new_sigma)
                     node.fuser.reset_displacement()
                     print(f"ARM: origin re-taken from {why_o}: "
                           f"{new_o[1]:.6f}, {new_o[0]:.6f} "
-                          f"(moved {moved:.0f} m)", flush=True)
+                          f"(moved {moved:.0f} m, origin known to "
+                          f"{'unmeasured' if new_sigma is None else f'{new_sigma:.1f} m'}"
+                          f", declaring {node.absolute_sigma_m:.1f} m)", flush=True)
                     notifier.event("reanchor", round(moved),
                                    f"VPS ORIGIN {why_o} {moved:.0f}m"[:50],
                                    Notifier.SEV_INFO if moved < 50
@@ -1730,7 +1875,7 @@ def main():
                                else Notifier.SEV_WARN)
                 gps_sender.send(est["lon"], est["lat"],
                                 est["alt"] if amsl is None else amsl,
-                                est["sigma"], est["yaw"], vel=est["vel"])
+                                est["sigma_abs"], est["yaw"], vel=est["vel"])
             if sender is not None:
                 sender.send(est["north"], est["east"], -est["alt"],
                             f["roll"], f["pitch"], f["yaw"])

@@ -77,7 +77,7 @@ def est_row(t, north, east, origin, alt=ALT, yaw=12.0, frame=""):
     mlon = M_PER_DEG_LAT * np.cos(np.radians(olat))
     return dict(t=t, north=north, east=east,
                 lon=olon + east / mlon, lat=olat + north / M_PER_DEG_LAT,
-                sigma=4.5, tracks=250, fix_used=False, alt=alt, yaw=yaw,
+                sigma=4.5, sigma_abs=20.5, tracks=250, fix_used=False, alt=alt, yaw=yaw,
                 fc_d_roll=0.01, fc_d_pitch=-0.02, gyro_d_roll=0.011,
                 gyro_d_pitch=-0.019, gyro_n=500, accel_n=480,
                 depth_med_m=12.0, depth_dropped=0, n_dr=0, src="VPS",

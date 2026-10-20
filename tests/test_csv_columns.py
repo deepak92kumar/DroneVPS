@@ -43,7 +43,7 @@ class Vel:
 
 def est(**kw):
     d = dict(t=12.34, north=1.0, east=-2.0, lon=74.613182, lat=30.896742,
-             sigma=4.5, tracks=250, fix_used=False, alt=110.0, yaw=3.2,
+             sigma=4.5, sigma_abs=20.5, tracks=250, fix_used=False, alt=110.0, yaw=3.2,
              fc_d_roll=0.01, fc_d_pitch=-0.02, gyro_d_roll=0.011,
              gyro_d_pitch=-0.019, gyro_n=500, accel_n=480,
              depth_med_m=12.0, depth_dropped=3, n_dr=1, src="VPS")
@@ -59,7 +59,14 @@ check("widths match", len(row) == len(CSV_COLUMNS),
 # frames during a live run (the OAK-D has one owner, so the only process that
 # can record them is the one navigating), and that column is what ties a saved
 # image to the row holding the heading and height it was taken at.
-check("and there are the columns we expect", len(CSV_COLUMNS) == 40,
+#
+# 41 since sigma_abs_m joined it the same day. sigma_m is the fuser's own
+# number - the uncertainty of the DISPLACEMENT - and sigma_abs_m is what the
+# flight controller is actually told, with the origin's own error folded in.
+# Logging both is the only way a flight can show which of the two was wrong:
+# on the three stale-origin flights of 20 Oct the drift figure read 14 m
+# against a true error of 151 m, all of it the origin's.
+check("and there are the columns we expect", len(CSV_COLUMNS) == 41,
       str(len(CSV_COLUMNS)))
 
 print("\nand with every optional value missing, which is the usual case")

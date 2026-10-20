@@ -138,6 +138,13 @@ class Telemetry:
                           roll=None, pitch=None, yaw=None, fix=None, sats=None,
                           hdg=None, rngfnd=None, rngfnd_raw=None, armed=False, t=0.0,
                           gps1_alt=None,
+                          # The receiver's OWN horizontal accuracy, metres.
+                          # This is the origin's error, and until 20 Oct
+                          # nothing carried it: every VPS position is measured
+                          # from the origin, so the accuracy we declare to the
+                          # flight controller is only ever as good as the point
+                          # we started from. See GPS_RAW_INT below.
+                          gps1_hacc=None,
                           # The FC's own accelerometer vibration, and what the
                           # motors were doing when it was measured. One without
                           # the other says nothing: vibration at idle and
@@ -271,7 +278,18 @@ class Telemetry:
                     # aircraft that does not come back out of the EKF, which
                     # matters because the EKF's altitude is partly OUR doing -
                     # see AmslRef in live_node.
+                    # h_acc is a MAVLink 2 extension field in millimetres, and
+                    # it reads UINT32_MAX when the receiver does not know - which
+                    # is what the bench returns with no lock (measured 20 Oct:
+                    # 4294967295 mm on every message, satellites 0). With a lock
+                    # the recent logs carry 1.08 to 3.01 m. Anything outside a
+                    # sane range is discarded rather than passed on as a number.
+                    hacc = getattr(msg, "h_acc", None)
+                    hacc_m = None
+                    if hacc is not None and 0 < hacc < 100000 and msg.fix_type >= 3:
+                        hacc_m = hacc / 1000.0
                     self.state.update(fix=msg.fix_type, sats=msg.satellites_visible,
+                                      gps1_hacc=hacc_m,
                                       gps1_alt=(msg.alt / 1000.0
                                                 if msg.fix_type >= 3 else None))
                 elif t == "VIBRATION":

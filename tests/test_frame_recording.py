@@ -74,7 +74,7 @@ class Vel:
 def est(n, **kw):
     """An estimate row the way the loop builds one, with a plausible pose."""
     d = dict(t=n / 17.0, north=1.5 * n, east=-0.4 * n, lon=74.613182,
-             lat=30.896742, sigma=4.5, tracks=250, fix_used=False,
+             lat=30.896742, sigma=4.5, sigma_abs=20.5, tracks=250, fix_used=False,
              alt=110.0 + 0.1 * n, yaw=(3.2 * n) % 360.0,
              fc_d_roll=0.01, fc_d_pitch=-0.02, gyro_d_roll=0.011,
              gyro_d_pitch=-0.019, gyro_n=500, accel_n=480,

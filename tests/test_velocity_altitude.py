@@ -39,6 +39,32 @@ Two defences, and this file pins both:
   2. AN HONEST ACCURACY. The speed accuracy sent to the flight controller used
      to be a flat 0.4 m/s at every height. Telling the EKF that a 24.6 m/s
      reading is accurate to 0.4 m/s is how it gets believed.
+
+RE-MEASURED 20 Oct, after the slew went back in. The table above is the RAW
+flow, which is what the bridge is fed - not what it sends. sigma = 0.0867 x
+altitude was fitted on it, and it over-states the real output by about three
+times, because the 5 m/s^2 output slew removes most of that error before it
+leaves. Sigma of what actually LEAVES the bridge, same flights, hovers only:
+
+    altitude      5      15      25      38      52      70 m
+    raw        0.07    0.87    2.16    4.57    4.30    5.46 m/s
+    slewed     0.56    0.69    0.63    1.17    1.20    2.39 m/s
+
+The slewed row is nearly flat - the slew bounds the rate of change, not the
+magnitude, so it is not proportional to height the way the raw error is. Four
+models against those six numbers:
+
+                            rms error   worst under-statement
+    0.0867 x alt  (was)         2.305        +0.128 m/s
+    0.0305 x alt                0.233        +0.259
+    flat 1.20                   0.636        +1.194
+    0.6 + 0.025 x alt           0.432        +0.044
+
+The last is chosen on the UNDER-STATEMENT column, not the rms: an accuracy
+declared to an EKF is a promise, and the failure that matters is claiming to be
+better than you are. 0.0305 x alt fits more tightly overall but under-states
+somewhere by a quarter of a metre per second. At 70 m the chosen model declares
+2.35 m/s against a measured 2.39.
 """
 import math
 import os
@@ -162,15 +188,23 @@ check("live_node no longer sends a flat 0.4 m/s",
       "that line told the EKF a 24.6 m/s reading was good to 0.4 m/s")
 check("it scales on the carried altitude",
       "self.VEL_ACC_PER_M * max(0.0, vel.altitude_m)" in src)
-check("with the fitted coefficient", "VEL_ACC_PER_M = 0.0867" in src)
+check("with the coefficient fitted on the SLEWED output",
+      "VEL_ACC_PER_M = 0.025" in src,
+      "0.0867 was fitted on the raw flow, before the slew was restored")
+check("and a floor, because the slewed error is nearly flat",
+      "VEL_ACC_FLOOR = 0.6" in src)
 
-# and the numbers that comes to, against the measured sigmas
-PER_M = 0.0867
-for alt, measured in ((5.0, 0.126), (25.0, 1.826), (70.0, 5.713)):
-    said = max(0.4, PER_M * alt)
-    close = said >= measured * 0.5          # never wildly optimistic
+# The promise this makes, against the sigma measured on the bridge's OUTPUT
+# over all thirteen recorded VPS flights. The test is one-sided on purpose:
+# declaring MORE error than there is costs weight in the EKF, declaring less
+# is how a bad number gets flown.
+FLOOR, PER_M = 0.6, 0.025
+for alt, measured in ((5.0, 0.561), (15.0, 0.686), (25.0, 0.627),
+                      (38.0, 1.166), (52.0, 1.198), (70.0, 2.394)):
+    said = FLOOR + PER_M * alt
     check(f"at {alt:g} m it tells the FC {said:.2f} m/s",
-          close, f"measured sigma there was {measured:.2f}")
+          said >= measured - 0.05,
+          f"measured sigma of the sent speed there was {measured:.2f}")
 
 print("\n" + ("ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}"))
 sys.exit(1 if fails else 0)

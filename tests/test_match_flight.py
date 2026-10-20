@@ -177,7 +177,7 @@ def make_run(folder, cache, specs, *, write_frames=True, bare_camera=False):
                     cv2.imwrite(os.path.join(folder, name), img,
                                 [int(cv2.IMWRITE_JPEG_QUALITY), 90])
             est = dict(t=i * 0.5, north=0.0, east=0.0, lon=lon_p, lat=lat_p,
-                       sigma=4.5, tracks=250, fix_used=False, alt=sp["alt"],
+                       sigma=4.5, sigma_abs=20.5, tracks=250, fix_used=False, alt=sp["alt"],
                        yaw=sp["yaw"], fc_d_roll=0.01, fc_d_pitch=-0.02,
                        gyro_d_roll=0.011, gyro_d_pitch=-0.019, gyro_n=500,
                        accel_n=480, depth_med_m=12.0, depth_dropped=0, n_dr=1,
