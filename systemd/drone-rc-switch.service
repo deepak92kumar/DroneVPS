@@ -3,6 +3,8 @@
 # back on its own - that decision stays with the pilot.
 Description=RC GPS1/GPS2 switch watcher
 After=drone-router.service
+# The map, the weights and this script are all on the NVMe.
+RequiresMountsFor=/data/DRONE
 Requires=drone-router.service
 
 [Service]

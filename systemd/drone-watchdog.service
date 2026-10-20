@@ -3,6 +3,9 @@
 Description=Restart the VPS node when its loop stalls
 After=drone-router.service
 
+# The watchdog script is on the NVMe too.
+RequiresMountsFor=/data/DRONE
+
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/python3 /data/DRONE/drone_watchdog.py --once \

@@ -62,7 +62,7 @@ class ReplaySource:
             for t in f.readline().split():
                 if t.startswith("fx="):
                     return float(t[3:])
-        raise RuntimeError("camera.txt mein fx= nahi mila")
+        raise RuntimeError("no fx= found in camera.txt")
 
     def read(self):
         while self.i < len(self.rows):
@@ -209,9 +209,9 @@ class LiveSource:
             else:
                 print("*** IMU->CAM_B extrinsics is not a rotation - IGNORED ***")
         except Exception as e:
-            print(f"*** IMU->CAM_B extrinsics padha nahi gaya ({e}) - "
-                  f"IMU axes ko camera axes maan raha hoon. Accel/gyro ka "
-                  f"mapping is frame par UNVERIFIED hai. ***")
+            print(f"*** could not read IMU->CAM_B extrinsics ({e}) - treating the IMU "
+                  f"axes as the camera axes. The accel/gyro mapping is "
+                  f"UNVERIFIED in that frame. ***")
 
         K = np.array(cal.getCameraIntrinsics(dai.CameraBoardSocket.CAM_B, 1280, 800))
         self.focal = float(K[0][0])
@@ -229,7 +229,7 @@ class LiveSource:
         if self.crop_left > 0:
             K = K.copy()
             K[0][2] -= self.crop_left
-            print(f"crop: left {self.crop_left} px (drone ka leg), "
+            print(f"crop: left {self.crop_left} px (the aircraft leg), "
                   f"cx {K[0][2] + self.crop_left:.1f} -> {K[0][2]:.1f}")
         self.K = K
         self.focal_y = float(K[1][1])
@@ -238,8 +238,8 @@ class LiveSource:
                 dai.CameraBoardSocket.CAM_B)), float)
         except Exception as e:
             self.D = None
-            print(f"*** distortion coefficients padhe nahi gaye ({e}) - "
-                  f"flow raw pixels par chalega ***")
+            print(f"*** could not read the distortion coefficients ({e}) - flow will "
+                  f"run on raw pixels ***")
         print(f"K: fx {K[0][0]:.2f} fy {K[1][1]:.2f} cx {K[0][2]:.2f} cy {K[1][2]:.2f}"
               + (f", D[{len(self.D)}] k1 {self.D[0]:.2f}" if self.D is not None else ""))
         self.dev.startPipeline(p)
@@ -372,7 +372,7 @@ class FcSender:
                                             source_component=197)
         _announce(self.m)
         if self.m.wait_heartbeat(timeout=20) is None:
-            raise RuntimeError("FC se heartbeat nahi aaya")
+            raise RuntimeError("no heartbeat from the flight controller")
         # No armed check, at the pilot's instruction - same reason as
         # GpsInputSender: refusing to start while armed means the node can
         # never be brought back after an arm.
@@ -434,7 +434,7 @@ class GpsInputSender:
         # spoken is not registered, so its heartbeat can never arrive.
         _announce(self.m)
         if self.m.wait_heartbeat(timeout=20) is None:
-            raise RuntimeError("FC se heartbeat nahi aaya")
+            raise RuntimeError("no heartbeat from the flight controller")
         # No armed check here either, at the pilot's instruction. Refusing to
         # START while armed would mean the node could never be brought back up
         # after an arm - which is precisely when the aircraft needs it.
@@ -868,7 +868,7 @@ class Notifier:
             self.event("fix", "yes", f"VPS MAP FIX {node.n_fix}", self.SEV_INFO)
         elif too_low:
             self.event("fix", "low",
-                       f"VPS MAP NEEDS {min_alt:.0f}m - ab {alt:.0f}m",
+                       f"VPS MAP NEEDS {min_alt:.0f}m - now {alt:.0f}m",
                        self.SEV_INFO)
         else:
             self.event("fix", "none", "VPS NO MAP FIX", self.SEV_WARN)
@@ -1114,14 +1114,14 @@ def main():
     if a.send_gps:
         gps_sender = GpsInputSender(a.fc_port, a.fc_baud, gps_id=a.gps_id,
                                     send_velocity=a.send_vel)
-        print(f"GPS INPUT SENDER ON - disarmed confirmed. GPS{a.gps_id+1} ban kar jayega.\n"
-              f"   (horiz_accuracy = fuser ka apna sigma)")
+        print(f"GPS INPUT SENDER ON - the estimate will arrive as GPS{a.gps_id+1}.\n"
+              f"   (horiz_accuracy carries the fuser's own sigma)")
 
     sender = None
     if a.send_fc:
         sender = FcSender(a.fc_port, a.fc_baud)
-        print(f"FC SENDER ON - disarmed confirmed. VISION_POSITION_ESTIMATE jayega.\n"
-              f"   (EK3 sources ko haath nahi lagaya - FC padhega par istemal nahi karega)")
+        print(f"FC SENDER ON - VISION_POSITION_ESTIMATE will be sent.\n"
+              f"   (EK3 sources untouched - the FC will read it but not use it)")
 
     # Read the typed take-off point BEFORE the camera source opens the serial
     # port, so this works whether --fc-port is a device or the router's UDP.
@@ -1141,7 +1141,7 @@ def main():
            else LiveSource(a.fc_port, a.fc_baud, crop_left=a.crop_left))
     cache = MapCache(a.map)
     print(cache.summary())
-    print(f"focal {src.focal:.1f} px, fix har {a.fix_period:.1f} s, window +-{a.radius:.0f} m, "
+    print(f"focal {src.focal:.1f} px, fix every {a.fix_period:.1f} s, window +-{a.radius:.0f} m, "
           f"{a.corners} corners\n", flush=True)
 
     node = VpsNode(cache, src.focal,
@@ -1235,7 +1235,7 @@ def main():
                         print("  Set SCR_USER1/2 from the RC, or pass "
                               "--origin lon,lat. Waiting.")
                         notifier.event("noorigin", True,
-                                       "VPS NO ORIGIN - SET SCR_USER",
+                                       "VPS NO ORIGIN - SET SCR_USER1/2",
                                        Notifier.SEV_CRIT)
                     continue
                 node.set_origin(*chosen)
@@ -1267,9 +1267,9 @@ def main():
                           else "GPS1" if watcher.value == 0 else "?")
             notifier.event(
                 "source", est["src"],
-                "VPS ON - FC ko GPS2 ja raha hai" if watcher.value == 1
-                else "GPS1 ON - VPS ka data FC ko BAND" if watcher.value == 0
-                else "SOURCE ? - GPS_PRIMARY padha nahi gaya",
+                "VPS ON - injecting as GPS2" if watcher.value == 1
+                else "GPS1 ON - VPS data blocked" if watcher.value == 0
+                else "SOURCE UNKNOWN - cannot read GPS_PRIMARY",
                 Notifier.SEV_INFO if watcher.value == 1 else Notifier.SEV_CRIT)
             gN = gE = err = None
             if f["gps"]:
@@ -1313,9 +1313,9 @@ def main():
                 amsl_ref.observe(f.get("gps1_fix"), f.get("gps1_alt"), f["alt"])
                 amsl = amsl_ref.amsl(f["alt"])
                 notifier.event("amsl", amsl_ref.source or False,
-                               f"VPS AMSL {amsl_ref.source}"[:50]
+                               f"VPS AMSL from {amsl_ref.source}"[:50]
                                if amsl_ref.source
-                               else "VPS AMSL ANJAAN - --site-alt do",
+                               else "VPS AMSL UNKNOWN - pass --site-alt",
                                Notifier.SEV_INFO if amsl_ref.source
                                else Notifier.SEV_WARN)
                 gps_sender.send(est["lon"], est["lat"],

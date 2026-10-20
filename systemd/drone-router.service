@@ -4,7 +4,26 @@
 # "two readers split one stream" failure that vps_vio/fc_port.py worked around
 # by stopping the recorder.
 Description=MAVLink router - sole owner of the FC serial line
-After=multi-user.target
+# NOT After=multi-user.target. This unit is WantedBy=multi-user.target, so
+# ordering itself after that target closes a loop: the target pulls in
+# drone-vps, drone-vps is After this, and this is After the target. systemd
+# breaks such a loop by DELETING jobs, and on 20 Oct it deleted exactly the
+# two that matter:
+#
+#   multi-user.target: Found ordering cycle on drone-vps.service/start
+#   multi-user.target: Found dependency on drone-router.service/start
+#   Job drone-vps.service/start deleted to break ordering cycle
+#   ... and the same for drone-rc-switch.service
+#
+# So the router came up alone after every reboot and nothing else did, with
+# no error and no failed unit - the two services were simply never attempted.
+# That is the field failure the pilot described: the aircraft and the Jetson
+# were restarted and the VPS never came back.
+After=network.target
+# The programs, the map and the logs all live on the NVMe. Without this the
+# unit can be started before /data is mounted, which fails for a reason that
+# has nothing to do with the program.
+RequiresMountsFor=/data/DRONE
 Before=drone-vps.service drone-rc-switch.service
 
 [Service]

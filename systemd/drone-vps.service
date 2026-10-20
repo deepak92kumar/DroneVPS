@@ -2,6 +2,8 @@
 # The VPS node: flow, map fixes, fusion, and the GPS_INPUT injection.
 Description=DroneVPS node (flow + map matching + GPS_INPUT)
 After=drone-router.service
+# The map, the weights and this script are all on the NVMe.
+RequiresMountsFor=/data/DRONE
 Requires=drone-router.service
 
 [Service]

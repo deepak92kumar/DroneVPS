@@ -87,10 +87,10 @@ def require(name: str):
     pid = holder(name)
     cmd = holder_cmdline(pid)
     sys.stderr.write(
-        f"*** {name} pehle se chal raha hai (PID {pid}). Do copy nahi chal "
-        f"sakti - camera exclusive hai aur dono GPS_INPUT bhejenge. ***\n")
+        f"*** {name} is already running (PID {pid}). Two copies cannot run - "
+        f"the camera opens exclusively and both would inject GPS_INPUT. ***\n")
     if cmd:
-        sys.stderr.write(f"    chal raha hai: {cmd}\n")
-    sys.stderr.write(f"    band karo:  sudo systemctl stop drone-vps   "
-                     f"(ya  kill {pid})\n")
+        sys.stderr.write(f"    running: {cmd}\n")
+    sys.stderr.write(f"    stop it with:  sudo systemctl stop {name}   "
+                     f"(or  kill {pid})\n")
     raise SystemExit(EXIT_BUSY)

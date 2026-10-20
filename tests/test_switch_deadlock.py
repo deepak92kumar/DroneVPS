@@ -56,7 +56,7 @@ print("a healthy node says so, even while sending nothing to the FC")
 write(live)
 ok, why = sw(live).vps_healthy()
 check("healthy", ok, why)
-check("and says what it saw", "t147" in why, why)
+check("and says what it saw", "147" in why, why)
 
 print("\nthe deadlock itself: on GPS, GPS2 has no fix by design")
 # This is the exact state from the aircraft: GPS_PRIMARY 0, node gated silent,
@@ -77,7 +77,7 @@ write(old)
 os.utime(old, (time.time() - 60, time.time() - 60))
 ok, why = sw(old).vps_healthy()
 check("a stale file is not health", not ok, why)
-check("and says how stale", "s se" in why or "ruka" in why, why)
+check("and says how stale", "stalled" in why and "60" in why, why)
 
 print("\nnor is a node that is running but not tracking")
 weak = os.path.join(d, "weak.alive")

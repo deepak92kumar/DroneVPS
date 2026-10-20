@@ -80,21 +80,21 @@ class RcGpsSwitch:
         try:
             age = time.time() - os.path.getmtime(self.liveness)
         except OSError:
-            return False, "VPS node chal hi nahi raha"
+            return False, "VPS node is not running"
         if age > self.LIVENESS_MAX_AGE_S:
-            return False, f"VPS {age:.0f}s se ruka hai"
+            return False, f"VPS stalled {age:.0f}s ago"
         try:
             with open(self.liveness) as fh:
                 kv = dict(p.split("=", 1) for p in fh.read().split() if "=" in p)
         except OSError:
-            return False, "VPS liveness padhi nahi gayi"
+            return False, "VPS liveness unreadable"
         try:
             tracks = int(float(kv.get("tracks", 0)))
         except ValueError:
             tracks = 0
         if tracks < self.MIN_TRACKS:
-            return False, f"VPS tracking kamzor ({tracks})"
-        return True, f"VPS ok t{tracks}"
+            return False, f"VPS tracking weak ({tracks} tracks)"
+        return True, f"VPS healthy, {tracks} tracks"
 
     def __init__(self, channel=6, high_us=1720, allow_armed=False,
                  require_vps_fix=True, stable_n=4, port: str | None = None,
@@ -119,7 +119,7 @@ class RcGpsSwitch:
         except Exception:
             pass
         if self.m.wait_heartbeat(timeout=20) is None:
-            sys.exit("FC se heartbeat nahi aaya")
+            sys.exit("no heartbeat from the flight controller")
         self.m.mav.request_data_stream_send(self.m.target_system,
                                             self.m.target_component,
                                             mavutil.mavlink.MAV_DATA_STREAM_ALL, 5, 1)
@@ -131,6 +131,7 @@ class RcGpsSwitch:
         self.applied = None
         self.switches = 0
         self.refusals = 0
+        self._said_pos = None
 
     # -- helpers ----------------------------------------------------------- #
     def say(self, text):
@@ -188,25 +189,26 @@ class RcGpsSwitch:
         # Land - flipping it to change GPS would have put the aircraft down.
         opt = self.get_param(f"RC{self.ch}_OPTION")
         if opt is None:
-            sys.exit(f"RC{self.ch}_OPTION padha nahi ja saka")
+            sys.exit(f"could not read RC{self.ch}_OPTION")
         if int(opt) != 0:
-            sys.exit(f"*** RC{self.ch} par pehle se option {int(opt)} laga hai "
-                     f"(0 hona chahiye). Doosra channel chuno. ***")
+            sys.exit(f"*** RC{self.ch} already carries option {int(opt)} (must be 0). "
+                     f"Choose another channel. ***")
         auto = self.get_param("GPS_AUTO_SWITCH")
         if auto is None or int(auto) != 0:
-            print(f"GPS_AUTO_SWITCH={auto} - manual ke liye 0 kar raha hoon")
+            print(f"GPS_AUTO_SWITCH={auto} - setting it to 0 for manual control")
             self.m.mav.param_set_send(self.m.target_system, self.m.target_component,
                                       b"GPS_AUTO_SWITCH", 0.0,
                                       mavutil.mavlink.MAV_PARAM_TYPE_REAL32)
             time.sleep(1.0)
         cur = self.get_param("GPS_PRIMARY")
         self.applied = None if cur is None else int(cur)
+        self._said_pos = self.applied
         t2 = self.get_param("GPS2_TYPE")
-        print(f"ch{self.ch}:  <={self.low} = asli GPS  |  "
-              f"{self.low+1}-{self.high-1} = centre, kuch nahi  |  "
+        print(f"ch{self.ch}:  <={self.low} = real GPS  |  "
+              f"{self.low+1}-{self.high-1} = centre, no action  |  "
               f">={self.high} = VPS")
         print(f"abhi GPS_PRIMARY={self.applied}  GPS2_TYPE={t2}  "
-              f"armed-switching={'ON' if self.allow_armed else 'OFF (zameen par hi)'}\n",
+              f"armed-switching={'ON' if self.allow_armed else 'OFF (ground only)'}\n",
               flush=True)
 
         # A heartbeat every few seconds, for the whole run - not just at the
@@ -257,10 +259,22 @@ class RcGpsSwitch:
                 self.stable += 1
             else:
                 self.want, self.stable = want, 1
-            if self.stable != self.stable_n or want == self.applied:
+            if self.stable != self.stable_n:
                 continue
+            if want == self.applied:
+                # The source is already what the switch is asking for. That is
+                # not nothing to the pilot: 20 Oct they flipped to the VPS, it
+                # was refused, they flipped back to the real receiver - and got
+                # silence, because nothing had changed. From the transmitter
+                # that is indistinguishable from a switch that is not working
+                # at all. Say where we are, once per move, not every frame.
+                if self._said_pos != want:
+                    self._said_pos = want
+                    self.say(f"Source already {'VPS (GPS2)' if want else 'GPS1'}")
+                continue
+            self._said_pos = want
 
-            name = "VPS (GPS2)" if want else "asli GPS (GPS1)"
+            name = "VPS (GPS2)" if want else "real GPS (GPS1)"
             # The armed refusal that used to sit here is gone, at the pilot's
             # instruction. It was half of what stranded the aircraft on 20 Oct:
             # the VPS node stopped injecting on arm, and then this refused to
@@ -275,18 +289,21 @@ class RcGpsSwitch:
                 # receiver. Requiring the FIRST alone is the deadlock.
                 ok, why = self.vps_healthy()
                 if not ok and self.gps2_fix < 3:
-                    self.say(f"VPS switch MANA: {why}"[:50])
+                    self.say(f"VPS REFUSED: {why}"[:50])
                     self.refusals += 1
                     self.stable = 0
                     continue
 
             self.set_primary(want)
             self.switches += 1
-            self.say(f"GPS -> {name}")
+            # Both directions, in the same words, so the pilot reads one line
+            # and knows which source is live and what the other one is doing.
+            self.say(f"SOURCE -> {name}"
+                     + (", VPS injecting" if want else ", VPS data blocked"))
             time.sleep(0.8)
             got = self.get_param("GPS_PRIMARY")
             self.applied = want if got is None else int(got)
-            print(f"     (GPS_PRIMARY ab {got})", flush=True)
+            print(f"     (GPS_PRIMARY is now {got})", flush=True)
 
 
 def main():
@@ -299,9 +316,9 @@ def main():
                          "centre detent, which commands nothing. RC6 travels "
                          "1045 / 1495 / 1945, so these are the midpoints.")
     ap.add_argument("--allow-armed", action="store_true",
-                    help="hawa mein bhi switch karne do (pehle zameen par test karo)")
+                    help="allow switching while airborne (test on the ground first)")
     ap.add_argument("--no-fix-check", action="store_true",
-                    help="VPS ka fix check mat karo (SAFAI NAHI - test ke liye)")
+                    help="skip the VPS health check (UNSAFE - for bench testing only)")
     ap.add_argument("--liveness", default=RcGpsSwitch.LIVENESS,
                     help="the VPS node's liveness file. Health is read here "
                          "rather than from GPS2's fix, because the node stops "
@@ -321,7 +338,7 @@ def main():
     try:
         sw.run()
     except KeyboardInterrupt:
-        print(f"\nband. {sw.switches} switch hue, {sw.refusals} mana kiye gaye.")
+        print(f"\nstopped. {sw.switches} switches made, {sw.refusals} refused.")
 
 
 if __name__ == "__main__":

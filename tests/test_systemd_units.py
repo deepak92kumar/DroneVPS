@@ -106,6 +106,56 @@ for u in units:
               "RestartPreventExitStatus=3" in text,
               "RestartPreventExitStatus missing")
 
+print("\nno unit is ordered after the target that pulls it in")
+# 20 Oct, after a real reboot in preparation for flying: the router came up
+# and nothing else did. No failed unit, no error, no journal entry for the
+# services at all - systemd had simply deleted their start jobs:
+#
+#   multi-user.target: Found ordering cycle on drone-vps.service/start
+#   multi-user.target: Found dependency on drone-router.service/start
+#   Job drone-vps.service/start deleted to break ordering cycle
+#
+# drone-router was WantedBy=multi-user.target AND After=multi-user.target. The
+# target pulls in drone-vps, drone-vps is After the router, the router is
+# After the target: a loop, which systemd breaks by dropping jobs. It dropped
+# the two that matter. A unit must never be ordered after a target that wants
+# it, and nothing else in this suite would have noticed.
+for u in units:
+    text = open(os.path.join(UNITS, u)).read()
+    after = set()
+    for line in re.findall(r"^After=(.+)$", text, re.M):
+        after.update(line.split())
+    wanted = set()
+    for line in re.findall(r"^WantedBy=(.+)$", text, re.M):
+        wanted.update(line.split())
+    clash = after & wanted
+    check(f"{u}: not After= a target it is WantedBy=", not clash,
+          f"{clash} - this is an ordering cycle, systemd deletes the job")
+
+print("\nunits that live on the NVMe wait for it to be mounted")
+for u in units:
+    text = open(os.path.join(UNITS, u)).read()
+    m = re.search(r"^ExecStart=(.*?)(?=^\w+=|\Z)", text, re.M | re.S)
+    cmd = " ".join(m.group(1).split()) if m else ""
+    if "/data/DRONE" in cmd:
+        check(f"{u} has RequiresMountsFor", "RequiresMountsFor=" in text,
+              "it can otherwise start before /data is mounted")
+
+print("\nsystemd itself is happy with them")
+import shutil  # noqa: E402
+if shutil.which("systemd-analyze"):
+    for u in units:
+        r = subprocess.run(["systemd-analyze", "verify",
+                            os.path.join(UNITS, u)],
+                           capture_output=True, text=True, timeout=120)
+        # verify walks the whole dependency tree and will happily report on
+        # unrelated units already installed on this machine. Only complaints
+        # about THIS unit are ours to fix.
+        bad = [l for l in (r.stderr or "").splitlines()
+               if u in l and "Unknown" not in l and "ignoring" not in l.lower()]
+        check(f"{u}: systemd-analyze verify is clean", not bad,
+              (bad or [""])[0][:90])
+
 print("\nthe ones that must survive a reboot say so")
 for u in ("drone-router.service", "drone-vps.service"):
     p = os.path.join(UNITS, u)

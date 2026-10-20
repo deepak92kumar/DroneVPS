@@ -144,6 +144,45 @@ check("high enough and still nothing IS a warning",
 check("a node with no worker does not crash the notifier",
       Notifier(FakeLink(), period_s=1e9).tick(0.0, est(), Node(min_alt_m=None)) is None)
 
+print("\nthe pilot reads English, in 50 characters")
+# The pilot's instruction, 20 Oct: "massages jo hai english mein likho ye mana
+# kay hai thora professional ke tarah kaam karo mai hindi mein chat kar raha hu
+# iska matlab ye nahi ki mere ko english samajh nahi aayega". Chat language and
+# cockpit language are not the same thing, and a line on a transmitter screen
+# is a cockpit line. STATUSTEXT also truncates at 50, so a line that runs over
+# does not just read badly, it arrives cut in half.
+HINGLISH = ("nahi", "hai", "raha", "karo", "kar ", "jayega", "gaya", "mana",
+            "asli", "ab ", "chal", "band", "kuch", "anjaan", "padha",
+            "bhejenge", "zameen", "hawa")
+lk = FakeLink()
+n = Notifier(lk, period_s=0.0)
+for case in (est(), est(tracks=3), est(vel=Vel(False, "flow 2.00s stale (> 0.6)")),
+             est(gyro_n=0), est(accel_n=0), est(alt=0.0), est(src="GPS1")):
+    n.tick(0.0, case, Node())
+for text in ("VPS ORIGIN SCR_USER1/2 (typed on the RC)",
+             "VPS SHEET MISS - NO MAP FIX",
+             "VPS NO ORIGIN - SET SCR_USER1/2",
+             "VPS ON - injecting as GPS2",
+             "GPS1 ON - VPS data blocked",
+             "SOURCE UNKNOWN - cannot read GPS_PRIMARY",
+             "VPS AMSL UNKNOWN - pass --site-alt"):
+    n.event(text[:6], text, text, Notifier.SEV_INFO)
+
+lines = [t for _, t in lk.mav.lines]
+over = [t for t in lines if len(t) > 50]
+check("no line is truncated by the protocol", not over,
+      str([(len(t), t) for t in over]))
+hing = [t for t in lines
+        if any(w in t.lower() for w in HINGLISH)]
+check("every line is in English", not hing, str(hing))
+check("and there are plenty of them to check", len(lines) > 15, str(len(lines)))
+check("all printable ASCII", all(all(32 <= ord(c) < 127 for c in t) for t in lines))
+
+print("\nthe source lines name the source AND what the other one is doing")
+for t in ("VPS ON - injecting as GPS2", "GPS1 ON - VPS data blocked"):
+    check(f"{t!r} says both halves",
+          ("VPS" in t and "GPS" in t), t)
+
 print("\nthe heartbeat carries which source is live")
 lk = FakeLink()
 n = Notifier(lk, period_s=0.0)
