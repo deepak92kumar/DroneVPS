@@ -41,6 +41,18 @@ SERVICES = ("drone-router", "drone-vps", "drone-rc-switch")
 # will declare the aircraft landed. 1.5 is that threshold with margin for the
 # sensor's own drift during one flight.
 LIDAR_MAX_M = 1.5
+# A LIVE sensor is noisy; a dead one is not. Measured 20 Oct, standing still on
+# the ground: sd 0.121 m with RNGFND1_RMETRIC 1, and sd 0.027 m after it was set
+# to 0. Both are far above zero. An unpowered analog pin reads a dead-flat
+# 0.000 m with sd 0.000, which every threshold below 2 m waves through - and on
+# 21 Oct, with the battery off the aircraft, a check written exactly that way
+# printed "OK, it would auto-disarm" about a rangefinder that was not there.
+#
+# The ADC's own quantisation is the floor to compare against: RNGFND1_SCALING
+# 72.61 makes one millivolt 7.3 cm, so a live sensor sitting on a single code
+# could read a constant - but it would read that code's VALUE, not zero. So
+# both tests are needed: it has to move, and it has to be above the floor.
+LIDAR_MIN_SD_M = 0.002
 # Expected after 20 Oct. A power cycle keeps these (they are in flash), but a
 # parameter reset or someone else's session does not.
 EXPECT = {
@@ -215,9 +227,24 @@ def flight_controller(port):
     rng = g.get("rng") or []
     if rng:
         mean = sum(rng) / len(rng)
-        if mean < LIDAR_MAX_M:
+        var = sum((x - mean) ** 2 for x in rng) / max(len(rng), 1)
+        sd = var ** 0.5
+        rmin_now = fc.get("RNGFND1_MIN") or 0.1
+        # IS IT THERE AT ALL? Before anything is said about the zero. A reading
+        # that never moves and sits at or below the sensor's own minimum is an
+        # absent sensor, and calling that "ready to auto-disarm" is worse than
+        # saying nothing - it is the one check standing between the pilot and
+        # pulling the battery on the ground again.
+        alive = sd > LIDAR_MIN_SD_M and mean > max(rmin_now, 0.05)
+        if not alive:
+            bad("lidar is ALIVE - nothing can be said about the zero",
+                f"{mean:.3f} m with sd {sd:.4f} over {len(rng)} samples. "
+                f"A live sensor on the ground measured sd 0.027-0.121 m. "
+                f"This reads flat at or below RNGFND1_MIN {rmin_now:.2f} - "
+                f"check power and wiring, not the offset")
+        elif mean < LIDAR_MAX_M:
             ok("lidar zero - the aircraft will be able to auto-disarm",
-               f"{mean:.2f} m on the ground (needs < 2.00)")
+               f"{mean:.2f} m on the ground, sd {sd:.3f} (needs < 2.00)")
         else:
             bad("lidar zero - IT WILL NOT AUTO-DISARM",
                 f"{mean:.2f} m on the ground. Run: python3 "
@@ -226,7 +253,11 @@ def flight_controller(port):
         # offset that is wrong by the time the aircraft takes off: measured
         # 20 Oct, the reading walked 0.83 -> 0.66 m in about fifteen seconds
         # just after a power cycle.
-        if len(rng) >= 12:
+        # Both of the checks below describe the SIGNAL, so neither says
+        # anything about a sensor that is not sending one. Left ungated, the
+        # drift test prints a green "settled, not still warming up - moved
+        # +0.000 m" over a dead rangefinder, which is true and useless.
+        if alive and len(rng) >= 12:
             k = len(rng) // 3
             drift = (sum(rng[-k:]) / k) - (sum(rng[:k]) / k)
             check(abs(drift) < 0.10, "lidar is settled, not still warming up",
@@ -237,12 +268,12 @@ def flight_controller(port):
         # Below RNGFND1_MIN the FC calls it out of range and stops using it for
         # height. That still lets the land detector pass, but EK3 loses its
         # height source near the ground.
-        rmin = fc.get("RNGFND1_MIN") or 0.1
-        check(mean > rmin + 0.1, "lidar is inside its own usable range",
-              f"{mean:.2f} m against RNGFND1_MIN {rmin:.2f}" +
-              ("" if mean > rmin + 0.1 else
-               " - too low; EK3 will drop it for height near the ground"),
-              soft=True)
+        if alive:
+            check(mean > rmin_now + 0.1, "lidar is inside its own usable range",
+                  f"{mean:.2f} m against RNGFND1_MIN {rmin_now:.2f}" +
+                  ("" if mean > rmin_now + 0.1 else
+                   " - too low; EK3 will drop it for height near the ground"),
+                  soft=True)
     else:
         bad("lidar is reporting",
             "no RANGEFINDER or DISTANCE_SENSOR messages in the window")
