@@ -200,6 +200,13 @@ def find_csv(folder: str) -> str:
     # A previous run of this script leaves its own results CSV in the folder.
     # It is not the estimate log and must never be mistaken for it.
     here = [n for n in here if not n.startswith("match")]
+    # Nor is the camera IMU log, which live_node started writing beside the
+    # estimate CSV on 20 Oct. Adding a second CSV to the run folder broke this
+    # function the first time it was asked to read a folder recorded after
+    # that change - "2 CSVs in ... say which with --csv" on a folder that has
+    # exactly one estimate log in it. Anything that is not the estimate log
+    # has to be excluded here, by name, as it is added.
+    here = [n for n in here if not n.endswith("_imu.csv")]
     if not here:
         raise RuntimeError(f"no estimate CSV in {folder}")
     if len(here) > 1:
