@@ -128,6 +128,7 @@ altitude. Everything about flying on the VPS waits on that answer.
 | ☐ | **The descent below 60 m** | no absolute reference exists down there; the step cap is 0.5 m per fix, so 5 s buys 2.5 m against a 29 m error |
 | ☐ | **Heading / yaw** — 55%, *"compass calibration is still the pilot's next step"* | measured 20 Oct: field 509/518 mG, offsets under 50, the two compasses agree to 1.8°, and the EKF's yaw resets moved yaw by −1.2° and −0.02°. **So the compass is healthy and this may now be closed** — but it was listed open |
 | ☐ | **Map coverage** — 64% | `bhh.tif` is 3.31 × 2.14 km. A 3–5 km mission leaves it |
+| ☐ | **The matcher's position output at 61–72 m is not usable** | measured offline 20–21 Oct on 299 saved frames, prior at the true GPS. Handed a window 600 m from where the aircraft was, it still reports a position 16 m from THAT window's centre — so the 9.5 m error against GPS was measuring the window, not a match. `min_score` 0.25 is unreachable (max 0.140 on any frame) and is doing the job it was added for. Yield carries signal (46/99 fits on the true place against 6–14/99 off it); position does not. **Nothing here speaks to 80–120 m — there are no saved frames above 72 m.** See FROM_THE_OLD_REPORTS.md §9 |
 | ☐ | **Distance** — 22%, the row that *is* the mission | 383 m is the whole evidence base. 500 m, then 1 km |
 
 ## 5 — Mechanical, measured and still open
@@ -166,7 +167,7 @@ altitude. Everything about flying on the VPS waits on that answer.
 | ☐ | **Decide `ARMING_SKIPCHK = 6156`** | compass, GPS lock, hardware safety switch and GPS configuration pre-arm checks are all skipped |
 | ☐ | **Decide `FS_EKF_THRESH = 1.2`** | ArduPilot documents 0.6 strict, 0.8 default, 1.0 relaxed. 1.2 is looser than the loosest |
 | ☐ | **Decide the lidar's interface** | 5 Oct: *"The cause is the wiring: RNGFND1_TYPE=1 on analog pin 4, when the TF03 is a serial device."* By 9 Oct it was refitted and 94% usable below 58 m. The current aircraft is back on analog, and 1–2 m of zero drift per power cycle is what analog at 180 m full scale gives |
-| ☐ | **CLAHE in the matcher?** | took frames clearing the gate from 1 of 12 to 4 of 12 on real imagery. Cheap. But 12 Oct found nine tuning configurations all within 12.21–14.44 m with the baseline best, so expect little |
+| ☑ | ~~CLAHE in the matcher?~~ **Already there** | `clipLimit` 3.0, `tileGridSize` 8×8, on both the query and the map window, `map_match_xfeat.py:242`. Not an open question |
 
 ## 8 — Known and deliberately not acted on
 

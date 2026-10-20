@@ -185,3 +185,107 @@ together. Flying the VPS at 20–70 m is outside what any of this was built for.
 | matcher's own error | 11–12 m | unchanged all week |
 | automated tests | 222 passing | 13 Oct |
 | airframe | 3.9 kg **quad** | the hexa is new since |
+
+---
+
+## 9. The matcher at 70 m, measured offline on 20-21 Oct — a negative result
+
+The 20 Oct flights took **0 map fixes in 70 frames**, and section 1 above gives
+the reports' explanation: the matcher's band is 80–120 m and the flights were
+at 70–72 m. That explanation was never tested on this aircraft's own imagery.
+`live_node --save-frames` now makes it testable without flying, and
+`match_flight.py` is the consumer. Three things came out of doing it, and the
+last one reverses the first two.
+
+### The prior was not the limit
+
+Every matched row in a baseline run came back **150–160 m** from the recorded
+GPS. That is not a matcher error: vps_00013, 00016 and 00019 all flew on a
+stale `SCR_USER1/2`, every estimate was ~153 m out, and the search window is
+`clip(0.60 × altitude, 40, radius)` — **42 m at 70 m**. The true place was
+outside the search by a factor of three.
+
+`match_flight --gps-prior` was added to separate the two questions. Searched
+around the **true recorded GPS**, over all 299 readable frames above the 60 m
+floor from vps_00016 and vps_00019: still **0 passed the gate**. So the prior
+was not what was stopping it.
+
+### `min_score` is what closes the gate, and no inlier setting reaches it
+
+With the gates opened and the position read off anyway, 147 of 299 frames
+produce a translation at all:
+
+| | p50 | p95 | max | gate |
+|---|---|---|---|---|
+| inliers | 6.0 | 11.0 | 14 | 12 |
+| **score** (inlier ratio) | **0.061** | **0.121** | **0.140** | **0.25** |
+| margin | 0.469 | 0.750 | 0.992 | 0.20 |
+
+The score never comes within a factor of two of its gate on any frame, so no
+setting of `min_inliers` can open it. XFeat returns about 98 matches and six of
+them agree on a translation.
+
+And none of the three predicts the error: **inliers r = −0.038, score r =
++0.190, margin r = −0.022**. That reproduces the 7 Oct finding — *"Inliers vs
+fix error: correlation −0.073 — an inlier gate is closed as a route"* — and
+extends it to the other two.
+
+Measured against the recorded GPS the error looked **good**: p50 9.5 m, p95
+15.8 m, max 27.0 m, well inside `fix_sigma_m` = 20 and nothing like the 68.36 m
+the 12 Oct report measured at 60–70 m. At that point the conclusion looked like
+"the matcher works at 70 m and only `min_score` stands in the way."
+
+### The control that killed it
+
+The window is centred on the GPS the error is measured against, with a 42 m
+radius. A match drawn uniformly from a disc that size sits 2R/3 ≈ 28 m from its
+centre, so 9.5 m is better than chance — but a weak translation fit collapses
+towards the middle of whatever window it is given, and the middle is what the
+score is being computed against.
+
+So the identical frames were run against windows centred on places the aircraft
+was not:
+
+| window offset | frames that fitted | from the WINDOW CENTRE (p50) | from the TRUE GPS (p50) |
+|---|---|---|---|
+| 0 m | 46 of 99 | 9.5 m | 9.5 m |
+| 60 m | 14 of 99 | 13.7 m | 59.4 m |
+| 200 m | 6 of 99 | 16.3 m | 183.8 m |
+| 600 m | 8 of 99 | **16.1 m** | 609.0 m |
+
+**Handed a patch of sheet 600 m from where the aircraft was, the matcher still
+reports a position 16 m from that patch's centre.** The 9.5 m was measuring the
+window, not a match. At 61–72 m the reported position carries almost no
+information about where the aircraft is, and lowering `min_score` would feed
+the fuser its own prior back as an independent measurement — which is worse
+than taking no fix, because it would make the filter confident in its own
+drift. `min_score = 0.25` is doing exactly the job it was added for.
+
+### What the test does say
+
+The one real signal is **yield, not position**: 46 of 99 frames fit when the
+window is on the true place against 6–14 of 99 when it is not, a 4–8× ratio. So
+whether a fit happens carries information even though where it points does not.
+That is not a position fix and is not usable as one.
+
+Two limits on all of the above. The truth is GPS1, which §6 records as having
+wandered 2.4–27.4 m on the ground, and the surveyed point asked for on three
+separate days still has not been taken. And **there are no saved frames above
+72 m**, so none of this says anything about the 80–120 m band the reports
+measured. The next flight at 100–120 m remains the test that matters; this
+exercise has only closed off the hope that the 70 m data could substitute for
+it.
+
+### Also settled while looking
+
+**CLAHE is already in the flying matcher** — `clipLimit` 3.0, `tileGridSize`
+8×8, applied to both the query and the map window, `map_match_xfeat.py:242`.
+TODO §7 lists it as an open question. It is not one.
+
+**Upsampling the map instead of downsampling the query makes it far worse.**
+`north_up_query` rescales the camera frame to the map's GSD — at 70 m that is
+`(70/791.72)/0.509 = 0.169`, so a 1150×800 frame becomes 128×128 and XFeat sees
+about 3% of the pixels the camera produced. Leaving the frame at its own
+resolution and interpolating the map window up to meet it gives inliers p50
+**0**, max 1, at ten times the cost. The sheet has no real detail at the
+camera's resolution, so there is nothing there to match.
