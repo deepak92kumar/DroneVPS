@@ -46,10 +46,26 @@ it is injecting: it says what the node can SEE, not what it has sent. A GPS2
 fix is still accepted as proof on its own, for when the aircraft is already on
 the VPS.
 
-And it refuses to do anything while armed unless --allow-armed is passed. The
-standing rule on this aircraft is that parameters change on the ground; flying
-switches break that rule on purpose, so it has to be asked for explicitly, and
-only after the ground and props-off tests have passed.
+It DOES switch while armed, in both directions, and that is deliberate. An
+armed refusal used to sit in the loop and it was half of what stranded the
+aircraft on 20 Oct: the node stopped injecting on arm, and then this refused
+to let the pilot switch back to the receiver, so there was no way out from the
+transmitter. The switch is the pilot's control and it answers while flying.
+--allow-armed is still accepted so old command lines do not break, but the
+loop no longer reads it.
+
+Note the asymmetry, which is on purpose: moving ONTO the VPS needs proof that
+the VPS is healthy; moving BACK to the real receiver needs nothing at all and
+is never refused.
+
+And note what this switch is NOT. It changes which source the flight
+controller navigates on; it does not take the aircraft away from the position
+controller. If an estimate is driving the aircraft somewhere it should not go,
+the fast way out is the FLIGHT MODE switch - FLTMODE_CH is 5, and positions 2
+and 4 are ALT_HOLD, one click from every LOITER position. That runs inside the
+flight controller's own loop with no companion, no router and no Jetson in the
+path, and it removes the position controller entirely rather than changing
+what feeds it.
 """
 from __future__ import annotations
 import argparse, os, sys, time
