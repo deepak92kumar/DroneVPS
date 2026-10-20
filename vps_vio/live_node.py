@@ -367,6 +367,19 @@ class LiveSource:
                     alt_amsl=s.get("alt_amsl"), rngfnd=s.get("rngfnd"),
                     gps1_alt=s.get("gps1_alt"), gps1_fix=s.get("fix"),
                     gps1_hacc=s.get("gps1_hacc"),
+                    # WHAT THE EKF THINKS OF ITS OWN SOLUTION. The recorder has
+                    # read these since it was written and nothing ever logged
+                    # them, so FS_EKF_THRESH has been argued about rather than
+                    # measured. They are the normalised innovation test ratios
+                    # - how far the EKF's prediction and each sensor disagree -
+                    # and FS_EKF_THRESH is the threshold on the worst of them.
+                    # ArduPilot documents 0.6 strict, 0.8 default, 1.0 relaxed;
+                    # this aircraft flies 1.2, looser than the loosest. One
+                    # flight on the VPS with these logged settles it.
+                    ekf_vel_var=s.get("ekf_vel_var"),
+                    ekf_pos_h_var=s.get("ekf_pos_h_var"),
+                    ekf_comp_var=s.get("ekf_comp_var"),
+                    ekf_flags=s.get("ekf_flags"),
                     # The RAW receiver, separate from `gps` above. `gps` is
                     # GLOBAL_POSITION_INT - the EKF's fused position - which on
                     # a VPS flight is partly our own injection coming back. This
@@ -708,7 +721,12 @@ CSV_COLUMNS = ["t", "north_m", "east_m", "lon", "lat", "sigma_m",
     # Position steps refused as physically impossible, cumulative. A flight
     # where this never moves saw no glitches; one where it climbs steadily is
     # the pilot flying faster than STEP_MAX_SPEED_MPS, not a camera fault.
-    "n_step_rej"]
+    "n_step_rej",
+    # The EKF's own innovation test ratios, and its status bitmask.
+    # FS_EKF_THRESH trips on the WORST of the first three; it is 1.2 on this
+    # aircraft against a documented 0.8 default, and nothing has ever measured
+    # what they actually reach while flying on the VPS.
+    "ekf_vel_var", "ekf_pos_h_var", "ekf_comp_var", "ekf_flags"]
 
 
 IMU_LOG_COLUMNS = ["t_dev", "src", "x", "y", "z"]
@@ -767,7 +785,11 @@ def csv_row(est, f, v, gN, gE, err):
             "" if est.get("g1_north") is None else f"{est['g1_north']:.2f}",
             "" if est.get("g1_east") is None else f"{est['g1_east']:.2f}",
             "" if est.get("g1_err") is None else f"{est['g1_err']:.2f}",
-            est.get("n_step_rej", 0)]
+            est.get("n_step_rej", 0),
+            "" if f.get("ekf_vel_var") is None else f"{f['ekf_vel_var']:.4f}",
+            "" if f.get("ekf_pos_h_var") is None else f"{f['ekf_pos_h_var']:.4f}",
+            "" if f.get("ekf_comp_var") is None else f"{f['ekf_comp_var']:.4f}",
+            "" if f.get("ekf_flags") is None else int(f["ekf_flags"])]
 
 
 # --------------------------------------------------------------------------- #

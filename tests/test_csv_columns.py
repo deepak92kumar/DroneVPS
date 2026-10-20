@@ -77,11 +77,17 @@ check("widths match", len(row) == len(CSV_COLUMNS),
 # impossible, cumulative. The position is ACCUMULATED, so one bad flow frame is
 # a permanent offset rather than one bad reading - vps_00016 carries a
 # single-sample 20.55 m step to the end of the flight.
-check("and there are the columns we expect", len(CSV_COLUMNS) == 45,
+#
+# 49 once the EKF's own innovation test ratios joined them. The recorder had
+# read them since it was written and nothing logged them, so FS_EKF_THRESH -
+# 1.2 on this aircraft against ArduPilot's documented 0.8 default - had been
+# argued about rather than measured.
+check("and there are the columns we expect", len(CSV_COLUMNS) == 49,
       str(len(CSV_COLUMNS)))
-check("the raw receiver's three are together",
-      CSV_COLUMNS[-4:-1] == ["gps1_north_m", "gps1_east_m", "gps1_err_m"],
-      str(CSV_COLUMNS[-4:]))
+i = CSV_COLUMNS.index("gps1_north_m")
+check("the raw receiver's three are together, wherever they sit",
+      CSV_COLUMNS[i:i + 3] == ["gps1_north_m", "gps1_east_m", "gps1_err_m"],
+      str(CSV_COLUMNS[i:i + 3]))
 
 print("\nand with every optional value missing, which is the usual case")
 e = est(fc_d_roll=None, fc_d_pitch=None, gyro_d_roll=None, gyro_d_pitch=None,
