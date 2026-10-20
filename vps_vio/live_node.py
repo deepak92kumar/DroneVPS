@@ -445,6 +445,9 @@ class GpsInputSender:
 
     # GPS_INPUT_IGNORE_FLAGS
     IGN_VEL_HORIZ, IGN_VEL_VERT, IGN_SPEED_ACC = 8, 16, 32
+    # m/s of velocity error per metre of altitude, fitted to three flights.
+    # See velocity_fields for the table it comes from.
+    VEL_ACC_PER_M = 0.0867
 
     def __init__(self, port="/dev/ttyTHS1", baud=921600, gps_id: int = 1,
                  sats: int = 12, send_velocity: bool = True):
@@ -504,12 +507,33 @@ class GpsInputSender:
         if vel.deadbanded:
             return (ign | self.IGN_VEL_HORIZ | self.IGN_SPEED_ACC, 0.0, 0.0, 0.0,
                     f"deadbanded ({vel.speed_mps:.2f} < {vel.deadband_mps:.2f})")
-        # Speed accuracy the EKF can weigh. Floored at the measured noise -
-        # flow velocity error was 0.236 m/s at 0-30 m and phantom speed at a
-        # hover ran 0.36-0.43 m/s - and widened with how stale the flow is,
-        # because between flow updates this is dead reckoning on the camera
-        # accelerometer. UNVERIFIED scaling; it wants a sweep against a flight.
-        acc = max(0.4, 0.4 + 2.0 * vel.age_s)
+        # Speed accuracy the EKF can weigh, and it MUST grow with height.
+        #
+        # This used to be a flat 0.4 m/s widened only by staleness, and that
+        # told the flight controller the velocity was good to 0.4 m/s while
+        # the aircraft hovered at 70 m and the VPS reported up to 24.6 m/s.
+        # The EKF believed it, because we said it was accurate.
+        #
+        # Measured across the three flights of 20 Oct, in hovers where the
+        # true speed is about zero so the reported speed IS the error:
+        #
+        #     0-10 m   sigma 0.126 m/s      0.078 per metre of altitude
+        #    10-20 m         0.811          0.049
+        #    20-30 m         1.826          0.077
+        #    30-45 m         4.569          0.118
+        #    45-60 m         4.131          0.078
+        #    60-80 m         5.713          0.082
+        #
+        # A straight line through those is sigma = 0.0867 x altitude, and the
+        # per-metre figure barely moves across the whole range - which is what
+        # you expect, because the flow's error is roughly constant in PIXELS
+        # and metres per pixel is altitude / focal length.
+        #
+        # So the honest number is altitude-scaled. At 20 m it says 1.7 m/s, at
+        # 70 m it says 6.1 - and the EKF then weighs it accordingly instead of
+        # being lied to. The staleness term stays: between flow updates this is
+        # dead reckoning on the camera accelerometer.
+        acc = max(0.4, self.VEL_ACC_PER_M * max(0.0, vel.altitude_m)) + 2.0 * vel.age_s
         return ign, float(vel.sent_vn), float(vel.sent_ve), float(acc), "sent"
 
     def send(self, lon, lat, alt_amsl_m, sigma_m, yaw_deg=None, vel=None):

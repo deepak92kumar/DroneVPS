@@ -72,6 +72,12 @@ class VelocityState:
     deadband_mps: float = 0.0    # the threshold in force at this height
     speed_mps: float = 0.0       # |v| of the estimate, before the deadband
     age_s: float = 0.0           # since the last flow update
+    altitude_m: float = 0.0      # what the deadband and the sent accuracy
+                                 # were computed at. Carried because the flow
+                                 # -> metres scale IS altitude, so anything
+                                 # downstream that weighs this estimate needs
+                                 # to know the height it was made at.
+    rejected_jump: int = 0       # flow samples refused as physically impossible
     flow_updates: int = 0
     accel_steps: int = 0
     bias_n: float = 0.0          # accel bias estimate, north
@@ -95,6 +101,8 @@ class VelocityBridge:
     def __init__(self, *, tau_s: float = 0.35, flow_timeout_s: float = 0.6,
                  deadband_base_mps: float = 0.35,
                  deadband_per_m: float = 0.005,
+                 max_accel_mps2: float = 8.0,
+                 jump_escape_n: int = 5,
                  bias_tau_s: float = 20.0,
                  bias_adapt_below_mps: float = 0.25,
                  bias_adapt_after_s: float = 2.0,
@@ -103,6 +111,32 @@ class VelocityBridge:
         self.flow_timeout_s = float(flow_timeout_s)
         self.deadband_base_mps = float(deadband_base_mps)
         self.deadband_per_m = float(deadband_per_m)
+        # The aircraft cannot change velocity faster than it can accelerate,
+        # and that is a HARD physical bound, not a tuning choice. ATC_ANGLE_MAX
+        # is 30 deg, so 9.81*tan(30) = 5.66 m/s2; 8.0 leaves room for a gust
+        # and for the estimate's own lag without admitting anything real.
+        #
+        # Why this gate had to exist, measured over three flights on 20 Oct:
+        # the flow's error in PIXELS is roughly constant with height (p99 about
+        # 6-7 px at every altitude band), but velocity is pixels x altitude /
+        # focal - so the same tracking artefact reads 0.6 m/s at 10 m and
+        # 19.4 m/s at 70 m. Frame-to-frame change in the reported speed came
+        # out at p99 1.696 and max 22.74 m/s against a physical ceiling of
+        # 0.189 m/s per frame. Nine times, and a hundred and twenty times.
+        #
+        # The flow was NOT stale when this happened - age averaged 0.014 s
+        # across the 668 spike samples - and the accel bias was tiny and
+        # correctly frozen. So this is not integration drift; it is the flow
+        # itself, amplified by height.
+        self.max_accel_mps2 = float(max_accel_mps2)
+        # An estimate that has gone wrong would otherwise reject every good
+        # sample for ever. After this many refusals in a row, believe the
+        # measurement instead of the state.
+        self.jump_escape_n = int(jump_escape_n)
+        self.rejected_jump = 0
+        self._jump_run = 0
+        self._vn_flow = self._ve_flow = None
+        self._last_alt_m = 0.0
         self.bias_tau_s = float(bias_tau_s)
         self.bias_adapt_below_mps = float(bias_adapt_below_mps)
         self.bias_adapt_after_s = float(bias_adapt_after_s)
@@ -162,6 +196,38 @@ class VelocityBridge:
             self._started = True
         else:
             dt = 0.0 if self._t_flow is None else max(0.0, t - self._t_flow)
+            # The physical gate, against the PREVIOUS FLOW SAMPLE - not
+            # against the estimate. Comparing with the estimate was the first
+            # attempt and it was wrong: the complementary filter lags by
+            # roughly a*tau, so a genuine 5 m/s2 acceleration puts 1.75 m/s
+            # between flow and estimate, against a per-frame allowance of
+            # 0.27. It refused real acceleration. Two consecutive flow
+            # samples, though, are two measurements of the same velocity, and
+            # the airframe's acceleration really does bound the difference.
+            #
+            # The allowance is that physical bound PLUS three sigma of the
+            # flow's own noise, because a gate tighter than the measurement
+            # noise rejects good data: at 5 m the noise alone is 0.43 m/s
+            # per sample against a physical 0.27. Noise grows with height
+            # (sigma = 0.0867 x altitude, measured), so the allowance does
+            # too - which means at 70 m this gate is deliberately loose and
+            # the protection there comes from the speed accuracy we report,
+            # not from here. This catches the gross artefact: 22.74 m/s in
+            # one frame at low level, which is 120x the physical ceiling.
+            if dt > 0.0 and self._vn_flow is not None:
+                jump = math.hypot(vn - self._vn_flow, ve - self._ve_flow)
+                allowed = (self.max_accel_mps2 * dt
+                           + 3.0 * self.ACC_PER_M * max(0.0, self._last_alt_m))
+                if jump > allowed and self._jump_run < self.jump_escape_n:
+                    self._jump_run += 1
+                    self.rejected_jump += 1
+                    # Deliberately do NOT advance _t_flow: the estimate is now
+                    # running on the accelerometer alone, and the staleness
+                    # clock has to keep ticking so that a run of refusals ends
+                    # in "invalid, do not send" rather than in a stale number
+                    # being presented as fresh.
+                    return False
+                self._jump_run = 0
             # Pull toward flow with a time constant. alpha -> 1 as dt grows,
             # so a long gap snaps onto the new measurement rather than
             # creeping; a short gap trusts the integrated state more.
@@ -169,6 +235,7 @@ class VelocityBridge:
             self.vn += alpha * (vn - self.vn)
             self.ve += alpha * (ve - self.ve)
 
+        self._vn_flow, self._ve_flow = vn, ve
         self._adapt_bias(t, speed)
         self._t_flow = t
         self.flow_updates += 1
@@ -230,8 +297,16 @@ class VelocityBridge:
         """
         return self.deadband_base_mps + self.deadband_per_m * max(0.0, altitude_m)
 
+    #: m/s of flow velocity noise per metre of altitude, fitted to the three
+    #: flights of 20 Oct. Used here to keep the jump gate from fighting the
+    #: measurement's own scatter; live_node uses the same number to tell the
+    #: flight controller how far to trust the velocity.
+    ACC_PER_M = 0.0867
+
     def value(self, t: float, altitude_m: float) -> VelocityState:
+        self._last_alt_m = float(altitude_m)
         st = VelocityState(
+            altitude_m=float(altitude_m), rejected_jump=self.rejected_jump,
             vn=self.vn, ve=self.ve,
             flow_updates=self.flow_updates, accel_steps=self.accel_steps,
             bias_n=self.bias_n, bias_e=self.bias_e,
