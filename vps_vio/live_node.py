@@ -875,6 +875,30 @@ def accel_to_ne(ax: float, ay: float, yaw_deg: float):
     return float(fwd * c - right * sn), float(fwd * sn + right * c)
 
 
+def should_handover(src_val, src_was, armed_was, armed_now,
+                   have_origin) -> bool:
+    """Is this the frame on which the aircraft is handed over to the VPS?
+
+    Pulled out of the loop so the state machine can be exercised rather than
+    read. Every clause earns its place:
+
+      src_val == 1              the switch is now on the VPS
+      src_was != 1              and it was not, so this is an EDGE
+      src_was is not None       the previous source is KNOWN. On the first
+                                frame it is not, and a boot with the switch
+                                already on the VPS must not look like a
+                                handover - that is a take-off, case one.
+      armed_was is True         armed on the PREVIOUS frame. This is what "in
+                                flight" means, and it is why flipping to the
+                                VPS and arming in the same frame is case one:
+                                the arm edge's SCR_USER1/2 has to stand.
+      armed_now is True         still armed.
+      have_origin               there is an origin to replace.
+    """
+    return bool(src_val == 1 and src_was != 1 and src_was is not None
+                and armed_was is True and armed_now is True and have_origin)
+
+
 def choose_origin(cli_origin, scr_origin, gps_primary, gps_fix):
     """Where the origin may come from. Returns ((lon, lat), why) or (None, why).
 
@@ -1647,6 +1671,9 @@ def main():
     # The armed flag as of the last frame, so the disarmed -> armed EDGE can be
     # seen. None until the origin is first taken.
     _armed_was = [None]
+    # GPS_PRIMARY as of the last frame, so the moment the pilot hands the
+    # aircraft over to the VPS in flight can be seen. See the handover block.
+    _src_was = [None]
     errs, t_start, n = [], time.perf_counter(), 0
     last_sync = 0.0
     try:
@@ -1797,6 +1824,76 @@ def main():
                     notifier.event("reanchor", "none",
                                    "VPS ORIGIN NOT RE-TAKEN AT ARM",
                                    Notifier.SEV_WARN)
+            # THE HANDOVER, IN FLIGHT. The pilot's instruction, 21 Oct, and the
+            # reasoning is his own: when the switch goes the other way, from the
+            # VPS back to GPS, the flight controller does not drag the aircraft
+            # across whatever error had built up - "man lo error 50 mtr hai tho
+            # gps drone ko 50 mtr lekar correct nahi karta, wo direct apne
+            # current position inject kar deta hai aur wahi stable ho jata hai".
+            # Handing over TO the VPS has to behave the same way.
+            #
+            # It did not. The origin was only ever re-taken at the ARM edge, so
+            # a flight that armed on GPS, flew, and then switched to the VPS at
+            # altitude started sending `takeoff origin + every metre of VIO
+            # drift accumulated during the whole GPS phase`. Measured on the
+            # three flights with real travel below 60 m: 5.73 m and 5.24 m of
+            # drift on two of them, and a single-sample 20.55 m jump on
+            # vps_00016 at 41 m altitude. The EKF holds the GPS position at that
+            # instant, so it sees a step of exactly that size.
+            #
+            # So on the transition INTO the VPS, while armed, the origin is
+            # re-taken from where the flight controller currently believes it is
+            # and the VIO's displacement goes back to zero. The first position
+            # the VPS then sends equals what the EKF already holds, which is a
+            # handover with no jump and no drift carried across it. Nothing is
+            # corrected, nothing is flown - exactly as the pilot described.
+            #
+            # DISARMED is deliberately excluded. A switch flipped on the ground
+            # is case one - take off on the VPS - and there the origin must come
+            # from SCR_USER1/2, which the arm edge above already does.
+            #
+            # f["gps"] is GLOBAL_POSITION_INT, which is the EKF's own fused
+            # position rather than the raw receiver. That is the right source
+            # HERE and not a compromise: the whole point is to start from what
+            # the flight controller believes, because that is what makes the
+            # step zero. While the aircraft is on GPS that belief is GPS-driven.
+            # It is read once, at this edge, so nothing loops.
+            src_val = watcher.value
+            # _armed_was[0] is True, not armed_now: the aircraft has to have
+            # ALREADY been armed on the previous frame. That is what "in flight"
+            # means here, and it also stops this colliding with the arm edge
+            # above if the pilot flips to the VPS and arms in the same frame -
+            # that is case one, and the arm edge's SCR_USER1/2 must stand.
+            if should_handover(src_val, _src_was[0], _armed_was[0],
+                               armed_now, node.origin is not None):
+                if f["gps"]:
+                    moved = float(np.hypot(
+                        (f["gps"][1] - node.origin[1]) * M_PER_DEG_LAT,
+                        (f["gps"][0] - node.origin[0]) * node.mlon))
+                    carried = float(np.hypot(*node.fuser.pos))
+                    node.set_origin(*f["gps"], sigma_m=f.get("gps1_hacc"))
+                    node.fuser.reset_displacement()
+                    print(f"HANDOVER to VPS in flight: origin re-taken from the "
+                          f"FC's own position {f['gps'][1]:.6f}, {f['gps'][0]:.6f} "
+                          f"(origin moved {moved:.1f} m, {carried:.1f} m of VIO "
+                          f"displacement discarded, declaring "
+                          f"{node.absolute_sigma_m:.1f} m)", flush=True)
+                    notifier.event("handover", round(carried),
+                                   f"VPS HANDOVER - dropped {carried:.0f}m drift"[:50],
+                                   Notifier.SEV_INFO)
+                else:
+                    # No fix to hand over from - which is the jammed case this
+                    # aircraft exists for. Keep the origin and the displacement
+                    # we have: they carry whatever drift has built up, and that
+                    # is far better than falling back to SCR_USER1/2, which on
+                    # three flights sat 147-157 m from the aircraft.
+                    notifier.event("handover", "noloc",
+                                   "VPS HANDOVER - NO FIX, drift carried",
+                                   Notifier.SEV_WARN)
+                    print("HANDOVER to VPS in flight: the FC had no position to "
+                          "hand over, so the existing origin and displacement "
+                          "are kept (drift is carried across)", flush=True)
+            _src_was[0] = src_val
             _armed_was[0] = armed_now
 
             gN = gE = err = None

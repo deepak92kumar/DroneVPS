@@ -117,6 +117,7 @@ altitude. Everything about flying on the VPS waits on that answer.
 
 | | what | why |
 |---|---|---|
+| ☑ | **The handover re-anchors now** (21 Oct, not flown) | switching to the VPS in flight re-takes the origin from where the FC says it is and drops the accumulated VIO displacement, so the first VPS position equals what the EKF already holds. Before this it sent `take-off origin + every metre of drift from the GPS phase` — measured 5.24 and 5.73 m on two flights and a 20.55 m single-sample jump on a third. The pilot's rule: GPS→VPS must behave the way VPS→GPS already does, which injects its current position rather than flying off the error |
 | ☐ | GPS take-off → climb to 110 m → VPS for 60 s → **back to GPS before the descent** | 13 Oct: error went **4.13 → 26.0 m in twelve seconds** of a 6 m/s descent below 60 m, and *"it is the one number that has not moved all week"* |
 | ☐ | Mode switch in hand, ALT_HOLD on positions 2 and 4 | it removes the position controller entirely, inside the FC's own loop, with no companion in the path |
 
