@@ -48,9 +48,10 @@ EXPECT = {
     "INS_HNTCH_FREQ": (47.0, "the measured prop fundamental"),
     "INS_HNTCH_REF": (0.331, "the measured hover throttle"),
     "INS_HNTCH_BW": (24.0, "FREQ/2"),
-    "MOT_THST_HOVER": (0.33, "measured"),
-    "ATC_RAT_RLL_I": (0.07, "= ATC_RAT_RLL_P"),
-    "ATC_RAT_PIT_I": (0.09, "= ATC_RAT_PIT_P"),
+    "ATC_RAT_RLL_P": (0.09, "= pitch; hexa-X roll and pitch inertia are equal"),
+    "ATC_RAT_RLL_I": (0.09, "= P"),
+    "ATC_RAT_RLL_D": (0.0030, "the phase lead for the measured 65 deg lag"),
+    "ATC_RAT_PIT_D": (0.0030, "both axes identical"),
     "GPS2_TYPE": (14.0, "MAV - our injection arrives as GPS2"),
     "EK3_SRC1_POSXY": (3.0, "GPS"),
     "DISARM_DELAY": (2.0, "seconds after landing"),
@@ -245,6 +246,15 @@ def flight_controller(port):
     else:
         bad("lidar is reporting",
             "no RANGEFINDER or DISTANCE_SENSOR messages in the window")
+
+    # MOT_HOVER_LEARN=2 means the FC updates MOT_THST_HOVER itself after every
+    # flight, so an exact expectation here would go stale on its own and cry
+    # wolf. Check the band it should be in instead.
+    hov = fc.get("MOT_THST_HOVER")
+    if hov is not None:
+        check(0.25 <= hov <= 0.45, "MOT_THST_HOVER in range",
+              f"{hov:.4f} (it learns itself; 0.25-0.45 is sane for this "
+              f"aircraft, measured 0.331)", soft=True)
 
     # Parameters survive a power cycle, but check rather than assume.
     for name, (want, why) in EXPECT.items():
