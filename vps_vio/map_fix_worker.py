@@ -34,7 +34,37 @@ import numpy as np
 # pass everything or nothing.
 _GATES = {
     "ncc":   dict(min_score=0.05, min_margin=0.01),   # swept: 50 frames, +-150 m
-    "xfeat": dict(min_score=0.25, min_margin=0.20),   # UNVERIFIED, needs the same sweep
+    # 0.10, NOT 0.25, and this is now the swept value rather than the guess.
+    #
+    # 12 Oct introduced 0.25 for a real reason: the gate "had never been
+    # applied on the XFeat path at all - that branch hard-coded ok=True, so 189
+    # of 189 fixes were accepted including ones 85.66 m out". That is an
+    # argument for HAVING a gate, which this still is, not for 0.25
+    # specifically - and the same report doubted the number in the same
+    # paragraph: "Its rejections track our own error... because the matcher
+    # takes its window from our estimate, so the gate closes exactly when it
+    # needs to be open."
+    #
+    # Swept 21 Oct on the first frames this project has ever had above 72 m -
+    # 601 above the 60 m floor from the 95 m flight, matched against the raw
+    # receiver:
+    #
+    #     90-100 m, 477 matches      score p50 0.077, p95 0.187, MAX 0.248
+    #     at min_score 0.25            0 of 477 pass. Not one, all flight.
+    #     at 0.10, min_inliers 12    176 pass, error p50 8.3  p95 12.9  max 24.8 m
+    #     at 0.00, min_inliers 12    228 pass, error p50 8.3  p95 12.7  max 24.8 m
+    #
+    # 8.3 m is better than the fuser's own fix_sigma_m of 20, and nothing like
+    # 12 Oct's 85.66 m outliers. The score does not predict the error at all
+    # there - r = -0.118 against it, inliers -0.158, margin +0.034 - so the gate
+    # buys accuracy with yield and gets none back, which is why it goes to the
+    # bottom of the swept range rather than to zero: it still catches the
+    # degenerate case that 12 Oct found, and costs 52 of 228 fixes to do it.
+    #
+    # What bounds the damage is downstream and unchanged: map_fuse drops a fix
+    # beyond 3 sigma outright, and max_correction_m caps an accepted one at
+    # 0.5 m however confident it was.
+    "xfeat": dict(min_score=0.10, min_margin=0.20),
 }
 
 

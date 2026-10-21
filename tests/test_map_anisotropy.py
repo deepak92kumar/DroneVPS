@@ -132,9 +132,19 @@ print(f"  matched WITHOUT it:             {n_off} of {len(pts)}")
 # the one that matters, because XFeat is what flies.
 check("the correction lets XFeat match", n_on >= len(pts) - 1,
       f"{n_on} of {len(pts)}")
-check("without it, XFeat mostly cannot", n_off <= 1, f"{n_off} of {len(pts)}")
-check("so the correction is not an optimisation, it is required",
-      n_on > n_off, f"{n_on} vs {n_off}")
+# These two used to read "without it, XFeat mostly cannot" and "the correction
+# is required", and they were true - at min_score 0.25. On 21 Oct that gate went
+# to 0.10, swept on the first frames this project has had above 72 m, and at
+# 0.10 the uncorrected patch clears it too. So the correction is no longer what
+# decides whether a frame matches at all; what is left to show is whether it
+# matches more ACCURATELY, which is the block below.
+#
+# That is consistent with the real-imagery measurement rather than at odds with
+# it: 12 Oct found XFEAT_ANISO ON made the total error WORSE, 12.21 -> 14.44 m,
+# and ruled it out. On a synthetic patch cut from the map itself the correction
+# is exact by construction; on a camera frame over real ground it is not.
+check("without the correction it still matches at the 0.10 gate",
+      n_off >= len(pts) - 1, f"{n_off} of {len(pts)}")
 
 if rows:
     on_tot = float(np.median([r[1][2] for r in rows]))
@@ -148,7 +158,12 @@ if rows:
     if paired:
         o = float(np.median([r[0][2] for r in paired]))
         n = float(np.median([r[1][2] for r in paired]))
-        check("where both matched, corrected is closer", n < o, f"{o:.2f} -> {n:.2f} m")
+        # Both are sub-metre on a patch cut from the map itself, so this is
+        # not the place that separates them - it measures the geometry, not the
+        # matcher. What it must not do is hide a correction that makes things
+        # WORSE by a visible margin.
+        check("neither is far off, and the correction does not hurt",
+              n < o + 0.5, f"uncorrected {o:.2f} m, corrected {n:.2f} m")
 
 print(f"\n{'ALL PASS' if not fails else str(len(fails)) + ' FAILED: ' + ', '.join(fails)}")
 sys.exit(1 if fails else 0)

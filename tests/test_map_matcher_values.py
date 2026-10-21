@@ -15,7 +15,7 @@ HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(HERE, "vps_vio"))
 
 from map_fuse import MapFuser  # noqa: E402
-from map_fix_worker import MapFixWorker  # noqa: E402
+from map_fix_worker import MapFixWorker, _GATES  # noqa: E402
 import map_match_xfeat as MX  # noqa: E402
 import inspect  # noqa: E402
 
@@ -49,10 +49,14 @@ check("radius_m 150", W["radius_m"].default == 150.0)
 print("\nthe three gates")
 check("min_inliers 12", L["min_inliers"].default == 12,
       "UNVERIFIED against real imagery; 5 Oct measured 14-32 above 140 m")
-check("min_score 0.25", L["min_score"].default == 0.25,
-      '12 Oct: the gate "had never been applied on the XFeat path at all - '
-      'that branch hard-coded ok=True, so 189 of 189 fixes were accepted '
-      'including ones 85.66 m out"')
+check("min_score 0.10, the swept value", L["min_score"].default == 0.10,
+      "0.25 came from 12 Oct and was never swept; at 0.25 the 21 Oct flight "
+      "passed 0 of 477 matches at 90-100 m, its score topping out at 0.248")
+check("the worker agrees", _GATES["xfeat"]["min_score"] == 0.10)
+check("but there is still a gate, which is what 12 Oct was about",
+      L["min_score"].default > 0.0,
+      'the XFeat branch once hard-coded ok=True and "189 of 189 fixes were '
+      'accepted including ones 85.66 m out"')
 check("min_margin 0.20", L["min_margin"].default == 0.20,
       "no report sets this; it is a code-level value and unchanged")
 check("tol_px 4.0", L["tol_px"].default == 4.0, "likewise")
