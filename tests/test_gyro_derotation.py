@@ -131,8 +131,15 @@ print("\nthe wiring")
 # in flight, with the sign that verification measured. See
 # tests/test_tilt_validator.py - this file now only pins the coefficients and
 # the fallback order.
-check("the default is auto, not a named source",
-      'derotate: str = "auto"' in src)
+# Back to "fc" after log 00000224. TiltValidator worked as designed - it found
+# the gyro's rotation matched the FC's, roll slope -0.84 corr -0.80, adopted it
+# at t=39.7 s with sign -1 - and the aircraft still ran away: our reported net
+# motion came out 176 degrees from the truth in the first VPS window and the
+# error grew 1.1 -> 22.3 m in ten seconds. Validating that a source measures
+# the same ROTATION does not establish that derotating with it gives the right
+# TRANSLATION, which is the only thing that matters.
+check("the default is the FC path", 'derotate: str = "fc"' in src,
+      "auto is offline-only until it is scored on translation direction")
 check("and there is no way to force an unverified source",
       'choices=("auto", "fc")' in src,
       "forcing the gyro on a static measurement is what ran it away")

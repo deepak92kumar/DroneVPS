@@ -1375,7 +1375,7 @@ class VpsNode:
     def __init__(self, cache: MapCache, focal_px: float, *,
                  fix_period_s: float = 2.0, radius_m: float = 150.0,
                  max_corners: int = 300, K=None, D=None, focal_y_px=None,
-                 derotate: str = "auto"):
+                 derotate: str = "fc"):
         self.cache = cache
         self.focal = float(focal_px)
         # "auto" or "fc". There is deliberately NO option to force a source
@@ -1853,7 +1853,22 @@ def main():
     ap.add_argument("--notify-period", type=float, default=3.0,
                     help="seconds between VPS status lines on the radio "
                          "(warnings are immediate regardless; default 3)")
-    ap.add_argument("--derotate", choices=("auto", "fc"), default="auto",
+    # DEFAULT BACK TO "fc" ON 21 OCT, AFTER LOG 00000224.
+    #
+    # TiltValidator did what it was built to do - it compared the gyro's
+    # rotation against the FC's over 0.4 s windows, found roll slope -0.84 corr
+    # -0.80 and pitch -0.89/-0.79, adopted the gyro at t=39.7 s with sign -1 on
+    # both axes - and the aircraft still ran away. Our reported motion came out
+    # 176 degrees from the truth in the first VPS window and the error grew
+    # 1.1 -> 22.3 m in ten seconds.
+    #
+    # So the premise was wrong, not the implementation. Validating that a
+    # source measures the same ROTATION as the FC does not establish that
+    # derotating with it produces the right TRANSLATION, and translation is the
+    # only thing that matters here. "auto" stays reachable for offline work; it
+    # must be scored on the direction of the resulting velocity before it is
+    # ever the default again.
+    ap.add_argument("--derotate", choices=("auto", "fc"), default="fc",
                     help="where the tilt to remove from the flow comes from. "
                          "'auto' uses the camera gyro, or GAME_ROTATION_VECTOR, "
                          "ONLY once that source has been verified against the "
