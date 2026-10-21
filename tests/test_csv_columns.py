@@ -82,8 +82,18 @@ check("widths match", len(row) == len(CSV_COLUMNS),
 # read them since it was written and nothing logged them, so FS_EKF_THRESH -
 # 1.2 on this aircraft against ArduPilot's documented 0.8 default - had been
 # argued about rather than measured.
-check("and there are the columns we expect", len(CSV_COLUMNS) == 49,
+#
+# 52 once GAME_ROTATION_VECTOR's per-frame delta joined them. Derotation has
+# three possible sources now and the CSV carries all three side by side -
+# fc_d_*, gyro_d_*, quat_d_* - so one flight settles which to fly on.
+check("and there are the columns we expect", len(CSV_COLUMNS) == 52,
       str(len(CSV_COLUMNS)))
+i = CSV_COLUMNS.index("fc_d_roll")
+check("the three derotation opinions sit together",
+      CSV_COLUMNS[i:i + 8] == ["fc_d_roll", "fc_d_pitch",
+                               "gyro_d_roll", "gyro_d_pitch", "gyro_n",
+                               "quat_d_roll", "quat_d_pitch", "quat_n"],
+      str(CSV_COLUMNS[i:i + 8]))
 i = CSV_COLUMNS.index("gps1_north_m")
 check("the raw receiver's three are together, wherever they sit",
       CSV_COLUMNS[i:i + 3] == ["gps1_north_m", "gps1_east_m", "gps1_err_m"],

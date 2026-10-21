@@ -158,9 +158,13 @@ for dt, alt_, why in ((None, 70.0, "the first flowed frame of a run"),
     check(f"dt={dt}, alt={alt_} -> accepted ({why})", act == "ok", act)
 
 print("\nthe wiring: one decision, both consumers, and a gap on refusal")
+# Matched loosely on purpose. An earlier version of this pinned the exact call
+# text "self.fuser.predict(dn, de)", and when dt was added for the per-second
+# noise rate the string stopped matching and the test raised rather than
+# failing a named check - which is how it went unnoticed for a commit.
 check("the gate runs BEFORE predict",
       src.index("self.gate_step(dn, de, dt_step, f[\"alt\"])")
-      < src.index("self.fuser.predict(dn, de)"))
+      < src.index("self.fuser.predict(dn, de"))
 check("push_flow is inside the same branch, on the GATED step",
       "self.vel.push_flow(f[\"t\"], dn / dt_step, de / dt_step)" in src
       and src.index("dn, de, action = self.gate_step(")

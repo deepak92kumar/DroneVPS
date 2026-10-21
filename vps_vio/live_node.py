@@ -150,6 +150,40 @@ class LiveSource:
         # already integrate to well under the sensor's own noise. Raising it
         # would cost packet rate to buy precision nothing downstream can use.
         imu.enableIMUSensor(dai.IMUSensor.LINEAR_ACCELERATION, 100)
+        # GAME_ROTATION_VECTOR: the BNO's own fused orientation, WITHOUT the
+        # magnetometer. At the pilot's instruction, 21 Oct, and it costs one of
+        # the two free report slots and nothing else.
+        #
+        # depthai's IMUPacket has exactly four slots - acceleroMeter,
+        # gyroscope, magneticField, rotationVector - and every sensor of a
+        # family lands in its family's slot. That is why the device refuses
+        # LINEAR_ACCELERATION beside ACCELEROMETER_RAW, and ROTATION_VECTOR
+        # beside GAME_ROTATION_VECTOR: each pair shares a slot. So this takes
+        # `rotationVector`, which was empty, and leaves `magneticField` free.
+        #
+        # GAME and not plain ROTATION_VECTOR, measured on this airframe 21 Oct
+        # with the aircraft standing still:
+        #
+        #     ROTATION_VECTOR        yaw drifted 18.9 deg/min, and the BNO's
+        #                            own accuracy estimate was 1.375 rad - 79
+        #                            degrees. Its magnetometer sits beside the
+        #                            motors and is unusable.
+        #     GAME_ROTATION_VECTOR   yaw stable to 0.02 deg over 40 s
+        #
+        # Both settle rather than drift: the roll moved -0.71 deg in the first
+        # half of a 40 s run and -0.01 in the second, so about five seconds of
+        # start-up convergence and then flat.
+        #
+        # IT IS NOT WHAT DEROTATION USES, and that is deliberate. Derotation
+        # needs the rotation BETWEEN two frames, 33 ms apart, and a slowly
+        # accumulating offset cancels in a difference - so the gyro's unbounded
+        # drift costs it nothing, while this adds nothing. It is enabled to be
+        # logged beside the gyro and the FC's attitude, so the next flight
+        # settles which to fly on with real numbers instead of argument.
+        #
+        # Cost, measured: four reports in the packet run at 95.1 Hz against
+        # 99.6 for two. 4.5%.
+        imu.enableIMUSensor(dai.IMUSensor.GAME_ROTATION_VECTOR, 100)
         imu.setBatchReportThreshold(1)
         imu.setMaxBatchReports(20)
         xg = p.create(dai.node.XLinkOut)
@@ -260,7 +294,41 @@ class LiveSource:
         self._accel_n = 0
         self._t_accel = None
         self._t_gyro = None
+        # The previous fused orientation, for the per-frame delta.
+        self._q_prev = None
+        self._quat_n = 0
         self.t0 = time.monotonic()
+
+    def _quat_delta_rp(self, q0, q1):
+        """Degrees of roll and pitch between two orientations, camera frame.
+
+        The RELATIVE rotation, not the absolute attitude: q0^-1 * q1 as an
+        axis-angle vector, which is the same quantity the gyro integral
+        produces, so the two columns can be compared without any further
+        conversion. Taking Euler angles of each quaternion and subtracting
+        would not be - that goes wrong near gimbal lock and mixes the axes.
+
+        The axis-angle vector is then put through _to_cam, exactly as the gyro
+        sample is, so both carry the same mounting assumption and the same
+        caveat: x->roll, y->pitch is a GUESS until a recording settles it.
+        """
+        x0, y0, z0, w0 = q0
+        x1, y1, z1, w1 = q1
+        # q0 conjugate times q1
+        rw = w0 * w1 + x0 * x1 + y0 * y1 + z0 * z1
+        rx = w0 * x1 - x0 * w1 - y0 * z1 + z0 * y1
+        ry = w0 * y1 + x0 * z1 - y0 * w1 - z0 * x1
+        rz = w0 * z1 - x0 * y1 + y0 * x1 - z0 * w1
+        if rw < 0.0:                      # shortest arc
+            rx, ry, rz, rw = -rx, -ry, -rz, -rw
+        s = float(np.sqrt(max(0.0, 1.0 - rw * rw)))
+        ang = 2.0 * float(np.arctan2(s, min(1.0, max(-1.0, rw))))
+        if s < 1e-9:
+            vx = vy = vz = 0.0
+        else:
+            vx, vy, vz = rx / s * ang, ry / s * ang, rz / s * ang
+        cx, cy, _cz = self._to_cam(vx, vy, vz)
+        return float(np.degrees(cx)), float(np.degrees(cy))
 
     def _to_cam(self, x, y, z):
         """IMU-frame vector -> camera frame, if the calibration told us how."""
@@ -289,6 +357,11 @@ class LiveSource:
         # edge of it and anything above folds in. Treat >40 Hz here as "there
         # is energy up there", never as a calibrated amplitude.
         gyro = []
+        # The fused orientation, as a per-frame delta so it sits beside
+        # gyro_d_roll and fc_d_roll and can be compared directly. The raw
+        # quaternion goes to the IMU log.
+        q_roll = q_pitch = 0.0
+        quat = []
         pk = self.q_imu.tryGet()
         while pk is not None:
             for packet in pk.packets:
@@ -327,6 +400,21 @@ class LiveSource:
                             accel.append((ts, ax, ay, az))
                             self._accel_n += 1
                         self._t_accel = ts
+                # The fused orientation, read BEFORE the gyro's `continue`.
+                # A packet can carry one report and not another, and putting
+                # this after that continue is how it would silently never run.
+                rv = getattr(packet, "rotationVector", None)
+                if rv is not None:
+                    ts_q = rv.getTimestampDevice().total_seconds()
+                    q = (float(rv.i), float(rv.j), float(rv.k), float(rv.real))
+                    if self._q_prev is not None:
+                        dr, dp = self._quat_delta_rp(self._q_prev, q)
+                        q_roll += dr
+                        q_pitch += dp
+                    self._q_prev = q
+                    self._quat_n += 1
+                    quat.append((ts_q,) + q)
+
                 g = getattr(packet, "gyroscope", None)
                 if g is None:
                     continue
@@ -358,6 +446,8 @@ class LiveSource:
                         pitch=None, gps=None, depth=depth, rngfnd=s.get("rngfnd"),
                         gyro_d_roll=d_roll, gyro_d_pitch=d_pitch,
                         gyro_n=self._gyro_n,
+                        quat_d_roll=q_roll, quat_d_pitch=q_pitch,
+                        quat=quat, quat_n=self._quat_n,
                         accel=accel, accel_n=self._accel_n, gyro=gyro,
                         t=time.monotonic() - self.t0)
         gps = None
@@ -390,6 +480,8 @@ class LiveSource:
                     roll=s["roll"], pitch=s["pitch"], gps=gps, depth=depth,
                     gyro_d_roll=d_roll, gyro_d_pitch=d_pitch,
                     gyro_n=self._gyro_n,
+                    quat_d_roll=q_roll, quat_d_pitch=q_pitch,
+                    quat=quat, quat_n=self._quat_n,
                     accel=accel, accel_n=self._accel_n, gyro=gyro,
                     t=time.monotonic() - self.t0, armed=bool(s.get("armed")))
 
@@ -686,6 +778,13 @@ CSV_COLUMNS = ["t", "north_m", "east_m", "lon", "lat", "sigma_m",
     # sign are a GUESS until a recording settles them.
     "fc_d_roll", "fc_d_pitch",
     "gyro_d_roll", "gyro_d_pitch", "gyro_n",
+    # The THIRD opinion on how far the aircraft turned across this frame, from
+    # GAME_ROTATION_VECTOR. Logged beside the FC's and the gyro's so one flight
+    # settles which derotation should use. Measured 21 Oct on the 20-21 Oct
+    # recordings: the FC's reads 0.000 on 88% of frames, and replacing it with
+    # the gyro - sign flipped - took the sent-velocity error from p95 3.58 to
+    # 1.22 m/s. This column is what tests the same claim for the fused source.
+    "quat_d_roll", "quat_d_pitch", "quat_n",
     # Added 20 Oct with the rows that carry them. The header
     # was NOT updated at the time and 1162 rows were written
     # 39 wide under a 32-wide header before it was noticed -
@@ -729,7 +828,8 @@ CSV_COLUMNS = ["t", "north_m", "east_m", "lon", "lat", "sigma_m",
     "ekf_vel_var", "ekf_pos_h_var", "ekf_comp_var", "ekf_flags"]
 
 
-IMU_LOG_COLUMNS = ["t_dev", "src", "x", "y", "z"]
+# w is only used by the quaternion rows, so it is last and empty elsewhere.
+IMU_LOG_COLUMNS = ["t_dev", "src", "x", "y", "z", "w"]
 
 
 def imu_rows(f):
@@ -742,17 +842,26 @@ def imu_rows(f):
     vibration was on the camera IMU" had no answer for exactly that reason.
     So every sample is written at its own device timestamp.
 
-    `src` is "g" for gyro (rad/s) and "a" for the accelerometer (m/s2, gravity
-    already removed - LINEAR_ACCELERATION). Both are in the CAMERA frame, so
-    they are directly comparable with the FC's own IMU only after the 180
-    degrees between the two is accounted for.
+    `src` is "g" for gyro (rad/s), "a" for the accelerometer (m/s2, gravity
+    already removed - LINEAR_ACCELERATION), and "q" for the fused orientation
+    from GAME_ROTATION_VECTOR, written as the raw quaternion x/y/z/w in the
+    IMU's OWN frame. The first two are in the CAMERA frame, so they are
+    directly comparable with the FC's own IMU only after the 180 degrees
+    between the two is accounted for; the quaternion is left exactly as the
+    BNO reported it, because rotating a quaternion is not the same operation
+    as rotating a vector and doing it here would bury a second assumption in
+    the log. The camera-frame DELTA is in the estimate CSV instead, as
+    quat_d_roll/quat_d_pitch, where it sits beside the gyro's and the FC's.
     """
     for s in (f.get("gyro") or ()):
         yield ("%.6f" % s[0], "g",
-               "%.6f" % s[1], "%.6f" % s[2], "%.6f" % s[3])
+               "%.6f" % s[1], "%.6f" % s[2], "%.6f" % s[3], "")
     for s in (f.get("accel") or ()):
-        yield ("%.6f" % s[0], "a",
-               "%.5f" % s[1], "%.5f" % s[2], "%.5f" % s[3])
+        yield ("%.5f" % s[0], "a",
+               "%.5f" % s[1], "%.5f" % s[2], "%.5f" % s[3], "")
+    for s in (f.get("quat") or ()):
+        yield ("%.6f" % s[0], "q",
+               "%.6f" % s[1], "%.6f" % s[2], "%.6f" % s[3], "%.6f" % s[4])
 
 
 def csv_row(est, f, v, gN, gE, err):
@@ -774,7 +883,11 @@ def csv_row(est, f, v, gN, gE, err):
             "" if est["fc_d_pitch"] is None else f"{est['fc_d_pitch']:.4f}",
             "" if est["gyro_d_roll"] is None else f"{est['gyro_d_roll']:.4f}",
             "" if est["gyro_d_pitch"] is None else f"{est['gyro_d_pitch']:.4f}",
-            est["gyro_n"], est["accel_n"],
+            est["gyro_n"],
+            "" if est.get("quat_d_roll") is None else f"{est['quat_d_roll']:.4f}",
+            "" if est.get("quat_d_pitch") is None else f"{est['quat_d_pitch']:.4f}",
+            est.get("quat_n") or 0,
+            est["accel_n"],
             "" if est["depth_med_m"] is None else f"{est['depth_med_m']:.2f}",
             est["depth_dropped"], est["n_dr"],
             est.get("src") or "",
@@ -1525,6 +1638,9 @@ class VpsNode:
                     fc_d_roll=fc_dr, fc_d_pitch=fc_dp,
                     gyro_d_roll=f.get("gyro_d_roll"),
                     gyro_d_pitch=f.get("gyro_d_pitch"),
+                    quat_d_roll=f.get("quat_d_roll"),
+                    quat_d_pitch=f.get("quat_d_pitch"),
+                    quat_n=f.get("quat_n"),
                     gyro_n=f.get("gyro_n"), accel_n=f.get("accel_n"),
                     n_step_rej=self.n_step_rejected,
                     depth_med_m=self.tracker.depth_med_m,
