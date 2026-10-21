@@ -77,31 +77,30 @@ check("roll sits about 7% above theory, as the report says",
       1.05 < abs(GYRO_PX_PER_DEG_ROLL_X) / theory < 1.09,
       f"{abs(GYRO_PX_PER_DEG_ROLL_X) / theory:.3f}x")
 
-print("\nand the SIGN is the fault that was being fixed")
-check("the gyro's coefficients are NEGATIVE",
-      GYRO_PX_PER_DEG_ROLL_X < 0 and GYRO_PX_PER_DEG_PITCH_Y < 0,
-      "measured against the FC over matched intervals: scale -0.983 to -1.008")
-check("the FC's are positive, so the two really do oppose",
-      ATT_PX_PER_DEG_ROLL_X > 0 and ATT_PX_PER_DEG_PITCH_Y > 0)
-a = attitude_shift_px((0.0, 0.0, 0.0), (1.0, 0.0, 0.0))
-g = gyro_shift_px(1.0, 0.0)
-check("one degree of roll moves them opposite ways",
-      a[0] * g[0] < 0, f"FC {a[0]:+.2f} px, gyro {g[0]:+.2f} px")
-
-print("\nthe shift is linear in the angle and the axes do not mix")
+# THE SIGN NO LONGER LIVES HERE. It is measured at run time against the FC's
+# attitude and applied by the caller - see tests/test_tilt_validator.py, which
+# covers adoption, refusal, the learned sign and dropping a source that goes
+# bad. What this file still pins is the MAGNITUDE and the fallback order.
+print("\nthe magnitude is the report's, and the sign is somebody else's job")
+check("gyro_shift_px takes the sign as an argument",
+      "sign_roll: float = 1.0" in
+      open(os.path.join(HERE, "vps_vio", "flow_odom.py")).read(),
+      "hard-coding it is what ran the aircraft away on 21 Oct")
+check("the constants carry magnitude only",
+      "abs(GYRO_PX_PER_DEG_ROLL_X)" in
+      open(os.path.join(HERE, "vps_vio", "flow_odom.py")).read())
 for deg in (0.1, 0.5, 1.0, 5.0):
-    r = gyro_shift_px(deg, 0.0)
-    p = gyro_shift_px(0.0, deg)
-    if abs(r[0] - GYRO_PX_PER_DEG_ROLL_X * deg) > 1e-9 or r[1] != 0.0:
+    r = gyro_shift_px(deg, 0.0, +1.0, +1.0)
+    p_ = gyro_shift_px(0.0, deg, +1.0, +1.0)
+    if abs(r[0] - 14.80 * deg) > 1e-9 or r[1] != 0.0:
         check(f"roll {deg} deg", False, str(r))
-    if abs(p[1] - GYRO_PX_PER_DEG_PITCH_Y * deg) > 1e-9 or p[0] != 0.0:
-        check(f"pitch {deg} deg", False, str(p))
-check("roll moves only x and pitch only y, at every angle tried", True,
+    if abs(p_[1] - 13.82 * deg) > 1e-9 or p_[0] != 0.0:
+        check(f"pitch {deg} deg", False, str(p_))
+check("roll scales at 14.80 px/deg and pitch at 13.82, axes independent", True,
       "0.1 to 5 deg")
-check("zero rotation is zero shift", tuple(gyro_shift_px(0.0, 0.0)) == (0.0, 0.0))
+check("zero rotation is zero shift",
+      tuple(gyro_shift_px(0.0, 0.0, 1.0, 1.0)) == (0.0, 0.0))
 
-# The 30 Sep failure, in numbers: a frozen FC attitude releasing four frames of
-# rotation into one.
 print("\nthe 30 Sep case the FC path cannot avoid")
 stale = attitude_shift_px((0.0, 0.0, 0.0), (4.67, 11.82, 0.0))
 check("four frames of rotation arriving at once is 167 px",
@@ -127,28 +126,34 @@ print("\nthe wiring")
 # east r = -0.884. The gyro path points the velocity almost exactly backwards,
 # and in Loiter the aircraft ran away on it - log 00000223, position error
 # growing 0.5 -> 21.4 m and 18.2 -> 43.3 m across two VPS windows.
-check("the FC attitude is the default again", 'derotate: str = "fc"' in src,
-      "the gyro is offline-only until it is scored on DIRECTION")
-check("the gyro is still reachable for offline work",
-      'choices=("gyro", "fc")' in src)
-check("the gyro path is taken when the frame carries a delta",
-      'if self.derotate == "gyro" and gd_r is not None and gd_p is not None:' in src)
+# 21 Oct, after the runaway: the choice is no longer configured at all. A
+# source is used once TiltValidator has verified it against the FC's attitude
+# in flight, with the sign that verification measured. See
+# tests/test_tilt_validator.py - this file now only pins the coefficients and
+# the fallback order.
+check("the default is auto, not a named source",
+      'derotate: str = "auto"' in src)
+check("and there is no way to force an unverified source",
+      'choices=("auto", "fc")' in src,
+      "forcing the gyro on a static measurement is what ran it away")
+check("the gyro path is taken only when it has been verified",
+      'self.val_gyro.ok' in src and 'gd_r is not None and gd_p is not None' in src)
 check("the FC is LAST, below the fused orientation",
-      src.index("d = d - gyro_shift_px(gd_r, gd_p)")
-      < src.index("d = d - gyro_shift_px(qd_r, qd_p)")
+      src.index("d = d - gyro_shift_px(gd_r, gd_p,")
+      < src.index("d = d - gyro_shift_px(qd_r, qd_p,")
       < src.index("d = d - attitude_shift_px(self.prev_att, att)"),
       "gyro, then GAME_ROTATION_VECTOR, then the FC - which measured worse "
       "than no derotation at all, so it must not be the first fallback")
-check("the fused orientation uses the same coefficients",
-      "gyro_shift_px(qd_r, qd_p)" in src,
-      "same quantity, same camera frame, same degrees as the gyro integral")
+check("the fused orientation goes through the same function",
+      "gyro_shift_px(qd_r, qd_p," in src,
+      "same quantity, same camera frame, same degrees as the gyro integral - "
+      "and its own measured sign")
 check("which source ran is written on every row", '"derot_src"' in src)
 check("and the two independent sources' disagreement with it",
       '"derot_dis_roll"' in src,
       "this is what says whether GRV belongs above or below the FC")
-check("both are SUBTRACTED, so the sign lives in the constant",
-      "d = d - gyro_shift_px(gd_r, gd_p)" in src,
-      "a negative coefficient is the inversion, applied in one place")
+check("both are SUBTRACTED, so there is one place to get it wrong",
+      "d = d - gyro_shift_px(gd_r, gd_p," in src)
 check("which source ran is counted",
       "self.n_derot_gyro += 1" in src and "self.n_derot_fc += 1" in src)
 check("and reported at the end of a run",

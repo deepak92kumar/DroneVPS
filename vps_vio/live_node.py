@@ -21,7 +21,7 @@ import numpy as np, cv2
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from flow_odom import (FlowTracker, shift_to_ne, attitude_shift_px,
-                       gyro_shift_px)
+                       gyro_shift_px, TiltValidator)
 from map_cache import MapCache
 from map_fix_worker import MapFixWorker
 from map_fuse import MapFuser
@@ -1375,10 +1375,11 @@ class VpsNode:
     def __init__(self, cache: MapCache, focal_px: float, *,
                  fix_period_s: float = 2.0, radius_m: float = 150.0,
                  max_corners: int = 300, K=None, D=None, focal_y_px=None,
-                 derotate: str = "fc"):
+                 derotate: str = "auto"):
         self.cache = cache
         self.focal = float(focal_px)
-        # "fc" or "gyro". REVERTED TO "fc" ON 21 OCT AFTER A FLIGHT.
+        # "auto" or "fc". There is deliberately NO option to force a source
+        # that has not been validated - that is exactly the 21 Oct mistake.
         #
         # The gyro was made the default earlier that day on an offline replay
         # that scored |our_speed - truth_speed|. That metric is a SCALAR: it
@@ -1401,9 +1402,14 @@ class VpsNode:
         #
         # The sign derivation behind -14.80/-13.82 was wrong, and the matched-
         # interval measurement it rested on (gyro vs FC, scale -0.99) did not
-        # survive contact with a directional test. The gyro path stays
-        # reachable for offline work, where it must be scored on direction
-        # before it is ever flown again.
+        # survive contact with a directional test.
+        #
+        # "auto" now means: use the gyro if TiltValidator has verified it
+        # against the FC's attitude, else GAME_ROTATION_VECTOR if that has
+        # been verified, else the FC itself. Nothing is used on an assumption,
+        # the sign comes from the verification rather than from a constant, and
+        # a source that loses agreement is dropped again mid-flight. "fc" pins
+        # it to the FC alone, for reproducing an older flight.
         self.derotate = str(derotate)
         # fy is 791.58 against fx 791.72 on this camera - a ratio of 1.000177,
         # which is 1.8 cm per 100 m travelled. It is carried because it is free
@@ -1447,6 +1453,11 @@ class VpsNode:
         # Which source actually derotated each frame, so a flight says so
         # rather than being assumed.
         self.n_derot_gyro = self.n_derot_quat = self.n_derot_fc = 0
+        # Two candidates, both judged against the FC's attitude, which is the
+        # only tilt source measured to track the real motion on this airframe.
+        # Neither is used until it has earned it - see TiltValidator.
+        self.val_gyro = TiltValidator("gyro")
+        self.val_quat = TiltValidator("GAME_ROTATION_VECTOR")
         # How far the fused orientation and the gyro disagreed on the frames
         # where both were present. Logged per frame, not just counted.
         self.n_derot_both = 0
@@ -1631,50 +1642,54 @@ class VpsNode:
             # This is a RESTORATION, not an experiment. Gyro derotation was
             # built, flown and carried at 95% from 28 Sep until the NVMe went,
             # and 30 Sep names it "the real cure". The rebuild lost it.
-            # THREE SOURCES, IN THE ORDER THEY WERE MEASURED TO BE GOOD.
+            # DEROTATION, and which source runs is EARNED, not configured.
             #
-            #   1 the camera gyro          p50 1.15  p95  7.54 m/s
-            #   2 GAME_ROTATION_VECTOR     unmeasured in flight - see below
-            #   3 the FC's attitude        p50 2.97  p95 31.05
-            #     (no derotation at all    p50 2.50  p95 24.01)
+            # On 21 Oct the gyro was made the default on a static measurement
+            # and its sign hard-coded. Flown, the reported velocity came out
+            # 160 degrees from the truth and the aircraft ran away in Loiter.
+            # The pre-SSD-loss daemon never had that hole: it compared 0.4 s
+            # windows of its candidate against a reference, derived the sign
+            # from the comparison, and switched the candidate off again the
+            # moment agreement was lost.
             #
-            # The FC is LAST and that is the point: it is worse than doing
-            # nothing, because it arrives at ~4 Hz against this 30 Hz loop, so
-            # it reports no rotation on most frames and several frames' worth
-            # on the rest, which then gets subtracted from one frame's shift.
-            # Leaving it as the only fallback meant a frame the gyro missed got
-            # the worst available answer.
+            # The reference is the FC's attitude. It is poor per FRAME - ~4 Hz
+            # against a 30 Hz loop, so it reads 0.000 on most of them - but it
+            # is the only source measured to track: velocity slope +0.795 north
+            # and +0.892 east against the raw receiver, 33 degrees from the
+            # truth. Over a 0.4 s window it has published once or twice, which
+            # is why the windows are that long.
             #
-            # GAME_ROTATION_VECTOR sits between them, and honestly: it has
-            # never flown. It was enabled on 21 Oct, so no recording with real
-            # motion contains it. What is known is that it is the BNO's own
-            # fusion of the same gyro against gravity, delivered as a
-            # quaternion, and that its per-frame delta is computed here as the
-            # relative rotation in the same camera frame and the same degrees
-            # as the gyro's integral - so the same coefficients apply, and a
-            # flight will say whether it belongs above or below the FC rather
-            # than this comment.
+            # Order of preference once earned: gyro (100 Hz, every frame),
+            # then GAME_ROTATION_VECTOR, then the FC itself.
+            fc_r, fc_p = fc_dr, fc_dp
             gd_r, gd_p = f.get("gyro_d_roll"), f.get("gyro_d_pitch")
             qd_r, qd_p = f.get("quat_d_roll"), f.get("quat_d_pitch")
-            if self.derotate == "gyro" and gd_r is not None and gd_p is not None:
-                d = d - gyro_shift_px(gd_r, gd_p)
+            dt_v = (None if self.prev_t is None else f["t"] - self.prev_t)
+            if dt_v is not None and 0.0 < dt_v < 0.5:
+                self.val_gyro.update(gd_r, gd_p, fc_r, fc_p, dt_v)
+                self.val_quat.update(qd_r, qd_p, fc_r, fc_p, dt_v)
+            if (self.derotate != "fc" and self.val_gyro.ok
+                    and gd_r is not None and gd_p is not None):
+                d = d - gyro_shift_px(gd_r, gd_p,
+                                      self.val_gyro.sign_roll,
+                                      self.val_gyro.sign_pitch)
                 self.n_derot_gyro += 1
-                # What the two independent sources disagreed by, carried out so
-                # a flight measures it. A gyro going bad shows up here as a
-                # growing disagreement with a source that cannot drift.
-                if qd_r is not None and qd_p is not None:
-                    self.derot_dis_roll = float(qd_r) - float(gd_r)
-                    self.derot_dis_pitch = float(qd_p) - float(gd_p)
-                    self.n_derot_both += 1
-                else:
-                    self.derot_dis_roll = self.derot_dis_pitch = None
-            elif self.derotate != "fc" and qd_r is not None and qd_p is not None:
-                d = d - gyro_shift_px(qd_r, qd_p)
+            elif (self.derotate != "fc" and self.val_quat.ok
+                  and qd_r is not None and qd_p is not None):
+                d = d - gyro_shift_px(qd_r, qd_p,
+                                      self.val_quat.sign_roll,
+                                      self.val_quat.sign_pitch)
                 self.n_derot_quat += 1
-                self.derot_dis_roll = self.derot_dis_pitch = None
             else:
                 d = d - attitude_shift_px(self.prev_att, att)
                 self.n_derot_fc += 1
+            # What the two candidates disagreed with each other by, carried out
+            # so a flight measures it rather than a comment asserting it.
+            if None not in (gd_r, gd_p, qd_r, qd_p):
+                self.derot_dis_roll = float(qd_r) - float(gd_r)
+                self.derot_dis_pitch = float(qd_p) - float(gd_p)
+                self.n_derot_both += 1
+            else:
                 self.derot_dis_roll = self.derot_dis_pitch = None
             dn, de = shift_to_ne(d, altitude_m=f["alt"], focal_px=self.focal,
                                  yaw_deg=f["yaw"], focal_y_px=self.focal_y)
@@ -1838,14 +1853,15 @@ def main():
     ap.add_argument("--notify-period", type=float, default=3.0,
                     help="seconds between VPS status lines on the radio "
                          "(warnings are immediate regardless; default 3)")
-    ap.add_argument("--derotate", choices=("gyro", "fc"), default="fc",
+    ap.add_argument("--derotate", choices=("auto", "fc"), default="auto",
                     help="where the tilt to remove from the flow comes from. "
-                         "The FC's attitude, because it is the only one that "
-                         "has flown and tracked: velocity slope +0.795/+0.892 "
-                         "against the receiver, 33 deg from the truth. 'gyro' "
-                         "pointed 160 deg out on log 00000223 and the aircraft "
-                         "ran away; it is offline-only until scored on "
-                         "DIRECTION")
+                         "'auto' uses the camera gyro, or GAME_ROTATION_VECTOR, "
+                         "ONLY once that source has been verified against the "
+                         "FC's attitude IN FLIGHT - matching sign and slope "
+                         "over 0.4 s windows - and drops back the moment "
+                         "agreement is lost. 'fc' pins it to the FC alone. "
+                         "There is no option to force an unverified source: "
+                         "that is what ran the aircraft away on 21 Oct")
     ap.add_argument("--no-scr-origin", action="store_true",
                     help="do not take the origin from SCR_USER1/2")
     ap.add_argument("--out", help="estimate log CSV, or a DIRECTORY - a "
@@ -2476,6 +2492,8 @@ def main():
               f"{node.n_derot_quat} from GAME_ROTATION_VECTOR, "
               f"{node.n_derot_fc} from the FC attitude "
               f"({100.0 * node.n_derot_gyro / tot:.1f}% gyro)")
+        print("  " + node.val_gyro.describe())
+        print("  " + node.val_quat.describe())
     if gps_sender is not None:
         print(f"GPS_INPUT bheje: {gps_sender.sent}")
     if sender is not None:

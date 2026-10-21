@@ -108,6 +108,9 @@ def node():
     n.derotate = "gyro"
     n.n_derot_gyro = n.n_derot_quat = n.n_derot_fc = n.n_derot_both = 0
     n.derot_dis_roll = n.derot_dis_pitch = None
+    from flow_odom import TiltValidator
+    n.val_gyro = TiltValidator("gyro")
+    n.val_quat = TiltValidator("quat")
     n.vel = VelocityBridge()
     n.set_origin(74.613182, 30.896742)
     return n

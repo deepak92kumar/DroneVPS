@@ -66,7 +66,116 @@ GYRO_PX_PER_DEG_ROLL_X = -14.80
 GYRO_PX_PER_DEG_PITCH_Y = -13.82
 
 
-def gyro_shift_px(d_roll_deg: float, d_pitch_deg: float) -> np.ndarray:
+class TiltValidator:
+    """Decide at RUN TIME whether a tilt source may be used, and with which sign.
+
+    This exists because of 21 Oct. Derotation was switched to the camera gyro on
+    a static measurement - gyro against the FC's attitude over matched
+    intervals, r = -0.994, scale -0.99 - and the sign that measurement implied
+    was hard-coded. Flown, the reported velocity came out 160 degrees from the
+    truth with east r = -0.884, and in Loiter the aircraft ran away: told it was
+    moving one way while it drifted the other, the controller pushed it further.
+    Position error grew 0.5 -> 21.4 m and 18.2 -> 43.3 m across two VPS windows
+    of log 00000223.
+
+    The pre-SSD-loss daemon never had that hole, and this is its logic:
+
+        "Compare ~0.4 s windows of gyro vs rotation-vector tilt. Gyro
+         derotation turns ON only when both axes agree (>=15 moving windows,
+         |corr|>=0.85, 0.7<=|slope|<=2.0) and OFF if agreement is lost."
+
+    and it DERIVED the sign rather than assuming it:
+
+        gyro_derot.update(ok=True, sign_r=sign(verdict[0][0]),
+                                   sign_p=sign(verdict[1][0]))
+
+    The reference here is the FC's attitude, because that is the one source
+    measured to track the real motion on this airframe: velocity slope +0.795
+    north and +0.892 east against the raw receiver, 33 degrees from the truth,
+    73% of samples in the right half-plane. It is a poor source per FRAME - it
+    arrives at ~4 Hz against a 30 Hz loop - which is exactly why the windows are
+    0.4 s long: over that span the FC has published once or twice and the
+    comparison is fair, while a single frame's comparison is not.
+
+    Thresholds are the daemon's, unchanged. ON is deliberately harder than OFF:
+    |corr| 0.85 to arm, 0.6 to stay, so a source does not flicker.
+    """
+
+    WINDOW_S = 0.4
+    MIN_WINDOWS = 15
+    MIN_REF_DEG = 0.005      # a window with no rotation in it says nothing
+    ON_CORR = 0.85
+    OFF_CORR = 0.60
+    SLOPE_LO, SLOPE_HI = 0.7, 2.0
+    MAX_PAIRS = 200          # rolling, so a source can lose agreement later
+
+    def __init__(self, name: str = ""):
+        self.name = name
+        self.ok = False
+        self.sign_roll = 0.0
+        self.sign_pitch = 0.0
+        self.verdict = None          # ((slope, corr) roll, (slope, corr) pitch)
+        self.n_windows = 0
+        self.turned_on = 0
+        self.turned_off = 0
+        self._acc = [0.0, 0.0, 0.0, 0.0, 0.0]
+        self._pairs = []
+
+    def update(self, cand_roll, cand_pitch, ref_roll, ref_pitch, dt_s):
+        """One frame of both sources, in degrees across that frame."""
+        if None in (cand_roll, cand_pitch, ref_roll, ref_pitch) or not dt_s:
+            return
+        a = self._acc
+        a[0] += float(cand_roll); a[1] += float(cand_pitch)
+        a[2] += float(ref_roll);  a[3] += float(ref_pitch)
+        a[4] += float(dt_s)
+        if a[4] < self.WINDOW_S:
+            return
+        self._pairs.append((a[0], a[1], a[2], a[3]))
+        del self._pairs[:-self.MAX_PAIRS]
+        self._acc = [0.0, 0.0, 0.0, 0.0, 0.0]
+        self.n_windows = len(self._pairs)
+        v = []
+        for ci, ri in ((0, 2), (1, 3)):
+            pts = [(p[ci], p[ri]) for p in self._pairs
+                   if abs(p[ri]) > self.MIN_REF_DEG]
+            if len(pts) < self.MIN_WINDOWS:
+                return
+            c = np.array([p[0] for p in pts], float)
+            r = np.array([p[1] for p in pts], float)
+            denom = float(np.dot(r, r))
+            if denom <= 0.0 or c.std() == 0.0 or r.std() == 0.0:
+                return
+            v.append((float(np.dot(c, r) / denom), float(np.corrcoef(c, r)[0, 1])))
+        self.verdict = tuple(v)
+        agree = all(abs(corr) >= self.ON_CORR
+                    and self.SLOPE_LO <= abs(sl) <= self.SLOPE_HI
+                    and np.sign(sl) == np.sign(corr) for sl, corr in v)
+        if agree and not self.ok:
+            self.ok = True
+            self.sign_roll = float(np.sign(v[0][0]))
+            self.sign_pitch = float(np.sign(v[1][0]))
+            self.turned_on += 1
+        elif self.ok:
+            keep = all(abs(corr) >= self.OFF_CORR for _sl, corr in v) and \
+                np.sign(v[0][0]) == self.sign_roll and \
+                np.sign(v[1][0]) == self.sign_pitch
+            if not keep:
+                self.ok = False
+                self.turned_off += 1
+
+    def describe(self) -> str:
+        if self.verdict is None:
+            return f"{self.name}: no verdict yet ({self.n_windows} windows)"
+        (sr, cr), (sp, cp) = self.verdict
+        return (f"{self.name}: {'ON' if self.ok else 'off'} "
+                f"roll slope {sr:+.2f} corr {cr:+.2f}, "
+                f"pitch slope {sp:+.2f} corr {cp:+.2f}, "
+                f"{self.n_windows} windows, on {self.turned_on} off {self.turned_off}")
+
+
+def gyro_shift_px(d_roll_deg: float, d_pitch_deg: float,
+                  sign_roll: float = 1.0, sign_pitch: float = 1.0) -> np.ndarray:
     """Image shift caused purely by tilting, from the CAMERA's own gyro.
 
     Same job as attitude_shift_px and a different source. The FC's attitude
@@ -88,8 +197,12 @@ def gyro_shift_px(d_roll_deg: float, d_pitch_deg: float) -> np.ndarray:
     is bounded, buys nothing - it is logged beside this for comparison and not
     used.
     """
-    return np.array([GYRO_PX_PER_DEG_ROLL_X * float(d_roll_deg),
-                     GYRO_PX_PER_DEG_PITCH_Y * float(d_pitch_deg)])
+    # The MAGNITUDE is the 3 Oct report's; the SIGN is whatever TiltValidator
+    # measured at run time. Hard-coding the sign is the mistake that ran the
+    # aircraft away on 21 Oct, so the constants carry magnitude only and the
+    # caller supplies what it has verified.
+    return np.array([abs(GYRO_PX_PER_DEG_ROLL_X) * float(sign_roll) * float(d_roll_deg),
+                     abs(GYRO_PX_PER_DEG_PITCH_Y) * float(sign_pitch) * float(d_pitch_deg)])
 
 
 def attitude_shift_px(att_prev, att_cur) -> np.ndarray:
