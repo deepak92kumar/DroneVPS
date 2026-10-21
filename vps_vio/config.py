@@ -96,6 +96,44 @@ class VpsConfig:
     # sensor and is only an example there.
     mono_fps: int = 30
 
+    # Camera IMU report rate, Hz, for all three enabled sensors - they share
+    # one packet, so one number sets them together.
+    #
+    # 100 WAS CALLED A CEILING AND IS NOT ONE. Measured on this device
+    # 21 Oct, IMU alone: asking 400 delivered 357.9 Hz on BOTH
+    # GYROSCOPE_CALIBRATED and LINEAR_ACCELERATION, against Luxonis' table
+    # giving the calibrated gyro a maximum of 100.
+    #
+    # Why it matters, from log 225's own camera recording in flight: the
+    # linear acceleration put 94% of its energy above 10 Hz with every top
+    # peak at 49.8 Hz - hard against Nyquist for a 100 Hz sample. At rest the
+    # same channel spreads its energy (59.8% below 10 Hz on X), and its sd is
+    # 0.030 m/s2 against 1.30 in flight, so what piles at Nyquist is real
+    # vibration above 50 Hz folding down, not sensor noise. A hex at hover
+    # puts its prop fundamental near 65-85 Hz, which is exactly there. The
+    # velocity bridge integrates that aliased signal.
+    #
+    # 3 Oct recorded the opposite result - "asking for 400 on the gyro dragged
+    # the whole stream down rather than speeding anything up" - so the
+    # comparison was run again 21 Oct on the FULL pipeline, both mono streams
+    # and stereo depth up, 800p at 30 fps, all three IMU sensors:
+    #
+    #     requested   frames    IMU packets   accel/gyro/quat
+    #       100 Hz    30.0 Hz       22006         99.9 Hz
+    #       400 Hz    30.0 Hz       36601        165.9 Hz
+    #
+    # The frame rate does not move. 400 does not deliver 400 with the camera
+    # streams competing for the link - it delivers 165.9 - but that is 1.66x
+    # the reports and, more to the point, it moves Nyquist from 50 Hz to 83.
+    # The same comparison at rest shows the fold directly: at 100 Hz the accel
+    # peaks sat at 36.0-48.7 Hz, and at 400 Hz the same content appears at
+    # 59.0-66.8 Hz. It was never at 36 Hz; it was folding there.
+    #
+    # 83 Hz still only just covers a hex's hover fundamental, so this is an
+    # improvement rather than a solution. What it buys is the first honest
+    # look at where the vibration actually is.
+    imu_rate: int = 400
+
     # Stereo depth: ON, and for VIO ONLY.
     #
     # It is cheap where it was feared to be expensive. Measured 19 Oct on this

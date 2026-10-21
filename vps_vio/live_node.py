@@ -87,7 +87,7 @@ class LiveSource:
 
     def __init__(self, fc_port="/dev/ttyTHS1", fc_baud=921600, *,
                  fps: int | None = None, stereo_depth: bool | None = None,
-                 crop_left: int | None = None):
+                 crop_left: int | None = None, imu_rate: int | None = None):
         import depthai as dai
         from record_flight import Telemetry
         from config import VpsConfig
@@ -99,6 +99,8 @@ class LiveSource:
         cfg = VpsConfig()
         fps = cfg.mono_fps if fps is None else int(fps)
         stereo_depth = cfg.stereo_depth if stereo_depth is None else bool(stereo_depth)
+        imu_rate = cfg.imu_rate if imu_rate is None else int(imu_rate)
+        self.imu_rate = imu_rate
         # 921600, not 115200. TELEM2 flies at 921600 - SERIAL2_BAUD reads 921
         # on the FC. At the wrong baud the link produces nothing, alt and yaw
         # stay None, and VpsNode.step returns None on every frame: the node
@@ -129,14 +131,19 @@ class LiveSource:
         # arrives over MAVLink at a few Hz, interpolated and late. The gyro is
         # on the same device as the frames.
         imu = p.create(dai.node.IMU)
-        # 100 Hz is not a choice here, it is the ceiling. Luxonis' own IMU
-        # table gives GYROSCOPE_CALIBRATED a maximum of 100 Hz on the BNO086 -
-        # the raw gyro goes to 1000 but is only recommended at or below 400,
-        # because above that the part jitters. So this is already as fast as
-        # the calibrated report can be asked for, and the BNO rounds a request
-        # UP to its next supported rate, which is how asking for more than the
-        # part supports turns into a slower packet rather than a faster one.
-        imu.enableIMUSensor(dai.IMUSensor.GYROSCOPE_CALIBRATED, 100)
+        # The rate for all three reports; they share one packet. See
+        # VpsConfig.imu_rate for why 100 is the default and what it costs.
+        #
+        # This comment used to say 100 was "not a choice, it is the ceiling",
+        # on Luxonis' table giving GYROSCOPE_CALIBRATED a maximum of 100 on
+        # the BNO086. Measured on THIS device 21 Oct with the IMU alone, a
+        # request for 400 delivered 357.9 Hz on the calibrated gyro and on
+        # LINEAR_ACCELERATION alike, so the table is not the ceiling here.
+        # What remains true is the second half: the BNO rounds a request up to
+        # its next supported rate, and 3 Oct measured 400 with the camera
+        # streams running dragging the whole stream DOWN - so the cost is in
+        # the packet, not in the part.
+        imu.enableIMUSensor(dai.IMUSensor.GYROSCOPE_CALIBRATED, imu_rate)
         # LINEAR_ACCELERATION, not ACCELEROMETER_RAW: the BNO086's own
         # fusion has already taken gravity out, and that is what the
         # velocity bridge's push_accel is specified to take. Raw accel
@@ -150,7 +157,7 @@ class LiveSource:
         # does is filling a ~60 ms gap between flow frames, where six samples
         # already integrate to well under the sensor's own noise. Raising it
         # would cost packet rate to buy precision nothing downstream can use.
-        imu.enableIMUSensor(dai.IMUSensor.LINEAR_ACCELERATION, 100)
+        imu.enableIMUSensor(dai.IMUSensor.LINEAR_ACCELERATION, imu_rate)
         # GAME_ROTATION_VECTOR: the BNO's own fused orientation, WITHOUT the
         # magnetometer. At the pilot's instruction, 21 Oct, and it costs one of
         # the two free report slots and nothing else.
@@ -184,7 +191,7 @@ class LiveSource:
         #
         # Cost, measured: four reports in the packet run at 95.1 Hz against
         # 99.6 for two. 4.5%.
-        imu.enableIMUSensor(dai.IMUSensor.GAME_ROTATION_VECTOR, 100)
+        imu.enableIMUSensor(dai.IMUSensor.GAME_ROTATION_VECTOR, imu_rate)
         imu.setBatchReportThreshold(1)
         imu.setMaxBatchReports(20)
         xg = p.create(dai.node.XLinkOut)
@@ -1826,6 +1833,10 @@ def main():
     # measured working at 90-100 m for the first time - 8.3 m median error,
     # 228 of 477 frames clearing min_inliers - so fixes are about to start
     # arriving, and the period decides what they do when they do.
+    ap.add_argument("--imu-rate", type=int, default=None,
+                    help="camera IMU report rate in Hz for all three sensors "
+                         "(default from VpsConfig.imu_rate, 100). They share "
+                         "one packet, so this sets them together.")
     ap.add_argument("--fix-period", type=float, default=2.0,
                     help="seconds between map fixes. 2.0 is the 5 Oct value: "
                          "faster was measured to push a stationary aircraft "
@@ -2024,7 +2035,8 @@ def main():
             print(f"SCR_USER1/2: {scr_origin[1]:.6f}, {scr_origin[0]:.6f}")
 
     src = (ReplaySource(a.replay, a.every, a.min_alt) if a.replay
-           else LiveSource(a.fc_port, a.fc_baud, crop_left=a.crop_left))
+           else LiveSource(a.fc_port, a.fc_baud, crop_left=a.crop_left,
+                           imu_rate=a.imu_rate))
     cache = MapCache(a.map)
     print(cache.summary())
     print(f"focal {src.focal:.1f} px, fix every {a.fix_period:.1f} s, window +-{a.radius:.0f} m, "
