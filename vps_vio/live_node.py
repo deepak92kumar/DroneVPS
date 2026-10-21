@@ -1373,7 +1373,7 @@ class VpsNode:
     STEP_ESCAPE_N = 5
 
     def __init__(self, cache: MapCache, focal_px: float, *,
-                 fix_period_s: float = 1.0, radius_m: float = 150.0,
+                 fix_period_s: float = 2.0, radius_m: float = 150.0,
                  max_corners: int = 300, K=None, D=None, focal_y_px=None,
                  derotate: str = "gyro"):
         self.cache = cache
@@ -1758,15 +1758,36 @@ def main():
     ap.add_argument("--map", default=DEFAULT_MAP)
     ap.add_argument("--every", type=int, default=3, help="replay: frame stride (3 = 10 Hz)")
     ap.add_argument("--min-alt", type=float, default=60.0)
-    ap.add_argument("--fix-period", type=float, default=0.5,
-                    help="seconds between map fixes. 1.0 until 20 Oct, when "
-                         "XFeat went from 1233 ms to 272 ms by being given "
-                         "ONE torch thread instead of six - it could not "
-                         "previously finish inside its own period. 0.5 s also "
-                         "pairs with the 0.5 m cap on each correction: "
-                         "together they give the map 1 m/s of authority to "
-                         "pull the estimate back, with no single fix able to "
-                         "move it more than half a metre.")
+    # 2.0 s, which is the 5 Oct report's value and MapFixWorker's own default.
+    #
+    # It had drifted to 0.5 here, and the reasoning written beside it was about
+    # CPU: "1.0 until 20 Oct, when XFeat went from 1233 ms to 272 ms by being
+    # given ONE torch thread instead of six - it could not previously finish
+    # inside its own period", plus the observation that 0.5 s paired with the
+    # 0.5 m correction cap gives the map 1 m/s of authority.
+    #
+    # Both of those are true and neither is why 2 s was chosen. 5 Oct set it
+    # for a different reason entirely, and the number it replaced was 0.4:
+    #
+    #   "The map was treated as the thing that breaks the hold. It is, above
+    #    80 m - 1.18 m/s of push on a stationary aircraft - but it is also the
+    #    only thing that bounds drift over distance... It now runs every 2 s
+    #    instead of every 0.4, which keeps the bound and removes most of the
+    #    shove."
+    #
+    # So the fast period was measured to SHOVE a stationary aircraft, and 0.5
+    # sits beside the 0.4 that was abandoned, not beside the 2.0 that replaced
+    # it. Giving the map 1 m/s of authority is the shove, described approvingly.
+    #
+    # This matters now rather than academically: on 21 Oct the matcher was
+    # measured working at 90-100 m for the first time - 8.3 m median error,
+    # 228 of 477 frames clearing min_inliers - so fixes are about to start
+    # arriving, and the period decides what they do when they do.
+    ap.add_argument("--fix-period", type=float, default=2.0,
+                    help="seconds between map fixes. 2.0 is the 5 Oct value: "
+                         "faster was measured to push a stationary aircraft "
+                         "at 1.18 m/s above 80 m while buying no extra bound "
+                         "on drift")
     ap.add_argument("--radius", type=float, default=150.0)
     ap.add_argument("--corners", type=int, default=300)
     ap.add_argument("--origin", help="lon,lat - GPS-denied start")

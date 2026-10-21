@@ -1,0 +1,130 @@
+"""Every map-matcher number, pinned to the report that set it.
+
+The rebuild drifted several of these, and the pattern each time was the same:
+a number changed for a sound reason that had nothing to do with why the
+original was chosen. This file names the source for each one so the next change
+has to argue with the measurement rather than with the code.
+
+Read against all fifteen status reports on 21 Oct, not grepped - two of the
+findings below only appear when the surrounding paragraph is read.
+"""
+import os
+import sys
+
+HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(HERE, "vps_vio"))
+
+from map_fuse import MapFuser  # noqa: E402
+from map_fix_worker import MapFixWorker  # noqa: E402
+import map_match_xfeat as MX  # noqa: E402
+import inspect  # noqa: E402
+
+fails = []
+
+
+def check(name, cond, detail=""):
+    print(f"  {'PASS' if cond else 'FAIL'}  {name}" + (f"   {detail}" if detail else ""))
+    if not cond:
+        fails.append(name)
+
+
+live = open(os.path.join(HERE, "vps_vio", "live_node.py")).read()
+W = inspect.signature(MapFixWorker.__init__).parameters
+L = inspect.signature(MX.locate).parameters
+
+# ------------------------------------------------- the search window
+
+print("the search window - 4 Oct, flown and kept")
+check("0.60 x altitude", W["window_alt_frac"].default == 0.60,
+      '"fixed 100 m -> 0.60. The matcher was guessing outside what the '
+      'frame could see at low altitude and cropping the search too tight at '
+      'high"')
+check("floored at 40 m and capped at radius_m",
+      "np.clip(self.window_alt_frac * altitude_m, 40.0, self.radius_m)"
+      in open(os.path.join(HERE, "vps_vio", "map_fix_worker.py")).read())
+check("radius_m 150", W["radius_m"].default == 150.0)
+
+# ------------------------------------------------- the gates
+
+print("\nthe three gates")
+check("min_inliers 12", L["min_inliers"].default == 12,
+      "UNVERIFIED against real imagery; 5 Oct measured 14-32 above 140 m")
+check("min_score 0.25", L["min_score"].default == 0.25,
+      '12 Oct: the gate "had never been applied on the XFeat path at all - '
+      'that branch hard-coded ok=True, so 189 of 189 fixes were accepted '
+      'including ones 85.66 m out"')
+check("min_margin 0.20", L["min_margin"].default == 0.20,
+      "no report sets this; it is a code-level value and unchanged")
+check("tol_px 4.0", L["tol_px"].default == 4.0, "likewise")
+
+# min_score is pinned at its report value above, but the report that set it
+# also doubted it in the same paragraph, and the 21 Oct measurement agrees:
+#
+#   12 Oct: "Its rejections track our own error - 1, 13, 3, 15 against errors
+#   of 17, 33, 17 and 74 m - because the matcher takes its window from our
+#   estimate, so the gate closes exactly when it needs to be open. map_fuse's
+#   own outlier gate already concedes after a run of rejections; a score gate
+#   placed before it bypasses that."
+#
+#   21 Oct, 477 matches at 90-100 m: the score's correlation with the actual
+#   error is -0.118, the inliers' -0.158, the margin's +0.034. None of the
+#   three predicts how wrong a fix is, and no frame in the flight reached 0.25
+#   - the maximum was 0.248.
+#
+# Changing it is the pilot's call, so this pins what is set rather than what
+# might be better.
+
+# ------------------------------------------------- the altitude floor
+
+print("\nthe altitude floor - and the proposal to lower it was RULED OUT")
+check("min_alt_m 60", W["min_alt_m"].default == 60.0)
+check("not 30", W["min_alt_m"].default != 30.0,
+      '9 Oct overturned 8 Oct: "Ruled out. That recommendation rested on the '
+      'map being accurate at 30-45 m. With the fix\'s own position logged, '
+      'the map is 20 m wrong overall and 33.5 m wrong when the aircraft is '
+      'stationary, which is exactly the landing case it was meant to improve"')
+
+# ------------------------------------------------- the fix period
+
+print("\nthe fix period - 5 Oct, and the reason is not CPU")
+check("MapFixWorker's default is 2.0", W["fix_period_s"].default == 2.0)
+check("the CLI agrees", 'ap.add_argument("--fix-period", type=float, default=2.0,' in live,
+      '5 Oct: "It now runs every 2 s instead of every 0.4, which keeps the '
+      'bound and removes most of the shove" - 1.18 m/s of push on a '
+      'stationary aircraft above 80 m')
+check("and so does VpsNode", "fix_period_s: float = 2.0" in live,
+      "three defaults for one number is how 0.5 survived")
+
+# ------------------------------------------------- the fuser
+
+print("\nwhat the fuser does with a fix that passes")
+f = MapFuser()
+check("fix_sigma_m 20", abs(f.fix_var ** 0.5 - 20.0) < 1e-6,
+      '9 Oct: "the map\'s median error is 20.0 m against our own 6.6 m"')
+check("max_correction_m 0.5", abs(f.max_correction_m - 0.5) < 1e-9,
+      '3 Oct: raised to 1.5-3.0 once and "the hold fell from 11-14 s to '
+      '4.5-9.0 s while map_move_m sat at exactly 1.50". Reverted the same '
+      'afternoon')
+check("gate_sigmas 3.0", abs(f.gate - 3.0) < 1e-9)
+
+# ------------------------------------------------- what must NOT come back
+
+print("\nthree things that were flown and REVERTED, and must stay out")
+src_all = live + open(os.path.join(HERE, "vps_vio", "map_fix_worker.py")).read() \
+    + open(os.path.join(HERE, "vps_vio", "map_fuse.py")).read()
+check("no MAP_RAMP_S", "RAMP" not in src_all.upper(),
+      '5 Oct: "It killed the implied-speed spike and DOUBLED the hover box '
+      'above 60 m, 6.19 -> 11.26 m... a spread lie is more believable than a '
+      'sharp one"')
+check("no MAP_FIX_BIAS", "FIX_BIAS" not in src_all.upper()
+      and "fix_bias" not in src_all,
+      '13 Oct: "With the bias constant gone the map\'s offset is now N -1.69 '
+      '/ E -0.22 m... what was removed was the error we were adding to it"')
+check("anisotropic resampling stays behind an env var",
+      'os.environ.get("XFEAT_ANISO")' in
+      open(os.path.join(HERE, "vps_vio", "map_match_xfeat.py")).read(),
+      '12 Oct: switching it on "made the total error worse, 12.21 to 14.44 m. '
+      'Ruled out"')
+
+print("\n" + ("ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}"))
+sys.exit(1 if fails else 0)
