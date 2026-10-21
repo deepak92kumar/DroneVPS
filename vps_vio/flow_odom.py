@@ -287,7 +287,34 @@ def shift_to_ne(dpx: np.ndarray, *, altitude_m: float, focal_px: float,
     # 0.018% - 1.8 cm per 100 m - so this is correctness, not a cure.
     fy = focal_px if focal_y_px is None else focal_y_px
     fwd = dpx[1] * (altitude_m / fy)
-    right = dpx[0] * (altitude_m / focal_px)
+    # THE MINUS IS THE 21 OCT FIX, and it is the whole of the runaway.
+    #
+    # The sign above came from "regressing flow against GPS over 376 steps of
+    # the 27 Sep flight", which is a different airframe and a camera that has
+    # been remounted since - accel_to_ne's own docstring says so. It was never
+    # re-measured, and it was wrong on this mount for the sideways axis only.
+    #
+    # Forward motion was therefore fine and sideways motion came out backwards,
+    # which is exactly why this took three flights to see: how broken a flight
+    # looked depended entirely on how much of it was flown sideways. Scored on
+    # the direction of the reported velocity against the raw receiver:
+    #
+    #   flight   sideways   as it was        with this minus
+    #   221        48%      33 deg, 73%      7 deg,  94%
+    #   223        98%     160 deg,  8%     10 deg,  99%
+    #   224        57%      21 deg, 62%      7 deg,  97%
+    #
+    # Log 223 is the one that gives it away: 98% of its energy was sideways,
+    # the aircraft was flying 83 degrees off its own heading, and the reported
+    # velocity pointed 160 degrees from the truth. In Loiter that is a runaway
+    # and it ran away - position error 0.5 -> 21.4 m in fifteen seconds.
+    #
+    # Two whole days of derotation work were spent shuffling this error around:
+    # the FC attitude, the camera gyro, the fused orientation, a run-time
+    # validator for the sign. None of them could have fixed it, because the
+    # tilt correction and the axis sign are different things and only one of
+    # them was wrong.
+    right = -dpx[0] * (altitude_m / focal_px)
     t = np.radians(yaw_deg)
     north = fwd * np.cos(t) - right * np.sin(t)
     east = fwd * np.sin(t) + right * np.cos(t)
