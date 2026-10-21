@@ -38,6 +38,7 @@ class Vel:
     valid = True
     deadbanded = False
     bias_frozen = True
+    flow_vn = flow_ve = accel_n = accel_e = 0.0
     reason = "ok"
 
 
@@ -89,7 +90,14 @@ check("widths match", len(row) == len(CSV_COLUMNS),
 #
 # 55 once derotation started saying which of its three sources ran on each
 # frame, and how far the two independent ones disagreed when both were there.
-check("and there are the columns we expect", len(CSV_COLUMNS) == 55,
+#
+# 59 once the velocity bridge's two INPUTS joined them - the flow velocity it
+# was handed and the acceleration it integrated. Log 225 showed the blend was
+# doubling the reported speed and halving its correlation with truth, and then
+# could not be replayed at a different tau_s because neither input had been
+# written down. The gain had to be reasoned instead of swept. That is the
+# second time a velocity fault has been undiagnosable from the recording.
+check("and there are the columns we expect", len(CSV_COLUMNS) == 59,
       str(len(CSV_COLUMNS)))
 i = CSV_COLUMNS.index("fc_d_roll")
 check("the three derotation opinions sit together",

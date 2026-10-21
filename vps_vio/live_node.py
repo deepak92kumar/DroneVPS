@@ -773,6 +773,10 @@ CSV_COLUMNS = ["t", "north_m", "east_m", "lon", "lat", "sigma_m",
     "vel_deadband", "vel_age_s", "vel_flow_updates",
     "vel_bias_n", "vel_bias_e", "vel_bias_frozen",
     "vel_reason",
+    # The bridge's two INPUTS. Added 21 Oct because log 225 proved the
+    # accel blend was inflating the speed and then could not be replayed
+    # at a different tau_s: neither term was written down.
+    "vel_flow_vn", "vel_flow_ve", "vel_accel_n", "vel_accel_e",
     # Derotation: what the FC said the tilt did, and what the
     # camera's own gyro integrated over the same interval.
     # Logged side by side because the gyro's axis mapping and
@@ -886,6 +890,8 @@ def csv_row(est, f, v, gN, gE, err):
             f"{v.age_s:.3f}", v.flow_updates,
             f"{v.bias_n:.5f}", f"{v.bias_e:.5f}",
             int(v.bias_frozen), v.reason,
+            f"{v.flow_vn:.3f}", f"{v.flow_ve:.3f}",
+            f"{v.accel_n:.3f}", f"{v.accel_e:.3f}",
             "" if est["fc_d_roll"] is None else f"{est['fc_d_roll']:.4f}",
             "" if est["fc_d_pitch"] is None else f"{est['fc_d_pitch']:.4f}",
             "" if est["gyro_d_roll"] is None else f"{est['gyro_d_roll']:.4f}",

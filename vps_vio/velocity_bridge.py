@@ -85,6 +85,14 @@ class VelocityState:
     bias_n: float = 0.0          # accel bias estimate, north
     bias_e: float = 0.0
     bias_frozen: bool = True     # was bias adaptation allowed this step
+    # The INPUTS, so that a flight can be replayed at a different tau_s.
+    # Log 225 could not be: it showed that the accel blend was inflating the
+    # speed but carried neither term, so the new gain had to be reasoned
+    # instead of swept. Same lesson as the five columns added after 8 Oct.
+    flow_vn: float = 0.0         # last accepted flow velocity, NED m/s
+    flow_ve: float = 0.0
+    accel_n: float = 0.0         # last horizontal accel pushed, NED m/s^2
+    accel_e: float = 0.0
 
 
 class VelocityBridge:
@@ -98,6 +106,39 @@ class VelocityBridge:
     tau_s is how quickly the estimate is pulled onto flow. It is a time
     constant, not a leak: it pulls toward the flow measurement, never toward
     zero, so its steady-state gain to a constant flow input is exactly 1.
+
+    tau_s IS NOT SETTLED AND LOG 225 COULD NOT SETTLE IT. Recorded here
+    because it was briefly changed to 0.05 on the strength of a measurement
+    that was wrong, and the mistake is worth keeping.
+
+    The claim was that the accel blend inflated the speed: flow-only read
+    p50 0.53 m/s and this module's output 1.04, against a receiver truth of
+    0.17. But the flow-only figure came from the position path smoothed over
+    30 samples while the output was read raw. Smoothed the same way at every
+    width, on log 225 / vps_00059:
+
+        width   flow-only   output   truth    corr N flow / output
+          1       2.13       1.04     n/a        -0.093 / +0.266
+          3       1.69       1.04     n/a        +0.072 / +0.263
+         10       0.90       1.00     0.15       +0.235 / +0.253
+         30       0.53       0.75     0.17       +0.412 / +0.234
+
+    So the blend HALVES the raw flow velocity rather than doubling it, and at
+    high frequency it correlates better with truth than flow does. Lowering
+    tau_s would have made the output follow that raw signal more closely and
+    driven XKF4.SV - which is what tripped ALT_HOLD at 166.4 s - the wrong
+    way.
+
+    What the table actually indicts is the flow velocity itself: p50 2.13 m/s
+    raw while the aircraft moved at 0.17. That is not a surprise, it is the
+    number already written down a few lines below - noise sigma = 0.0867 x
+    altitude, so 2.69 m/s at the 31 m this flight flew. The blend exists to
+    filter exactly that, and SV is high because 2.7 m/s of input noise is
+    more than any single-pole filter can hide.
+
+    The honest state: this gain wants a sweep, the sweep wants the module's
+    own inputs, and log 225 carried neither. flow_vn / flow_ve / accel_n /
+    accel_e below were added for that reason and nothing else.
     """
 
     def __init__(self, *, tau_s: float = 0.35, flow_timeout_s: float = 0.6,
@@ -140,6 +181,7 @@ class VelocityBridge:
         self.rejected_jump = 0
         self._jump_run = 0
         self._vn_flow = self._ve_flow = None
+        self._an = self._ae = 0.0
         self._last_alt_m = 0.0
         # The output slew, from the 9 Oct report. See value().
         self.slew_mps2 = float(slew_mps2)
@@ -181,6 +223,7 @@ class VelocityBridge:
             return
         if not self._started:
             return                      # no flow yet: nothing to carry
+        self._an, self._ae = float(an), float(ae)
         self.vn += (an - self.bias_n) * dt
         self.ve += (ae - self.bias_e) * dt
         self.accel_steps += 1
@@ -324,6 +367,9 @@ class VelocityBridge:
             bias_frozen=self._bias_frozen(t),
             deadband_mps=self.deadband_for(altitude_m),
             speed_mps=math.hypot(self.vn, self.ve),
+            flow_vn=0.0 if self._vn_flow is None else self._vn_flow,
+            flow_ve=0.0 if self._ve_flow is None else self._ve_flow,
+            accel_n=self._an, accel_e=self._ae,
         )
         if not self._started or self._t_flow is None:
             st.reason = "no flow yet"

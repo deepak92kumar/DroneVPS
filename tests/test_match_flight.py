@@ -135,6 +135,7 @@ class Vel:
     valid = True
     deadbanded = False
     bias_frozen = True
+    flow_vn = flow_ve = accel_n = accel_e = 0.0
     reason = "ok"
 
 
