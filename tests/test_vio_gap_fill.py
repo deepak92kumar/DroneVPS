@@ -106,7 +106,8 @@ def node():
     # here. "gyro" is the flying default; this fixture's frames carry no gyro
     # delta, so it falls back to the FC attitude on its own.
     n.derotate = "gyro"
-    n.n_derot_gyro = n.n_derot_fc = 0
+    n.n_derot_gyro = n.n_derot_quat = n.n_derot_fc = n.n_derot_both = 0
+    n.derot_dis_roll = n.derot_dis_pitch = None
     n.vel = VelocityBridge()
     n.set_origin(74.613182, 30.896742)
     return n

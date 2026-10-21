@@ -86,7 +86,10 @@ check("widths match", len(row) == len(CSV_COLUMNS),
 # 52 once GAME_ROTATION_VECTOR's per-frame delta joined them. Derotation has
 # three possible sources now and the CSV carries all three side by side -
 # fc_d_*, gyro_d_*, quat_d_* - so one flight settles which to fly on.
-check("and there are the columns we expect", len(CSV_COLUMNS) == 52,
+#
+# 55 once derotation started saying which of its three sources ran on each
+# frame, and how far the two independent ones disagreed when both were there.
+check("and there are the columns we expect", len(CSV_COLUMNS) == 55,
       str(len(CSV_COLUMNS)))
 i = CSV_COLUMNS.index("fc_d_roll")
 check("the three derotation opinions sit together",

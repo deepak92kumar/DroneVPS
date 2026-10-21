@@ -120,10 +120,19 @@ check("and the flag can still reproduce an old flight",
       'choices=("gyro", "fc")' in src)
 check("the gyro path is taken when the frame carries a delta",
       'if self.derotate == "gyro" and gd_r is not None and gd_p is not None:' in src)
-check("the FC remains the fallback, not an equal option",
-      "d = d - attitude_shift_px(self.prev_att, att)" in src
-      and src.index("d = d - gyro_shift_px(gd_r, gd_p)")
-      < src.index("d = d - attitude_shift_px(self.prev_att, att)"))
+check("the FC is LAST, below the fused orientation",
+      src.index("d = d - gyro_shift_px(gd_r, gd_p)")
+      < src.index("d = d - gyro_shift_px(qd_r, qd_p)")
+      < src.index("d = d - attitude_shift_px(self.prev_att, att)"),
+      "gyro, then GAME_ROTATION_VECTOR, then the FC - which measured worse "
+      "than no derotation at all, so it must not be the first fallback")
+check("the fused orientation uses the same coefficients",
+      "gyro_shift_px(qd_r, qd_p)" in src,
+      "same quantity, same camera frame, same degrees as the gyro integral")
+check("which source ran is written on every row", '"derot_src"' in src)
+check("and the two independent sources' disagreement with it",
+      '"derot_dis_roll"' in src,
+      "this is what says whether GRV belongs above or below the FC")
 check("both are SUBTRACTED, so the sign lives in the constant",
       "d = d - gyro_shift_px(gd_r, gd_p)" in src,
       "a negative coefficient is the inversion, applied in one place")

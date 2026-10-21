@@ -786,6 +786,12 @@ CSV_COLUMNS = ["t", "north_m", "east_m", "lon", "lat", "sigma_m",
     # the gyro - sign flipped - took the sent-velocity error from p95 3.58 to
     # 1.22 m/s. This column is what tests the same claim for the fused source.
     "quat_d_roll", "quat_d_pitch", "quat_n",
+    # Which of the three actually derotated this frame, and - where both the
+    # gyro and the fused orientation were present - how far they disagreed.
+    # The disagreement is the measurement that says whether
+    # GAME_ROTATION_VECTOR belongs above or below the FC attitude as a
+    # fallback, and whether a gyro has started to go wrong.
+    "derot_src", "derot_dis_roll", "derot_dis_pitch",
     # Added 20 Oct with the rows that carry them. The header
     # was NOT updated at the time and 1162 rows were written
     # 39 wide under a 32-wide header before it was noticed -
@@ -888,6 +894,9 @@ def csv_row(est, f, v, gN, gE, err):
             "" if est.get("quat_d_roll") is None else f"{est['quat_d_roll']:.4f}",
             "" if est.get("quat_d_pitch") is None else f"{est['quat_d_pitch']:.4f}",
             est.get("quat_n") or 0,
+            est.get("derot_src") or "",
+            "" if est.get("derot_dis_roll") is None else f"{est['derot_dis_roll']:.4f}",
+            "" if est.get("derot_dis_pitch") is None else f"{est['derot_dis_pitch']:.4f}",
             est["accel_n"],
             "" if est["depth_med_m"] is None else f"{est['depth_med_m']:.2f}",
             est["depth_dropped"], est["n_dr"],
@@ -1415,7 +1424,11 @@ class VpsNode:
         self._step_refusals = 0
         # Which source actually derotated each frame, so a flight says so
         # rather than being assumed.
-        self.n_derot_gyro = self.n_derot_fc = 0
+        self.n_derot_gyro = self.n_derot_quat = self.n_derot_fc = 0
+        # How far the fused orientation and the gyro disagreed on the frames
+        # where both were present. Logged per frame, not just counted.
+        self.n_derot_both = 0
+        self.derot_dis_roll = self.derot_dis_pitch = None
         # Flow AND acceleration on this path - step() pushes both. The bridge
         # still holds rather than dead-reckoning when no acceleration arrives,
         # which is what a replayed recording and a silent IMU both look like,
@@ -1532,6 +1545,9 @@ class VpsNode:
         """One frame in, one position estimate out."""
         if f["alt"] is None or f["yaw"] is None or self.origin is None:
             return None
+        # Counters as they stood on entry, so the row can name the source that
+        # actually ran on THIS frame rather than the one that ran most often.
+        _dg, _dq, _df = self.n_derot_gyro, self.n_derot_quat, self.n_derot_fc
         att = (f["roll"], f["pitch"], f["yaw"])
         # What the FC says the tilt changed by, for comparison against what the
         # camera's own gyro integrated over the same interval. Derotation uses
@@ -1593,13 +1609,51 @@ class VpsNode:
             # This is a RESTORATION, not an experiment. Gyro derotation was
             # built, flown and carried at 95% from 28 Sep until the NVMe went,
             # and 30 Sep names it "the real cure". The rebuild lost it.
+            # THREE SOURCES, IN THE ORDER THEY WERE MEASURED TO BE GOOD.
+            #
+            #   1 the camera gyro          p50 1.15  p95  7.54 m/s
+            #   2 GAME_ROTATION_VECTOR     unmeasured in flight - see below
+            #   3 the FC's attitude        p50 2.97  p95 31.05
+            #     (no derotation at all    p50 2.50  p95 24.01)
+            #
+            # The FC is LAST and that is the point: it is worse than doing
+            # nothing, because it arrives at ~4 Hz against this 30 Hz loop, so
+            # it reports no rotation on most frames and several frames' worth
+            # on the rest, which then gets subtracted from one frame's shift.
+            # Leaving it as the only fallback meant a frame the gyro missed got
+            # the worst available answer.
+            #
+            # GAME_ROTATION_VECTOR sits between them, and honestly: it has
+            # never flown. It was enabled on 21 Oct, so no recording with real
+            # motion contains it. What is known is that it is the BNO's own
+            # fusion of the same gyro against gravity, delivered as a
+            # quaternion, and that its per-frame delta is computed here as the
+            # relative rotation in the same camera frame and the same degrees
+            # as the gyro's integral - so the same coefficients apply, and a
+            # flight will say whether it belongs above or below the FC rather
+            # than this comment.
             gd_r, gd_p = f.get("gyro_d_roll"), f.get("gyro_d_pitch")
+            qd_r, qd_p = f.get("quat_d_roll"), f.get("quat_d_pitch")
             if self.derotate == "gyro" and gd_r is not None and gd_p is not None:
                 d = d - gyro_shift_px(gd_r, gd_p)
                 self.n_derot_gyro += 1
+                # What the two independent sources disagreed by, carried out so
+                # a flight measures it. A gyro going bad shows up here as a
+                # growing disagreement with a source that cannot drift.
+                if qd_r is not None and qd_p is not None:
+                    self.derot_dis_roll = float(qd_r) - float(gd_r)
+                    self.derot_dis_pitch = float(qd_p) - float(gd_p)
+                    self.n_derot_both += 1
+                else:
+                    self.derot_dis_roll = self.derot_dis_pitch = None
+            elif self.derotate != "fc" and qd_r is not None and qd_p is not None:
+                d = d - gyro_shift_px(qd_r, qd_p)
+                self.n_derot_quat += 1
+                self.derot_dis_roll = self.derot_dis_pitch = None
             else:
                 d = d - attitude_shift_px(self.prev_att, att)
                 self.n_derot_fc += 1
+                self.derot_dis_roll = self.derot_dis_pitch = None
             dn, de = shift_to_ne(d, altitude_m=f["alt"], focal_px=self.focal,
                                  yaw_deg=f["yaw"], focal_y_px=self.focal_y)
             # ONE decision for both consumers. Until 21 Oct predict() ran here
@@ -1681,6 +1735,11 @@ class VpsNode:
                     quat_d_roll=f.get("quat_d_roll"),
                     quat_d_pitch=f.get("quat_d_pitch"),
                     quat_n=f.get("quat_n"),
+                    derot_src=("gyro" if self.n_derot_gyro > _dg
+                               else "quat" if self.n_derot_quat > _dq
+                               else "fc" if self.n_derot_fc > _df else ""),
+                    derot_dis_roll=self.derot_dis_roll,
+                    derot_dis_pitch=self.derot_dis_pitch,
                     gyro_n=f.get("gyro_n"), accel_n=f.get("accel_n"),
                     n_step_rej=self.n_step_rejected,
                     depth_med_m=self.tracker.depth_med_m,
@@ -2366,10 +2425,11 @@ def main():
     print(f"flow steps {node.n_flow}, map fixes {node.n_fix} "
           f"(worker: {node.worker.submitted} submitted, {node.worker.dropped} dropped), "
           f"fuser accepted {node.fuser.n_fix} rejected {node.fuser.n_rejected}")
-    tot = node.n_derot_gyro + node.n_derot_fc
+    tot = node.n_derot_gyro + node.n_derot_quat + node.n_derot_fc
     if tot:
         print(f"derotation: {node.n_derot_gyro} frames from the camera gyro, "
-              f"{node.n_derot_fc} fell back to the FC attitude "
+              f"{node.n_derot_quat} from GAME_ROTATION_VECTOR, "
+              f"{node.n_derot_fc} from the FC attitude "
               f"({100.0 * node.n_derot_gyro / tot:.1f}% gyro)")
     if gps_sender is not None:
         print(f"GPS_INPUT bheje: {gps_sender.sent}")
