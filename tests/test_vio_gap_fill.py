@@ -102,6 +102,11 @@ def node():
     n.n_fix = n.n_flow = n.n_dr = 0
     n.n_step_rejected = 0
     n._step_refusals = 0
+    # The bare node skips __init__, so the derotation source has to be set
+    # here. "gyro" is the flying default; this fixture's frames carry no gyro
+    # delta, so it falls back to the FC attitude on its own.
+    n.derotate = "gyro"
+    n.n_derot_gyro = n.n_derot_fc = 0
     n.vel = VelocityBridge()
     n.set_origin(74.613182, 30.896742)
     return n

@@ -33,6 +33,64 @@ def _R(roll_deg, pitch_deg, yaw_deg):
 ATT_PX_PER_DEG_ROLL_X = 13.14
 ATT_PX_PER_DEG_PITCH_Y = 13.17
 
+# THE GYRO'S OWN COEFFICIENTS, and they are not the two above.
+#
+# Gyro derotation is not a new idea on this project - it was built, flown and
+# carried at 95% from 28 Sep onwards, and the rebuild lost it. The 3 Oct report
+# gives the numbers and how they were got:
+#
+#   "Roll re-measured on hover only, pooled over 15 flights and 39723 samples:
+#    -14.8 px/deg, steady when restricted to the strongest rotations, so
+#    -13.82 was 6% short. Pitch deliberately left at 13.82 - its fit climbs
+#    toward theory as signal grows, which is attenuation, not gain."
+#
+# 13.82 is the geometry: 791.72 * tan(1 deg). So roll is 7% above theory and
+# measured that way over 39723 samples, and pitch is theory on purpose.
+#
+# THE SIGN IS THE WHOLE POINT. These are subtracted, exactly as the FC's are,
+# so a negative coefficient is the inversion. Measured on the 20-21 Oct
+# recordings against the FC's own attitude over matched intervals:
+# r = -0.994 to -0.998 and scale -0.983 to -1.008 on both axes, across three
+# flights. The camera gyro tracks the aircraft to one or two percent and points
+# the other way.
+#
+# Replayed through the whole velocity path on the 21 Oct flight, against the
+# real receiver's ground speed, 11398 samples above 5 m:
+#
+#     FC attitude (what flew)      error p50 0.725  p95 3.576  1.9% over 5 m/s
+#     gyro, these coefficients     error p50 0.155  p95 1.243  0.0% over 5 m/s
+#
+# The coefficient barely matters - 13.82/13.82 gives p50 0.154 - and one flight
+# cannot separate them. 15 flights and 39723 samples can, so the report wins.
+GYRO_PX_PER_DEG_ROLL_X = -14.80
+GYRO_PX_PER_DEG_PITCH_Y = -13.82
+
+
+def gyro_shift_px(d_roll_deg: float, d_pitch_deg: float) -> np.ndarray:
+    """Image shift caused purely by tilting, from the CAMERA's own gyro.
+
+    Same job as attitude_shift_px and a different source. The FC's attitude
+    arrives at about 4 Hz against a 30 Hz loop, so on 88% of the 21 Oct
+    flight's frames it reported no rotation at all - and on the few where it
+    did, it reported several frames' worth and that got subtracted from one.
+    The 30 Sep report has the extreme case: "the FC's attitude had sat frozen
+    for four frames and then jumped 4.67 deg of roll and 11.82 of pitch in one,
+    so the derotation subtracted 167 px from a 1 px shift - 802 m/s."
+    Measured on the 21 Oct flight, FC-attitude derotation is WORSE than no
+    derotation at all: per-frame speed error p50 2.97 against 2.50 raw.
+
+    The gyro sees every frame, at 100 Hz, and the caller hands in its integral
+    across exactly this frame interval.
+
+    Only the DIFFERENCE matters here, never an absolute angle, which is why the
+    gyro's unbounded integration drift costs nothing: a slowly accumulating
+    offset cancels in a difference. It is also why GAME_ROTATION_VECTOR, which
+    is bounded, buys nothing - it is logged beside this for comparison and not
+    used.
+    """
+    return np.array([GYRO_PX_PER_DEG_ROLL_X * float(d_roll_deg),
+                     GYRO_PX_PER_DEG_PITCH_Y * float(d_pitch_deg)])
+
 
 def attitude_shift_px(att_prev, att_cur) -> np.ndarray:
     """Image shift caused purely by the aircraft tilting, in pixels.

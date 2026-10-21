@@ -196,7 +196,16 @@ fast, and loop-rate dependent (12 Hz gave 4.49 m a minute, 30 Hz gave 6.67).
 
 - **Emergency stop switch** (`RCx_OPTION = 31`). Offered, not taken. The pilot's
   rule is to ask before fitting a guard.
-- **Derotation runs off the FC attitude**, which does not move on **89–95%**
+- ~~**Derotation runs off the FC attitude**~~ — **moved to the camera gyro,
+  21 Oct, not flown.** It was a REBUILD REGRESSION, not an open question: gyro
+  derotation was built, flown and carried at 95% from 28 Sep (*"the largest
+  single reduction in the chain"*, 4 Oct) and the rebuild lost it. Coefficients
+  are the 3 Oct report's — roll **−14.80** px/deg from 15 flights and 39723
+  samples, pitch **−13.82**, left at theory on purpose. Replayed on the 21 Oct
+  flight the sent-velocity error goes p50 0.725 → **0.155** m/s, p95 3.576 →
+  **1.243**, and samples over 5 m/s from 1.9% to **none**. The old text follows,
+  because its figure was wrong:
+- ~~Derotation runs off the FC attitude, which does not move on **89–95%**~~
   of frames (it updates at ~4 Hz against a 30 Hz loop). The camera gyro is
   **sign-inverted** against it on both axes — but the old r = −0.80 was a
   confounded figure, comparing a one-frame gyro delta against an FC delta

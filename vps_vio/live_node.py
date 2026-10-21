@@ -20,7 +20,8 @@ import argparse, csv, io, os, sys, time
 import numpy as np, cv2
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from flow_odom import FlowTracker, shift_to_ne, attitude_shift_px
+from flow_odom import (FlowTracker, shift_to_ne, attitude_shift_px,
+                       gyro_shift_px)
 from map_cache import MapCache
 from map_fix_worker import MapFixWorker
 from map_fuse import MapFuser
@@ -1364,9 +1365,15 @@ class VpsNode:
 
     def __init__(self, cache: MapCache, focal_px: float, *,
                  fix_period_s: float = 1.0, radius_m: float = 150.0,
-                 max_corners: int = 300, K=None, D=None, focal_y_px=None):
+                 max_corners: int = 300, K=None, D=None, focal_y_px=None,
+                 derotate: str = "gyro"):
         self.cache = cache
         self.focal = float(focal_px)
+        # "gyro" or "fc". The gyro is the default because it is what was
+        # measured to work and what this project flew until the rebuild lost
+        # it; "fc" exists to reproduce a flight that used the old path, not as
+        # an equal option.
+        self.derotate = str(derotate)
         # fy is 791.58 against fx 791.72 on this camera - a ratio of 1.000177,
         # which is 1.8 cm per 100 m travelled. It is carried because it is free
         # and correct, NOT because it is a fix for anything.
@@ -1406,6 +1413,9 @@ class VpsNode:
         # second is what lets the gate stand down. See step_is_possible.
         self.n_step_rejected = 0
         self._step_refusals = 0
+        # Which source actually derotated each frame, so a flight says so
+        # rather than being assumed.
+        self.n_derot_gyro = self.n_derot_fc = 0
         # Flow AND acceleration on this path - step() pushes both. The bridge
         # still holds rather than dead-reckoning when no acceleration arrives,
         # which is what a replayed recording and a silent IMU both look like,
@@ -1559,7 +1569,37 @@ class VpsNode:
         d, ntrk = self.tracker.step(f["img"], depth=f.get("depth"))
         flowed = False
         if d is not None and self.prev_att is not None:
-            d = d - attitude_shift_px(self.prev_att, att)
+            # DEROTATION. The camera's own gyro by default, the FC's
+            # attitude only as a fallback and only because something has to
+            # happen when the gyro reports nothing for a frame.
+            #
+            # The FC's attitude arrives at ~4 Hz against this 30 Hz loop, so on
+            # the 21 Oct flight it said "no rotation" on 88% of frames and
+            # several frames' worth on the rest - which then got subtracted
+            # from one frame's shift. Measured on that flight, per-frame speed
+            # error against the real receiver:
+            #
+            #     no derotation at all      p50 2.50  p95 24.01 m/s
+            #     the FC's attitude         p50 2.97  p95 31.05
+            #     the gyro, sign corrected  p50 1.15  p95  7.54
+            #
+            # The FC path is WORSE than doing nothing. Through the whole
+            # velocity path the same change takes the sent error from p50 0.725
+            # / p95 3.576 to p50 0.155 / p95 1.243, and samples over 5 m/s from
+            # 1.9% to none - and it was the velocity that tripped XKF4.SV to
+            # 7.95 and 10.92 against a 1.2 gate and dropped the aircraft into
+            # ALT_HOLD on both VPS handovers.
+            #
+            # This is a RESTORATION, not an experiment. Gyro derotation was
+            # built, flown and carried at 95% from 28 Sep until the NVMe went,
+            # and 30 Sep names it "the real cure". The rebuild lost it.
+            gd_r, gd_p = f.get("gyro_d_roll"), f.get("gyro_d_pitch")
+            if self.derotate == "gyro" and gd_r is not None and gd_p is not None:
+                d = d - gyro_shift_px(gd_r, gd_p)
+                self.n_derot_gyro += 1
+            else:
+                d = d - attitude_shift_px(self.prev_att, att)
+                self.n_derot_fc += 1
             dn, de = shift_to_ne(d, altitude_m=f["alt"], focal_px=self.focal,
                                  yaw_deg=f["yaw"], focal_y_px=self.focal_y)
             # ONE decision for both consumers. Until 21 Oct predict() ran here
@@ -1696,6 +1736,12 @@ def main():
     ap.add_argument("--notify-period", type=float, default=3.0,
                     help="seconds between VPS status lines on the radio "
                          "(warnings are immediate regardless; default 3)")
+    ap.add_argument("--derotate", choices=("gyro", "fc"), default="gyro",
+                    help="where the tilt to remove from the flow comes from. "
+                         "The camera's own gyro by default - the FC's attitude "
+                         "arrives at ~4 Hz against a 30 Hz loop and measured "
+                         "WORSE than no derotation at all. 'fc' is for "
+                         "reproducing an older flight")
     ap.add_argument("--no-scr-origin", action="store_true",
                     help="do not take the origin from SCR_USER1/2")
     ap.add_argument("--out", help="estimate log CSV, or a DIRECTORY - a "
@@ -1847,7 +1893,8 @@ def main():
                    K=getattr(src, "K", None), D=getattr(src, "D", None),
                    focal_y_px=getattr(src, "focal_y", None),
                    fix_period_s=a.fix_period,
-                   radius_m=a.radius, max_corners=a.corners)
+                   radius_m=a.radius, max_corners=a.corners,
+                   derotate=a.derotate)
 
     wr = None
     fwriter = None
@@ -2319,6 +2366,11 @@ def main():
     print(f"flow steps {node.n_flow}, map fixes {node.n_fix} "
           f"(worker: {node.worker.submitted} submitted, {node.worker.dropped} dropped), "
           f"fuser accepted {node.fuser.n_fix} rejected {node.fuser.n_rejected}")
+    tot = node.n_derot_gyro + node.n_derot_fc
+    if tot:
+        print(f"derotation: {node.n_derot_gyro} frames from the camera gyro, "
+              f"{node.n_derot_fc} fell back to the FC attitude "
+              f"({100.0 * node.n_derot_gyro / tot:.1f}% gyro)")
     if gps_sender is not None:
         print(f"GPS_INPUT bheje: {gps_sender.sent}")
     if sender is not None:
