@@ -1375,13 +1375,35 @@ class VpsNode:
     def __init__(self, cache: MapCache, focal_px: float, *,
                  fix_period_s: float = 2.0, radius_m: float = 150.0,
                  max_corners: int = 300, K=None, D=None, focal_y_px=None,
-                 derotate: str = "gyro"):
+                 derotate: str = "fc"):
         self.cache = cache
         self.focal = float(focal_px)
-        # "gyro" or "fc". The gyro is the default because it is what was
-        # measured to work and what this project flew until the rebuild lost
-        # it; "fc" exists to reproduce a flight that used the old path, not as
-        # an equal option.
+        # "fc" or "gyro". REVERTED TO "fc" ON 21 OCT AFTER A FLIGHT.
+        #
+        # The gyro was made the default earlier that day on an offline replay
+        # that scored |our_speed - truth_speed|. That metric is a SCALAR: it
+        # rewards reporting too little exactly as much as reporting correctly,
+        # and it never looks at direction at all. The gyro version reported
+        # smaller speeds, so it won.
+        #
+        # Flown, and compared as VECTORS against the raw receiver over the
+        # moving samples of each flight:
+        #
+        #                       north slope   east slope   angle to truth
+        #   FC attitude          +0.795        +0.892        33 deg
+        #   camera gyro          -0.153        -0.535       160 deg
+        #
+        # east r = -0.884. The gyro path points the velocity almost exactly
+        # backwards, and the aircraft ran away in Loiter because of it: we told
+        # the flight controller it was moving one way while it drifted the
+        # other, so the controller pushed it further. Log 00000223, two VPS
+        # windows, position error growing 0.5 -> 21.4 m and 18.2 -> 43.3 m.
+        #
+        # The sign derivation behind -14.80/-13.82 was wrong, and the matched-
+        # interval measurement it rested on (gyro vs FC, scale -0.99) did not
+        # survive contact with a directional test. The gyro path stays
+        # reachable for offline work, where it must be scored on direction
+        # before it is ever flown again.
         self.derotate = str(derotate)
         # fy is 791.58 against fx 791.72 on this camera - a ratio of 1.000177,
         # which is 1.8 cm per 100 m travelled. It is carried because it is free
@@ -1816,12 +1838,14 @@ def main():
     ap.add_argument("--notify-period", type=float, default=3.0,
                     help="seconds between VPS status lines on the radio "
                          "(warnings are immediate regardless; default 3)")
-    ap.add_argument("--derotate", choices=("gyro", "fc"), default="gyro",
+    ap.add_argument("--derotate", choices=("gyro", "fc"), default="fc",
                     help="where the tilt to remove from the flow comes from. "
-                         "The camera's own gyro by default - the FC's attitude "
-                         "arrives at ~4 Hz against a 30 Hz loop and measured "
-                         "WORSE than no derotation at all. 'fc' is for "
-                         "reproducing an older flight")
+                         "The FC's attitude, because it is the only one that "
+                         "has flown and tracked: velocity slope +0.795/+0.892 "
+                         "against the receiver, 33 deg from the truth. 'gyro' "
+                         "pointed 160 deg out on log 00000223 and the aircraft "
+                         "ran away; it is offline-only until scored on "
+                         "DIRECTION")
     ap.add_argument("--no-scr-origin", action="store_true",
                     help="do not take the origin from SCR_USER1/2")
     ap.add_argument("--out", help="estimate log CSV, or a DIRECTORY - a "

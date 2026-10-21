@@ -115,8 +115,21 @@ check("the gyro would have spread it over the four frames it happened in",
 # ------------------------------------------------- the wiring
 
 print("\nthe wiring")
-check("the gyro is the default", 'derotate: str = "gyro"' in src)
-check("and the flag can still reproduce an old flight",
+# REVERTED 21 OCT AFTER A FLIGHT. The gyro was made the default on an offline
+# replay scoring |our_speed - truth_speed| - a SCALAR, which rewards reporting
+# too little exactly as much as reporting correctly and never looks at
+# direction. Compared as VECTORS against the raw receiver, flown:
+#
+#                       north slope   east slope   angle to truth
+#   FC attitude          +0.795        +0.892        33 deg
+#   camera gyro          -0.153        -0.535       160 deg
+#
+# east r = -0.884. The gyro path points the velocity almost exactly backwards,
+# and in Loiter the aircraft ran away on it - log 00000223, position error
+# growing 0.5 -> 21.4 m and 18.2 -> 43.3 m across two VPS windows.
+check("the FC attitude is the default again", 'derotate: str = "fc"' in src,
+      "the gyro is offline-only until it is scored on DIRECTION")
+check("the gyro is still reachable for offline work",
       'choices=("gyro", "fc")' in src)
 check("the gyro path is taken when the frame carries a delta",
       'if self.derotate == "gyro" and gd_r is not None and gd_p is not None:' in src)
