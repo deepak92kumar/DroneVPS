@@ -77,8 +77,15 @@ cfg = VpsConfig()
 N = cfg.flow_vel_frames
 print(f"VpsConfig.flow_vel_frames = {N}")
 check("the baseline is longer than one frame", N > 1, f"{N}")
-check("and not so long that the lag passes half a second",
-      N / 2 / 30.0 <= 0.5, f"lag {N / 2 / 30.0:.2f} s at 30 fps")
+# The bound was 0.5 s and moved to 0.75 on 22 Oct with the sweep behind it.
+# Below 60 m, where the map never runs, the velocity error at 0.5-2 m/s is
+# 0.90-1.22 at N=20 and 0.51-0.60 at N=40 - the latter under the 0.66 m/s
+# deadband at 31 m, so the band LOIT_SPEED_MS=3.0 commands is suppressed.
+# N=60 reads better still (0.36-0.49) and costs 1.0 s, which a position
+# controller acting on stale velocity can turn into oscillation; it is not
+# taken without a flight behind it.
+check("and not so long that the lag passes three quarters of a second",
+      N / 2 / 30.0 <= 0.75, f"lag {N / 2 / 30.0:.2f} s at 30 fps")
 
 DT = 1.0 / 30.0
 

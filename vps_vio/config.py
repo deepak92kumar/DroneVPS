@@ -167,7 +167,43 @@ class VpsConfig:
     # The displacements are the SAME ones the fuser consumed, so position and
     # velocity still cannot disagree about what the camera saw - which is what
     # the EKF reads as a velocity innovation.
-    flow_vel_frames: int = 20
+    # 20 -> 40 ON 22 OCT, after log 227 would not hold in any VPS window.
+    #
+    # The pilot's own observation settled where to look: on log 225 the
+    # aircraft anchored itself as long as no stick was given and ran away the
+    # moment one was. Measured below 60 m across logs 225/226/227, where the
+    # map never runs so this is flow alone, the velocity error against the raw
+    # receiver by the aircraft's TRUE speed:
+    #
+    #     N    lag    hover 0-0.5   0.5-1    1-2     2-3    3-5 m/s
+    #     20  0.33 s     0.50        0.90    1.22    2.44   5.70
+    #     30  0.50 s     0.29        0.58    0.68    2.23   4.65
+    #     40  0.67 s     0.24        0.51    0.60    1.97   3.98
+    #     60  1.00 s     0.17        0.36    0.49    1.54   2.56
+    #     90  1.50 s     0.16        0.43    0.61    1.42   2.06
+    #
+    # At N=20 the hover error (0.50) sits under the 31 m deadband of 0.66 and
+    # is suppressed - which IS the anchoring the pilot saw. The moment the
+    # aircraft moves at 0.5 m/s the error is 0.90, above the deadband, so it
+    # reaches the flight controller; and a sustained false velocity is the one
+    # thing LOITER cannot settle against, because with no stick it can only
+    # cancel a velocity error by flying. Hence the runaway on stick.
+    #
+    # N=40 puts 0.5-2 m/s at 0.51-0.60, BELOW that same deadband, so the band
+    # LOIT_SPEED_MS=3.0 actually commands is suppressed too. 60 is better
+    # still and costs 1.0 s of lag, which a position controller acting on
+    # stale velocity can turn into the oscillation this is meant to remove -
+    # not taken without a flight behind it.
+    #
+    # NOT a scale error and not derotation, both tested and both ruled out:
+    # correcting the measured scale (forward 0.903, sideways 0.873 on each
+    # axis's own dominant samples) made the velocity error WORSE by 9-13% and
+    # did nothing for position drift in either direction; and holding speed at
+    # 0.5-2 m/s, per-frame tilt of 0-0.10 deg and 0.2+ deg give the same error
+    # (1.42 vs 1.44), with corr(error, tilt) +0.109 against corr(error, speed)
+    # +0.662. What is left is the flow's own pixel noise: 1.4 m/s at 31 m is
+    # 1.2 px per frame, and a longer baseline is the only thing that touches it.
+    flow_vel_frames: int = 40
 
     # Stereo depth: ON, and for VIO ONLY.
     #
