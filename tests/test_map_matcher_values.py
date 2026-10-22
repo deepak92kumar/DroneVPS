@@ -49,10 +49,30 @@ check("radius_m 150", W["radius_m"].default == 150.0)
 print("\nthe three gates")
 check("min_inliers 12", L["min_inliers"].default == 12,
       "UNVERIFIED against real imagery; 5 Oct measured 14-32 above 140 m")
-check("min_score 0.10, the swept value", L["min_score"].default == 0.10,
-      "0.25 came from 12 Oct and was never swept; at 0.25 the 21 Oct flight "
-      "passed 0 of 477 matches at 90-100 m, its score topping out at 0.248")
-check("the worker agrees", _GATES["xfeat"]["min_score"] == 0.10)
+# 0.25 -> 0.10 -> 0.07, each step swept rather than guessed. 0.25 came from
+# 12 Oct and was never swept; at 0.25 the 21 Oct flight passed 0 of 477
+# matches at 90-100 m, its score topping out at 0.248. 0.10 -> 0.07 was swept
+# on 22 Oct over 78 frames in three altitude bands:
+#
+#     band      min_score   accept   per-fix err   system err
+#     75-90 m     0.10       34.6%      22.3 m       6.92 m
+#                 0.07       42.3%      22.3 m       6.26 m
+#     90-100 m    0.10       15.4%      18.2 m       8.48 m
+#                 0.07       19.2%      18.1 m       7.54 m
+#
+# The per-fix error does not degrade, so the fixes between 0.07 and 0.10 are
+# as good as those already passing. It matters because the SYSTEM error is set
+# by the fix RATE, not by any one fix: measured across our own flights, 0 fixes
+# gave 38-68 m above 60 m and 19 fixes at 0.27/s gave 4.50 m.
+check("min_score 0.07, the swept value", L["min_score"].default == 0.07,
+      "swept 0.25 -> 0.10 -> 0.07, each against real imagery")
+check("the worker agrees", _GATES["xfeat"]["min_score"] == 0.07)
+# Below 0.07 nothing changes, because min_inliers 12 becomes binding: at the
+# ~124 matches this matcher returns, a ratio of 0.10 and a count of 12 are the
+# same constraint. Lowering min_inliers alone did nothing at all.
+check("and min_inliers is the floor underneath it",
+      L["min_inliers"].default / 124.0 > L["min_score"].default,
+      "12/124 = 0.097, above the 0.07 ratio gate")
 check("but there is still a gate, which is what 12 Oct was about",
       L["min_score"].default > 0.0,
       'the XFeat branch once hard-coded ok=True and "189 of 189 fixes were '

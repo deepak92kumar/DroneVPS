@@ -182,7 +182,7 @@ def _translation(src: np.ndarray, dst: np.ndarray, tol_px: float):
 
 def locate(img_grey: np.ndarray, map_window: np.ndarray, geo_window, *,
            altitude_m: float, focal_px: float, yaw_deg: float, map_gsd_m: float,
-           map_gsd_x_m: float | None = None, min_inliers: int = 12, min_score: float = 0.10,
+           map_gsd_x_m: float | None = None, min_inliers: int = 12, min_score: float = 0.07,
            min_margin: float = 0.20, tol_px: float = 4.0,
            window_is_edges: bool = False,
            principal_xy=None) -> XFeatResult:
