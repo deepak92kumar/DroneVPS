@@ -185,7 +185,7 @@ def locate(img_grey: np.ndarray, map_window: np.ndarray, geo_window, *,
            map_gsd_x_m: float | None = None, min_inliers: int = 12, min_score: float = 0.07,
            min_margin: float = 0.20, tol_px: float = 4.0,
            window_is_edges: bool = False,
-           principal_xy=None) -> XFeatResult:
+           principal_xy=None, query_shape: str = "square") -> XFeatResult:
     """Match one frame to a map window and read off lon/lat.
 
     geo_window maps window pixel -> lon/lat.
@@ -230,7 +230,7 @@ def locate(img_grey: np.ndarray, map_window: np.ndarray, geo_window, *,
     # silently different answer.
     q = north_up_query(img_grey, altitude_m=altitude_m, focal_px=focal_px,
                        yaw_deg=yaw_deg, map_gsd_m=map_gsd_m,
-                       map_gsd_x_m=map_gsd_x_m,
+                       map_gsd_x_m=map_gsd_x_m, shape=query_shape,
                        track_xy=None if principal_xy is None else principal_xy)
     qc_tracked = None
     if principal_xy is not None:

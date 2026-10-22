@@ -21,7 +21,7 @@ import numpy as np
 def north_up_query(img_grey: np.ndarray, *, altitude_m: float, focal_px: float,
                    yaw_deg: float, map_gsd_m: float,
                    map_gsd_x_m: float | None = None,
-                   keep: float = 0.95, track_xy=None):
+                   keep: float = 0.95, track_xy=None, shape: str = "square"):
     """Rescale to the map's GSD and rotate north-up, then keep the centre.
 
     With `track_xy` = (x, y), a pixel of the INPUT frame, this also returns
@@ -100,9 +100,38 @@ def north_up_query(img_grey: np.ndarray, *, altitude_m: float, focal_px: float,
             # size as the one this function already documents.
             pt = np.array([(pt[0] + 0.5) * kx - 0.5, pt[1]], float)
 
-    s = int(min(h, w) * keep) // 2
-    x0, y0 = w // 2 - s, h // 2 - s
-    out = q[y0:y0 + 2 * s, x0:x0 + 2 * s]
+    # shape "square" is what flies: a centred square of 0.95 x the SHORT side.
+    # On a 1280x800 frame that is 760x760, so the long axis contributes 520 px
+    # that are discarded - 44% of the frame never reaches the matcher. "full"
+    # keeps the whole rotated frame instead, black corners and all.
+    #
+    # MEASURED 22 Oct, and "full" is better. 901 recorded frames of vps_00076
+    # at 60 m and above, each matched both ways against the same map window
+    # and scored against the GPS truth in that run's own CSV:
+    #
+    #                accepted    p50 err   p90 err    mean   inliers   ratio
+    #     square    272/901      13.82 m   21.16 m   14.62      17.8   0.131
+    #     full      303/901      12.51 m   21.06 m   13.90      23.0   0.119
+    #
+    # On the 168 frames BOTH accepted, "full" is closer to truth on 103 -
+    # 61%, which on a sign test is p about 0.003, so it is not sampling noise.
+    # A first pass over 76 frames said the opposite (square p50 12.61 against
+    # 14.01) and was simply too small: 23 and 24 accepted frames.
+    #
+    # What it costs: the black corners dilute the inlier RATIO, 0.131 -> 0.119,
+    # which sits against min_score 0.07. The extra area more than pays for it -
+    # 29% more inliers, and 31 more frames accepted, not fewer.
+    #
+    # Default is still "square" because this has not been flown.
+    if shape == "full":
+        x0 = y0 = 0
+        out = q
+    elif shape == "square":
+        s = int(min(h, w) * keep) // 2
+        x0, y0 = w // 2 - s, h // 2 - s
+        out = q[y0:y0 + 2 * s, x0:x0 + 2 * s]
+    else:
+        raise ValueError(f"shape {shape!r}: expected 'square' or 'full'")
     if pt is None:
         return out
     # Into the cropped query's own coordinates, which is the frame the matcher
