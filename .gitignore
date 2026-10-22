@@ -34,3 +34,6 @@ flights/
 # Chat transcripts: backed up locally, deliberately NOT committed.
 # 26 MB of full conversation. See HANDOFF_2026-10-22.md, "Chat backup".
 chat_backup/
+
+# Status reports are the project record and belong in it; other PDFs do not.
+!DroneVPS_Status_*.pdf
