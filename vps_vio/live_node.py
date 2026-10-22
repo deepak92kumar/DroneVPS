@@ -16,7 +16,7 @@ and that is refused unless the aircraft is disarmed, so the first transmission
 can only ever happen on a bench.
 """
 from __future__ import annotations
-import argparse, collections, csv, io, os, sys, time
+import argparse, collections, csv, io, math, os, sys, time
 import numpy as np, cv2
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -1530,10 +1530,39 @@ class VpsNode:
         # the span of the last N of them and still comes from exactly what the
         # position came from.
         from config import VpsConfig as _Cfg
-        self._vel_frames = int(_Cfg().flow_vel_frames)
+        _c = _Cfg()
+        self._vel_frames = int(_c.flow_vel_frames)
+        self._vel_frames_high = int(_c.flow_vel_frames_high)
+        self._vel_alt_m = float(_c.flow_vel_alt_m)
+        # The ramp's width. A step from one baseline to the other at a single
+        # height would put a discontinuity in the reported velocity exactly
+        # where the aircraft is climbing through it, so it is interpolated -
+        # which is also what the archived pre-SSD engine did, though it ramped
+        # the other way.
+        self._vel_alt_span_m = 15.0
         self._vel_cum_n = self._vel_cum_e = 0.0
-        # maxlen N+1: N intervals need N+1 endpoints.
-        self._vel_hist = collections.deque(maxlen=self._vel_frames + 1)
+        # Held long enough for the LONGEST baseline; how far back is actually
+        # read is chosen per frame from the height.
+        self._vel_hist = collections.deque(
+            maxlen=max(self._vel_frames, self._vel_frames_high) + 1)
+
+    def _vel_baseline_frames(self, altitude_m) -> int:
+        """How many frames the velocity is measured over, at this height.
+
+        See VpsConfig.flow_vel_frames: below flow_vel_alt_m a longer baseline
+        stops helping and starts averaging real motion away, above it the
+        error keeps falling with length.
+        """
+        lo, hi = self._vel_frames, self._vel_frames_high
+        if altitude_m is None or not math.isfinite(float(altitude_m)):
+            return lo
+        a = float(altitude_m)
+        if a <= self._vel_alt_m:
+            return lo
+        if a >= self._vel_alt_m + self._vel_alt_span_m:
+            return hi
+        f = (a - self._vel_alt_m) / self._vel_alt_span_m
+        return int(round(lo + f * (hi - lo)))
 
     def set_origin(self, lon: float, lat: float, sigma_m: float | None = None):
         """Place the origin, and record how well that point is known.
@@ -1797,7 +1826,13 @@ class VpsNode:
                     self._vel_cum_e += de
                     self._vel_hist.append(
                         (f["t"], self._vel_cum_n, self._vel_cum_e))
-                    t0, n0, e0 = self._vel_hist[0]
+                    # How far back to read, from the height. The deque holds
+                    # the longest baseline; a shorter one just reads nearer
+                    # the end, and while it is still filling we use whatever
+                    # is there rather than having no velocity at all.
+                    want = self._vel_baseline_frames(f.get("alt"))
+                    back = min(want, len(self._vel_hist) - 1)
+                    t0, n0, e0 = self._vel_hist[-(back + 1)]
                     span = f["t"] - t0
                     if span > 0.0:
                         self.vel.push_flow(f["t"],

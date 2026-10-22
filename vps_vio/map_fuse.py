@@ -49,7 +49,34 @@ class MapFuser:
                  # F = 0.15*sqrt(30) = 0.822, which is 3.8x the measured p95.
                  # 0.25 sits above p95 - so the declared figure is never
                  # optimistic - and is loop-rate independent.
-                 flow_noise_rate_m_per_sqrt_s: float = 0.25,
+                 #
+                 # 0.25 -> 0.9 ON 22 OCT. It was NOT above p95; it was 3.6x
+                 # too small, and the fit above had been made against the EKF's
+                 # own position rather than the raw receiver.
+                 #
+                 # Measured over ten VPS blocks on logs 225/226/227/228, error
+                 # against the RAW receiver from the moment of handover, 10177
+                 # samples past the first three seconds:
+                 #
+                 #     sqrt fit    error = 0.897 * sqrt(t)   residual rms 5.80 m
+                 #     linear fit  error = 0.101 * t         residual rms 6.54 m
+                 #
+                 # So the FORM was right - it is a random walk - and only the
+                 # coefficient was wrong. Per block the rate rises with height:
+                 # 0.021 m/s at 16.5 m, 0.118-0.232 near 31 m, 0.565 at 38.5 m,
+                 # 0.416 and 1.887 at 83 m. A height term is not added here
+                 # because ten blocks over four flights will not carry one
+                 # without overfitting it; 0.9 is the pooled least squares.
+                 #
+                 # Why it matters: log 228 block 2 ran 26 s at 38.5 m, the
+                 # aircraft moved 4.4 m, and our position ended 15.98 m out
+                 # while we declared 2.5 m. No fraction-of-distance term can
+                 # produce that - the error is the integral of a phantom
+                 # velocity, which accumulates with TIME whether or not the
+                 # aircraft goes anywhere. flow_drift_frac was checked at the
+                 # same time and is fine: measured error/distance is p50 0.034
+                 # and p75 0.066 against its 0.07.
+                 flow_noise_rate_m_per_sqrt_s: float = 0.9,
                  # 20, not 30. The 9 Oct report settled it with the fix's own
                  # lat/lon logged for the first time: "the map's median error
                  # is 20.0 m against our own 6.6 m ... The code's

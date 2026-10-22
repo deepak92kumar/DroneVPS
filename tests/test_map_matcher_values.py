@@ -141,7 +141,12 @@ check("gate_sigmas 3.0", abs(f.gate - 3.0) < 1e-9)
 print("\nthree things that were flown and REVERTED, and must stay out")
 src_all = live + open(os.path.join(HERE, "vps_vio", "map_fix_worker.py")).read() \
     + open(os.path.join(HERE, "vps_vio", "map_fuse.py")).read()
-check("no MAP_RAMP_S", "RAMP" not in src_all.upper(),
+# Matched on the IDENTIFIER, not on the word. It was "RAMP" anywhere in three
+# files until 22 Oct, when a comment about the velocity baseline's altitude
+# ramp - a different mechanism entirely, in live_node - tripped it. What must
+# stay out is spreading the MAP correction over time, not the word.
+check("no MAP_RAMP_S", "MAP_RAMP" not in src_all.upper()
+      and "ramp_s" not in src_all,
       '5 Oct: "It killed the implied-speed spike and DOUBLED the hover box '
       'above 60 m, 6.19 -> 11.26 m... a spread lie is more believable than a '
       'sharp one"')

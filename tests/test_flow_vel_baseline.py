@@ -152,6 +152,83 @@ check("the first accepted frame already yields one", first is not None,
       f"{first[0]:.3f} m/s")
 check("and it equals the single-frame value there", abs(first[0] - 1.0) < 1e-6)
 
+
+
+# --------------------------------------------------------------------------- #
+# THE BASELINE LENGTHENS WITH HEIGHT, and the ramp has to be continuous.
+#
+# Measured per altitude band across logs 225/226/227/228, velocity error p90
+# against the raw receiver - p90 because the spikes are what trip
+# FS_EKF_THRESH, not the median:
+#
+#     N    lag    5-15m   15-25m   25-40m   40-60m   60-90m
+#     20  0.33 s   0.80    1.31     3.38     3.55     7.79
+#     40  0.67 s   0.43    0.65     2.31     1.89     5.31
+#     60  1.00 s   0.42    0.59     1.98     1.49     4.18
+#     90  1.50 s   0.53    0.73     1.75     1.39     3.60
+#
+# Below 25 m the gain stops near 40-60 and 90 is WORSE, because real motion
+# over 1.5 s is averaged away. Above 25 m it keeps improving.
+#
+# The archived pre-SSD engine built the same mechanism and ramped it the OTHER
+# way, on 216856 samples: its long baseline gained 2.14x at 5-15 m but only
+# 1.09x at 40-50 m and 0.94x - worse - at 50-60 m, which it attributed to
+# rotation and timing. That does not reproduce here. Above 25 m
+# corr(error, tilt) is +0.093 and corr(error, yaw rate) +0.044 against
+# corr(error, speed) +0.629, and holding speed at 0.5-2 m/s the error is 1.06
+# at 0-0.2 deg of per-frame tilt against 1.21 at 0.5+ deg. No rotation signal.
+print("\n5. the baseline lengthens with height, continuously")
+
+
+class _Node:
+    """VpsNode._vel_baseline_frames, with only what it reads."""
+
+    def __init__(self, cfg):
+        self._vel_frames = int(cfg.flow_vel_frames)
+        self._vel_frames_high = int(cfg.flow_vel_frames_high)
+        self._vel_alt_m = float(cfg.flow_vel_alt_m)
+        self._vel_alt_span_m = 15.0
+
+    _vel_baseline_frames = None
+
+
+import importlib  # noqa: E402
+
+_ln = importlib.import_module("live_node")
+_Node._vel_baseline_frames = _ln.VpsNode._vel_baseline_frames
+nd = _Node(cfg)
+
+LO, HI, A0 = cfg.flow_vel_frames, cfg.flow_vel_frames_high, cfg.flow_vel_alt_m
+check("the high-altitude baseline is the longer one", HI > LO, f"{LO} -> {HI}")
+check("and still inside a second of lag", HI / 2 / 30.0 <= 1.0,
+      f"lag {HI / 2 / 30.0:.2f} s")
+check("below the threshold it is the short one", nd._vel_baseline_frames(A0 - 1) == LO)
+check("well above it, the long one", nd._vel_baseline_frames(A0 + 30) == HI)
+check("a missing altitude falls back to the short one",
+      nd._vel_baseline_frames(None) == LO, "never guess a long baseline")
+check("and a NaN altitude does too",
+      nd._vel_baseline_frames(float("nan")) == LO)
+
+# Continuity. A step at one height would put a discontinuity in the reported
+# velocity exactly where the aircraft climbs through it.
+prev = None
+worst = 0
+for i in range(0, 1200):
+    a = i * 0.1
+    v = nd._vel_baseline_frames(a)
+    check_range = LO <= v <= HI
+    if not check_range:
+        worst = -1
+        break
+    if prev is not None:
+        worst = max(worst, abs(v - prev))
+    prev = v
+check("it never leaves the two endpoints", worst >= 0, f"{worst}")
+check("and never jumps by more than two frames at a time", 0 <= worst <= 2,
+      f"largest step {worst} frames over a 0-120 m sweep")
+mid = nd._vel_baseline_frames(A0 + 15 / 2)
+check("the midpoint of the ramp sits between them", LO < mid < HI, f"{mid}")
+
 print()
 if FAILED:
     print(f"{len(FAILED)} FAILED: " + ", ".join(FAILED))

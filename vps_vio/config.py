@@ -205,6 +205,47 @@ class VpsConfig:
     # 1.2 px per frame, and a longer baseline is the only thing that touches it.
     flow_vel_frames: int = 40
 
+    # Above flow_vel_alt_m the baseline lengthens to flow_vel_frames_high.
+    #
+    # Measured per altitude band across logs 225/226/227/228, velocity error
+    # p90 against the raw receiver (p90, not p50, because the spikes are what
+    # trip FS_EKF_THRESH):
+    #
+    #     N    lag    5-15m   15-25m   25-40m   40-60m   60-90m
+    #     20  0.33 s   0.80    1.31     3.38     3.55     7.79
+    #     40  0.67 s   0.43    0.65     2.31     1.89     5.31
+    #     60  1.00 s   0.42    0.59     1.98     1.49     4.18
+    #     90  1.50 s   0.53    0.73     1.75     1.39     3.60
+    #
+    # Below 25 m the gain stops at about 40-60 and 90 is WORSE (0.43 -> 0.53 at
+    # 5-15 m): real motion over 1.5 s starts being averaged away. Above 25 m it
+    # keeps improving, so 60 is taken there - 14-21% better than 40 - and 90 is
+    # not, because its 1.5 s of lag is a cost this measurement cannot see. A
+    # position controller acting on stale velocity oscillates, which is the
+    # thing being removed.
+    #
+    # The archived pre-SSD engine built the same mechanism and reached the
+    # OPPOSITE conclusion, on 216856 airborne samples of 17-18 Sep:
+    #
+    #     height    live    long baseline   gain
+    #      5-15 m   1.21       0.57         2.14x
+    #     20-30 m   2.43       1.25         1.95x
+    #     30-40 m   2.82       1.62         1.74x
+    #     40-50 m   3.09       2.82         1.09x
+    #     50-60 m   3.22       3.43         0.94x  - worse
+    #
+    # with long_baseline_weight ramping the long baseline OUT between 30 and
+    # 40 m because "above 40 m it stops helping and then hurts - up there the
+    # error is dominated by rotation and timing, which do not shrink with the
+    # baseline". That does not reproduce here: the baseline keeps helping to
+    # 90 m, and above 25 m corr(error, tilt) is +0.093 and corr(error, yaw
+    # rate) +0.044 against corr(error, speed) +0.629. Holding speed at
+    # 0.5-2 m/s above 25 m, tilt of 0-0.2 deg gives error p50 1.06 and 0.5+ deg
+    # gives 1.21 - no rotation signal. Different airframe, different camera,
+    # and the direction is reversed, so their ramp is deliberately not copied.
+    flow_vel_frames_high: int = 60
+    flow_vel_alt_m: float = 25.0
+
     # Stereo depth: ON, and for VIO ONLY.
     #
     # It is cheap where it was feared to be expensive. Measured 19 Oct on this
