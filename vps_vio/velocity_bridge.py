@@ -79,6 +79,8 @@ class VelocityState:
                                  # to know the height it was made at.
     rejected_jump: int = 0       # flow samples refused as physically impossible
     slewed: bool = False         # the OUTPUT slew limited this step
+    capped: bool = False         # the magnitude ceiling cut this step
+    cap_count: int = 0           # how many times it has, this run
     slew_count: int = 0          # how many times it has, this run
     flow_updates: int = 0
     accel_steps: int = 0
@@ -182,6 +184,7 @@ class VelocityBridge:
                  deadband_per_m: float = 0.010,
                  max_accel_mps2: float = 8.0,
                  slew_mps2: float = 5.0,
+                 max_sent_mps: float = 6.0,
                  slew_hold_s: float = 2.0,
                  jump_escape_n: int = 5,
                  bias_tau_s: float = 20.0,
@@ -221,6 +224,7 @@ class VelocityBridge:
         self._last_alt_m = 0.0
         # The output slew, from the 9 Oct report. See value().
         self.slew_mps2 = float(slew_mps2)
+        self.max_sent_mps = float(max_sent_mps)
         self.slew_hold_s = float(slew_hold_s)
         self.slewed = 0
         self._sent_n = self._sent_e = 0.0
@@ -240,6 +244,7 @@ class VelocityBridge:
         self.flow_updates = 0
         self.accel_steps = 0
         self.rejected_flow = 0
+        self.capped = 0
 
     # -- inputs ----------------------------------------------------------
     def push_accel(self, t: float, an: float, ae: float) -> None:
@@ -461,10 +466,48 @@ class VelocityBridge:
                 self.slewed += 1
                 self._slew_since = t
                 st.slewed = True
+        # A HARD CEILING ON THE MAGNITUDE, and the slew is not one.
+        #
+        # The slew bounds the rate of CHANGE. At 5 m/s^2 it will happily walk
+        # the output to 25 m/s over five seconds and call every step legal,
+        # and that is exactly what flew: on logs 228 and 230 the speed sent to
+        # the flight controller reached 25.86 and 25.47 m/s, with p99 at 15.5
+        # and 15.1, and the bridge's pre-slew maximum was 26.25 and 25.48 - so
+        # the slew removed essentially nothing.
+        #
+        # Against what the aircraft ACTUALLY did in those VPS windows, from
+        # the receiver: p50 0.54-0.86, p95 1.39-2.22, p99 1.90-3.58, maximum
+        # 5.04 m/s. LOIT_SPEED_MS is 3.0 and the VPS is only ever the source
+        # in LOITER, so the position controller cannot command more than that,
+        # and ATC_ANGLE_MAX of 15 degrees bounds the acceleration at about
+        # 2.6 m/s^2. Nothing above 6 m/s is a measurement; it is the flow's
+        # pixel noise multiplied by height.
+        #
+        # Those spikes are what tripped the EKF. XKF4.SV sat at p50 0.22-0.61
+        # against a 1.2 gate all flight and reached 13.77 - the failsafe fires
+        # on the spikes, not on a sustained bad state, and ALT_HOLD followed
+        # four times on log 230. At 40-50 m, 48% of sent samples were above
+        # 4 m/s.
+        #
+        # 6.0 clips above the fastest the aircraft has been measured doing on
+        # the VPS (5.04 m/s) with margin, so no real motion is lost, and
+        # bounds the noise at something the airframe could at least attempt.
+        # Direction is kept; only the length is cut. A bounded wrong velocity
+        # is recoverable, 25 m/s is not.
+        cap = self.max_sent_mps
+        if cap > 0.0:
+            mag = math.hypot(want_n, want_e)
+            if mag > cap:
+                k = cap / mag
+                want_n, want_e = want_n * k, want_e * k
+                self.capped += 1
+                st.capped = True
+
         self._sent_n, self._sent_e = want_n, want_e
         self._t_sent = t
         st.sent_vn, st.sent_ve = want_n, want_e
         st.slew_count = self.slewed
+        st.cap_count = self.capped
         return st
 
 
