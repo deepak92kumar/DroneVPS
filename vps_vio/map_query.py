@@ -122,6 +122,36 @@ def north_up_query(img_grey: np.ndarray, *, altitude_m: float, focal_px: float,
     # which sits against min_score 0.07. The extra area more than pays for it -
     # 29% more inliers, and 31 more frames accepted, not fewer.
     #
+    # AND THE WINDOW HAS TO GROW WITH IT. 301 frames, every combination:
+    #
+    #     query    window   ground seen      accepted   p50 err
+    #     square    0.60    77 m / 96 m       85/301     14.17 m   <- flying
+    #     square    0.90    77 m / 145 m      63/301     14.70 m
+    #     square    1.30    77 m / 209 m       2/301     13.71 m
+    #     full      0.60   117 m / 96 m      100/301     12.81 m
+    #     full      0.90   117 m / 145 m     147/301     13.59 m
+    #     full      1.30   117 m / 209 m      74/301     14.19 m
+    #
+    # full + 0.90 accepts 48.8% against the flying 28.2% - 1.7x the fix rate
+    # at the same per-fix error, and the fix RATE is what sets the system's
+    # error (0 fixes gave 38-68 m, 19 gave 4.50 m).
+    #
+    # The square rows are why "bigger window" is on the do-not-retry list and
+    # why that entry is not the whole story: with the query held at 77 m, more
+    # map is purely more chance to match wrong, and 1.30 collapses to 2 frames
+    # in 301. The window was never the mistake on its own - the RATIO was.
+    #
+    # What the ratio has to cover, measured on the same flight: the query can
+    # slide only +-9.7 m inside a 0.60 window, while our own prior is 10.6 m
+    # out at p50 and 20.5 m at p90, so the truth is OUTSIDE the searchable
+    # range on 52.5% of attempts. That is the single biggest reason a fix is
+    # refused, and it is geometry, not matching.
+    #
+    # Scale is NOT the problem and does not need changing: the accepted
+    # matches imply a query-to-map scale of 0.9949 in x and 1.0018 in y over
+    # 87 frames, so the rescale above already puts the frame on the map's own
+    # resolution, anisotropy included.
+    #
     # Default is still "square" because this has not been flown.
     if shape == "full":
         x0 = y0 = 0
