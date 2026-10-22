@@ -80,6 +80,10 @@ class VelocityState:
     rejected_jump: int = 0       # flow samples refused as physically impossible
     slewed: bool = False         # the OUTPUT slew limited this step
     capped: bool = False         # the magnitude ceiling cut this step
+    cap_mps: float = 0.0         # the ceiling in force, carried because the
+                                 # sender has to declare an honest accuracy
+                                 # for a capped sample and cannot reach the
+                                 # bridge to ask what the ceiling was
     cap_count: int = 0           # how many times it has, this run
     slew_count: int = 0          # how many times it has, this run
     flow_updates: int = 0
@@ -508,6 +512,7 @@ class VelocityBridge:
         st.sent_vn, st.sent_ve = want_n, want_e
         st.slew_count = self.slewed
         st.cap_count = self.capped
+        st.cap_mps = self.max_sent_mps
         return st
 
 

@@ -732,6 +732,34 @@ class GpsInputSender:
         acc = (self.VEL_ACC_FLOOR
                + self.VEL_ACC_PER_M * max(0.0, vel.altitude_m)
                + 2.0 * vel.age_s)
+        # A CAPPED SAMPLE IS NOT A MEASUREMENT, so it is not declared as one.
+        #
+        # max_sent_mps bounds the magnitude the bridge may send. When it bites,
+        # the estimate had left what the airframe can physically do - the cap
+        # is 6.0 m/s against LOIT_SPEED_MS of 3.0 and an ATC_ANGLE_MAX of 15
+        # degrees - so what goes out is the ceiling, not a reading, and the
+        # only honest uncertainty for it is the whole range it could have been.
+        #
+        # Measured on log 231, the first flight with the cap, sent speed
+        # against the receiver's own:
+        #
+        #     altitude   at the cap   real speed p50   we declared
+        #      5-25 m       0.0%          0.75            1.30 m/s
+        #     25-40 m       0.6%          0.88            1.95
+        #     40-60 m       7.8%          1.52            2.69
+        #     60-80 m      31.0%          2.30            4.27
+        #
+        # So at 60-80 m we were asserting 6.00 m/s to 4.27 m/s while the
+        # aircraft did 2.30 - an innovation near 4 against a sigma of 4.3,
+        # which is XKF4.SV at the gate. Those are the three switches above
+        # 30 m that took ALT_HOLD; the two at 27.7 and 28.5 m did not.
+        #
+        # This keys off the CAP FIRING, not off height, and the cap fired on
+        # 0.0% of samples below 25 m - so nothing below 30 m changes, which is
+        # the pilot's condition and the measurement rather than a threshold
+        # chosen to satisfy it.
+        if getattr(vel, "capped", False):
+            acc = max(acc, float(getattr(vel, "cap_mps", 0.0)))
         return ign, float(vel.sent_vn), float(vel.sent_ve), float(acc), "sent"
 
     def send(self, lon, lat, alt_amsl_m, sigma_m, yaw_deg=None, vel=None):

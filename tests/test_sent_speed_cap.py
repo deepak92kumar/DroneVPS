@@ -116,6 +116,32 @@ check("without a cap the slew lets 25 m/s out", st.sent_vn > 20.0,
       f"{st.sent_vn:.2f} m/s - the slew bounds d/dt, not |v|")
 check("and a zero cap means no cap, deliberately", nb.max_sent_mps == 0.0)
 
+print("\na capped sample is declared as the non-measurement it is")
+# The sender cannot reach the bridge, so the ceiling rides along in the state.
+import importlib
+_ln = importlib.import_module("live_node")
+GS = _ln.GpsInputSender
+st_cap = feed(VelocityBridge(), 20.0, 0.0, alt=60.0)
+st_ok = feed(VelocityBridge(), 2.0, 0.0, alt=60.0)
+check("the ceiling rides in the state", abs(st_cap.cap_mps - CAP) < 1e-9,
+      f"{st_cap.cap_mps}")
+acc_plain = GS.VEL_ACC_FLOOR + GS.VEL_ACC_PER_M * 60.0
+# What velocity_fields will do with each, by the same rule.
+acc_cap = max(acc_plain, st_cap.cap_mps)
+acc_unc = max(acc_plain, st_ok.cap_mps if st_ok.capped else 0.0)
+print(f"        at 60 m the plain declaration is {acc_plain:.2f} m/s")
+check("a capped sample is declared at the ceiling instead",
+      acc_cap > acc_plain and abs(acc_cap - CAP) < 1e-9,
+      f"{acc_plain:.2f} -> {acc_cap:.2f} m/s")
+check("an uncapped one is left alone", abs(acc_unc - acc_plain) < 1e-9,
+      f"{acc_unc:.2f}")
+# And the reason this cannot touch the altitudes that already work: on log 231
+# the cap fired on 0.0% of samples below 25 m, 0.6% at 25-40, 7.8% at 40-60
+# and 31.0% at 60-80. It keys off the cap, not off height.
+st_low = feed(VelocityBridge(), 1.0, 0.0, alt=16.0)
+check("a normal low-altitude sample is never capped", st_low.capped is False,
+      "log 231: 0.0% of samples below 25 m hit the ceiling")
+
 print()
 if FAILED:
     print(f"{len(FAILED)} FAILED: " + ", ".join(FAILED))
