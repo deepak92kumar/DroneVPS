@@ -199,7 +199,17 @@ _Node._vel_baseline_frames = _ln.VpsNode._vel_baseline_frames
 nd = _Node(cfg)
 
 LO, HI, A0 = cfg.flow_vel_frames, cfg.flow_vel_frames_high, cfg.flow_vel_alt_m
-check("the high-altitude baseline is the longer one", HI > LO, f"{LO} -> {HI}")
+# FLAT AS OF 22 OCT. 60 above 25 m was flown as log 229 and reverted the same
+# day: at 31.6 m, where the ramp gave about 47 frames, the aircraft ran 11.1 m
+# in 24 s against 0.9 m in 23.2 s at 31.5 m on log 228 with a flat 40. A longer
+# baseline reports less of the real motion, and the flight controller cannot
+# correct a drift it is not told about. The founding brief's rule - "never
+# scale with height... scaling them previously cost two flights and was
+# reverted" - was not about the two constants it names.
+#
+# The machinery stays so a future attempt needs a flight, not a rewrite. These
+# checks therefore hold for EITHER setting.
+check("the high-altitude baseline is not shorter", HI >= LO, f"{LO} -> {HI}")
 check("and still inside a second of lag", HI / 2 / 30.0 <= 1.0,
       f"lag {HI / 2 / 30.0:.2f} s")
 check("below the threshold it is the short one", nd._vel_baseline_frames(A0 - 1) == LO)
@@ -227,7 +237,7 @@ check("it never leaves the two endpoints", worst >= 0, f"{worst}")
 check("and never jumps by more than two frames at a time", 0 <= worst <= 2,
       f"largest step {worst} frames over a 0-120 m sweep")
 mid = nd._vel_baseline_frames(A0 + 15 / 2)
-check("the midpoint of the ramp sits between them", LO < mid < HI, f"{mid}")
+check("the midpoint of the ramp sits between them", LO <= mid <= HI, f"{mid}")
 
 print()
 if FAILED:

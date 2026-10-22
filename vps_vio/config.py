@@ -264,7 +264,27 @@ class VpsConfig:
     # 0.5-2 m/s above 25 m, tilt of 0-0.2 deg gives error p50 1.06 and 0.5+ deg
     # gives 1.21 - no rotation signal. Different airframe, different camera,
     # and the direction is reversed, so their ramp is deliberately not copied.
-    flow_vel_frames_high: int = 60
+    # REVERTED ON 22 OCT, THE SAME DAY, BY FLIGHT: both are set to the
+    # flat value so the baseline no longer changes with height.
+    #
+    # The sweep that justified 60 above 25 m stands - velocity error p90 at
+    # 25-40 m really is 2.31 at N=40 and 1.98 at N=60 - but log 229 flew it
+    # and the aircraft ran 11.1 m in 24 s at 31.6 m (N about 47 on the ramp)
+    # against 0.9 m in 23.2 s at 31.5 m on log 228 with a flat 40. A longer
+    # baseline reports less of the real motion, and at 17.2 m our speed read
+    # p50 0.12 m/s with 77% deadbanded while the aircraft actually moved at
+    # 0.65 m/s - the flight controller was told it was standing still, so it
+    # did not correct.
+    #
+    # The founding brief says it plainly: "keep corr_rate_mps and reanchor_m
+    # FLAT - never scale with height. (Scaling them previously cost two
+    # flights and was reverted.)" Those two constants are dead, but the rule
+    # was not about them. This is the third height-scaled gain this project
+    # has flown and reverted.
+    #
+    # The machinery stays, so a future attempt needs a flight and not a
+    # rewrite: set these to differ and _vel_baseline_frames ramps again.
+    flow_vel_frames_high: int = 40
     flow_vel_alt_m: float = 25.0
 
     # Stereo depth: ON, and for VIO ONLY.

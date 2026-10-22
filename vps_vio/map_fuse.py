@@ -76,7 +76,36 @@ class MapFuser:
                  # aircraft goes anywhere. flow_drift_frac was checked at the
                  # same time and is fine: measured error/distance is p50 0.034
                  # and p75 0.066 against its 0.07.
-                 flow_noise_rate_m_per_sqrt_s: float = 0.9,
+                 # REVERTED TO 0.25 ON 22 OCT, THE SAME DAY, BY FLIGHT.
+                 # 0.9 was the honest fit and raising it made the aircraft
+                 # hold WORSE, which the fit could not have shown.
+                 #
+                 # Log 228 (0.25) against log 229 (0.9), how far the aircraft
+                 # ran from the switch point, measured against the receiver:
+                 #
+                 #     ~31 m   0.9 m over 23.2 s (0.04 m/s)  ->  11.1 m over
+                 #             24.0 s (0.46 m/s)
+                 #     ~17 m   3.6 m over 103.7 s (0.03 m/s) ->  4.1 m over
+                 #             6.3 s (0.65 m/s)
+                 #
+                 # Twelve times further at 31 m, twenty times the drift rate
+                 # at 17 m. At 17 m the velocity baseline was identical in
+                 # both flights, so this number is the whole of the
+                 # difference there.
+                 #
+                 # WHY, and it is not a subtlety: this aircraft has no other
+                 # horizontal position source. Declaring a larger sigma is
+                 # honest, but an EKF told its only source is poor does not
+                 # find a better one - it weights the estimate down, the
+                 # position controller is handed a sloppier position, and the
+                 # hold degrades. Honesty about accuracy helps when there is
+                 # something to fall back on. Here it is the fallback.
+                 #
+                 # The measurement that produced 0.9 stands - error against
+                 # the raw receiver really is 0.897*sqrt(t) over ten blocks -
+                 # so what is declared here is knowingly optimistic. That is
+                 # recorded rather than hidden.
+                 flow_noise_rate_m_per_sqrt_s: float = 0.25,
                  # 20, not 30. The 9 Oct report settled it with the fix's own
                  # lat/lon logged for the first time: "the map's median error
                  # is 20.0 m against our own 6.6 m ... The code's
