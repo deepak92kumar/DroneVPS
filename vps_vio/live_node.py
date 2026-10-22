@@ -30,6 +30,31 @@ from frame_writer import FrameWriter, next_run_number
 import single_instance
 
 M_PER_DEG_LAT = 111_320.0
+
+# WHICH MONO CAMERA EVERYTHING IS MEASURED IN. CAM_C since 22 Oct, at the
+# pilot's instruction; it was CAM_B before that.
+#
+# The aircraft's landing leg hangs in CAM_B's left edge - photographed on
+# 22 Oct with the airframe lifted, the leg and its foam grip fill x 0-75 and
+# a bright strut runs to about x 165. That is what config.crop_left_px = 130
+# existed to cut off, and the crop cost 10% of the frame's width to flow and
+# moved cx 80 px off the image centre, which is 11 m of ground at 110 m and
+# had to be carried through the whole map-query chain by hand. CAM_C's left
+# edge is clear in the same photograph, so on CAM_C there is nothing to crop
+# and cx is only 4 px off centre.
+#
+# Everything measured in the camera frame has to come from the SAME socket or
+# the frames silently disagree: intrinsics, distortion, the IMU extrinsics the
+# accelerometer is rotated by, the pixel the map fix is reported for, and the
+# frame the depth gate indexes. They all read these two names.
+PRIMARY_SOCKET_NAME = "CAM_C"
+STEREO_PARTNER_NAME = "CAM_B"
+
+
+def _socket(name: str):
+    """Named here so a typo is an AttributeError at startup, not a wrong frame."""
+    import depthai as dai
+    return getattr(dai.CameraBoardSocket, name)
 # The only map on this machine after the SSD was lost. It was
 # /data/DRONE/ap/site_2km.tif, which no longer exists.
 #
@@ -109,8 +134,8 @@ class LiveSource:
 
         p = dai.Pipeline()
         mono = {}
-        # CAM_B alone unless depth is wanted; depth needs the pair.
-        sockets = [("mono", dai.CameraBoardSocket.CAM_B)]
+        # The primary alone unless depth is wanted; depth needs the pair.
+        sockets = [("mono", _socket(PRIMARY_SOCKET_NAME))]
         # IR LASER AND FLOOD OFF, at the pilot's instruction. The OAK-D Pro's
         # dot projector and flood LED do nothing for this mission - the ground
         # is tens of metres away and the stereo pair is only used as a
@@ -124,7 +149,7 @@ class LiveSource:
         self._ir_off = True
 
         if stereo_depth:
-            sockets.append(("mono_right", dai.CameraBoardSocket.CAM_C))
+            sockets.append(("mono_partner", _socket(STEREO_PARTNER_NAME)))
         for name, sock in sockets:
             m = p.create(dai.node.MonoCamera)
             m.setBoardSocket(sock)
@@ -245,9 +270,25 @@ class LiveSource:
             st.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_DENSITY)
             st.setLeftRightCheck(True)
             st.setSubpixel(False)
-            st.setDepthAlign(dai.CameraBoardSocket.CAM_B)
-            mono["mono"].out.link(st.left)
-            mono["mono_right"].out.link(st.right)
+            # Aligned to the PRIMARY, because FlowTracker's depth gate looks
+            # depth up at the pixel coordinates of its own tracks. Aligned to
+            # the other socket, every one of those lookups would be off by the
+            # pair's disparity.
+            st.setDepthAlign(_socket(PRIMARY_SOCKET_NAME))
+            # left/right here are PHYSICAL eyes, not primary/partner: CAM_B is
+            # the left eye on this board and CAM_C the right. Linked the other
+            # way round the disparity changes sign and the depth comes back as
+            # noise, so these are keyed by socket NAME - changing which camera
+            # is primary must not be able to swap them.
+            by_socket = {PRIMARY_SOCKET_NAME: mono["mono"],
+                         STEREO_PARTNER_NAME: mono["mono_partner"]}
+            by_socket["CAM_B"].out.link(st.left)
+            by_socket["CAM_C"].out.link(st.right)
+            # The leg costs depth its left strip, whichever camera is primary.
+            # Stereo needs BOTH eyes on the same ground, and CAM_B's x 0-165 is
+            # landing leg, so no match exists there and depth is invalid in that
+            # strip. Bounded: it is 13% of the frame's width, and depth is only
+            # used as a same-surface check below 30 m.
             xd = p.create(dai.node.XLinkOut)
             xd.setStreamName("depth")
             st.depth.link(xd.input)
@@ -274,7 +315,7 @@ class LiveSource:
         # "may well be" is not a basis for integrating acceleration.
         self.R_imu2cam = None
         try:
-            E = np.array(cal.getImuToCameraExtrinsics(dai.CameraBoardSocket.CAM_B))
+            E = np.array(cal.getImuToCameraExtrinsics(_socket(PRIMARY_SOCKET_NAME)))
             R = np.array(E)[:3, :3]
             # A rotation and nothing else: orthonormal, det +1. Anything that
             # fails this is a calibration we do not understand, and silently
@@ -283,21 +324,28 @@ class LiveSource:
                     and abs(np.linalg.det(R) - 1.0) < 1e-3):
                 self.R_imu2cam = R
                 off = float(np.degrees(np.arccos(np.clip((np.trace(R) - 1) / 2, -1, 1))))
-                print(f"IMU->CAM_B rotation read from calibration ({off:.1f} deg "
-                      f"off the camera frame)")
+                print(f"IMU->{PRIMARY_SOCKET_NAME} rotation read from calibration "
+                      f"({off:.1f} deg off the camera frame)")
             else:
-                print("*** IMU->CAM_B extrinsics is not a rotation - IGNORED ***")
+                print(f"*** IMU->{PRIMARY_SOCKET_NAME} extrinsics is not a "
+                      f"rotation - IGNORED ***")
         except Exception as e:
-            print(f"*** could not read IMU->CAM_B extrinsics ({e}) - treating the IMU "
+            print(f"*** could not read IMU->{PRIMARY_SOCKET_NAME} extrinsics ({e}) "
+                  f"- treating the IMU "
                   f"axes as the camera axes. The accel/gyro mapping is "
                   f"UNVERIFIED in that frame. ***")
 
-        K = np.array(cal.getCameraIntrinsics(dai.CameraBoardSocket.CAM_B, 1280, 800))
+        K = np.array(cal.getCameraIntrinsics(_socket(PRIMARY_SOCKET_NAME),
+                                             1280, 800))
         self.focal = float(K[0][0])
         # The WHOLE of K, and the distortion, not just fx. Measured on this
-        # device 20 Oct: cx 624.89 / cy 391.80, which is 15.11 px and 8.20 px
-        # off the geometric centre, and an 8-coefficient rational distortion
-        # with k1 24.09 / k2 -39.14 / k3 18.88. Both were being thrown away
+        # device 22 Oct for CAM_C, the primary: cx 644.13 / cy 404.16, which is
+        # 4.13 px and 4.16 px off the geometric centre (CAM_B, the old primary,
+        # read cx 624.89 / cy 391.80 - 15.11 px and 8.20 px
+        # off it, and 80 px off once its 130 px leg crop had moved cx). The
+        # distortion is read per socket too and the two genuinely differ, so
+        # this is a per-unit calibration and not a defaulted one: CAM_B's k1 is
+        # 24.09 / k2 -39.14, CAM_C's 26.05 / -41.26. Both were being thrown away
         # here - fx was kept and the rest discarded - and both turn aircraft
         # rotation into phantom translation. See FlowTracker for the numbers.
         # The leg comes off here, before anything looks at the image, so flow,
@@ -314,7 +362,7 @@ class LiveSource:
         self.focal_y = float(K[1][1])
         try:
             self.D = np.array(list(cal.getDistortionCoefficients(
-                dai.CameraBoardSocket.CAM_B)), float)
+                _socket(PRIMARY_SOCKET_NAME))), float)
         except Exception as e:
             self.D = None
             print(f"*** could not read the distortion coefficients ({e}) - flow will "

@@ -315,11 +315,22 @@ class VpsConfig:
     # tracks agree perfectly with each other on a single rigid motion of zero,
     # so a tenth of the evidence is pulling the estimate towards standing still.
     #
-    # Cropped, not masked: a masked block is a uniform patch that the NCC
-    # matcher would happily correlate against. Cropping the column off takes
-    # the leg out of flow, the map matcher and the recorded frames at once, and
-    # cx moves with it.
-    crop_left_px: int = 130       # 120 where the taper ends, plus margin
+    # 130 -> 0 on 22 Oct, because the primary camera moved to CAM_C and the
+    # leg is CAM_B's. See live_node.PRIMARY_SOCKET_NAME.
+    #
+    # The leg was photographed that day with the airframe lifted: on CAM_B it
+    # and its foam grip fill x 0-75 and a bright strut reaches about x 165,
+    # while CAM_C's left edge is clear ground. So on CAM_C there is nothing to
+    # crop, and this buys back three things the crop was costing - 10% of the
+    # frame's width for flow to find corners in, a cx only 4 px off the image
+    # centre instead of 80, and one less transform to carry a pixel through.
+    #
+    # It is kept as a setting rather than deleted: it is the only lever if the
+    # leg ever shows up in the primary's frame, and the 130 px figure is the
+    # measured one for CAM_B (120 px to where the taper ends, plus margin).
+    # Cropped, not masked, if it is ever needed again: a masked block is a
+    # uniform patch that a correlator would happily match against.
+    crop_left_px: int = 0
 
     stereo_depth: bool = True
     stereo_depth_as_height: bool = False   # keep False. See above.

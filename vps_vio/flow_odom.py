@@ -341,9 +341,11 @@ class FlowTracker:
     move to the GPU as configured.
 
     K and D are the camera's own intrinsics, and passing them is not a detail.
-    Read off this OAK-D on 20 Oct at 1280x800: the principal point is cx 624.89,
-    cy 391.80, which is 15.11 px and 8.20 px away from the geometric centre this
-    used to evaluate the motion at. The fitted affine carries rotation as well
+    Read off this OAK-D at 1280x800: the primary is CAM_C since 22 Oct, whose
+    principal point is cx 644.13, cy 404.16 - 4.13 px and 4.16 px off the
+    geometric centre this used to evaluate the motion at. (CAM_B, the primary
+    until then, read cx 624.89 / cy 391.80, and its 130 px leg crop moved cx a
+    further 65 px, to 80 px off centre.) The fitted affine carries rotation as well
     as translation, so evaluating it at the wrong point turns rotation into
     phantom translation - 0.32 px at 1 deg/frame, which at 100 m and 17 Hz is
     0.64 m/s of speed the aircraft never had. The project's own unexplained
@@ -443,8 +445,16 @@ class FlowTracker:
         med = float(np.median(z[have]))
         if not (0.0 < med < self.DEPTH_MAX_M):
             return None
+        # fx from this camera's own K when we were given one, rather than a
+        # number baked in for whichever socket was primary when it was written.
+        # The two sockets differ: CAM_B 791.72, CAM_C 795.10. On a tolerance
+        # that is 0.4% and changes nothing, but the primary moved to CAM_C on
+        # 22 Oct and a constant that silently means "the other camera" is how
+        # the next switch goes wrong. 791.723 stays only as the fallback for a
+        # tracker built without K.
+        fx = 791.723 if self.K is None else float(self.K[0, 0])
         tol = max(self.DEPTH_TOL_M,
-                  self.DEPTH_SIGMA_K * med * med * 0.2 / (791.723 * 0.075))
+                  self.DEPTH_SIGMA_K * med * med * 0.2 / (fx * 0.075))
         keep = have & (np.abs(z - med) <= tol)
         # Refuse to gate rather than gate down to nothing: too few survivors
         # means the surface assumption has failed, not that the tracks are bad.

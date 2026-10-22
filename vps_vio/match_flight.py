@@ -34,10 +34,15 @@ the exercise exists for. Two honest limits on it:
   * The match reports where the IMAGE CENTRE lands, because north_up_query
     centres its query geometrically and never reads cx. The frames are cropped
     by 130 px on the left, so the principal point sits about 80 px from the
-    image centre - 11 m on the ground at 110 m altitude. The flying path has
-    exactly the same offset and treats the fix as the aircraft's position, so
-    this script does too, by default, and the two agree. --pp-correct applies
-    the shift instead, which is how to find out whether that 11 m is really
+    image centre - 11 m on the ground at 110 m altitude. The flying path NO
+    LONGER has that offset: since 20 Oct live_node passes K's cx/cy into
+    MapFixWorker, so the aircraft's fixes are principal-point corrected and
+    this script's default is NOT what it flies. Measured on the 100 real
+    fixes in the CSVs, the correction is worth 4.3 m of median error and is
+    in the right direction (reversing it costs 11 m), so prefer
+    --pp-correct for anything about today's aircraft and leave it off only to
+    compare against reports written before 20 Oct. --pp-correct applies
+    the shift, which is how to find out whether that 11 m is really
     there; it is off by default because changing it here while the aircraft
     does something else would make these numbers describe nothing that flies.
 
@@ -683,8 +688,12 @@ def main(argv=None):
     ap.add_argument("--pp-correct", action="store_true",
                     help="report the principal point rather than the image "
                          "centre: about 11 m at 110 m altitude after the "
-                         "130 px leg crop. OFF by default because the flying "
-                         "path does not do it either - see pp_shift.")
+                         "130 px leg crop. The FLYING path HAS done this since "
+                         "20 Oct (live_node passes K's cx/cy into "
+                         "MapFixWorker), so leaving this off measures a "
+                         "geometry the aircraft no longer uses. Kept off only "
+                         "so numbers stay comparable with reports written "
+                         "before then - see pp_shift.")
     a = ap.parse_args(argv)
 
     if not os.path.isdir(a.folder):
