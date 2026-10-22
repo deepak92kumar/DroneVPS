@@ -14,6 +14,7 @@ anisotropic by 1/cos(latitude) - at 30.89 that is 1.1653, 16.5% - and the
 """
 from __future__ import annotations
 
+import math
 import cv2
 import numpy as np
 
@@ -63,13 +64,43 @@ def north_up_query(img_grey: np.ndarray, *, altitude_m: float, focal_px: float,
     pt = (None if track_xy is None
           else np.array([(float(track_xy[0]) + 0.5) * scale - 0.5,
                          (float(track_xy[1]) + 0.5) * scale - 0.5], float))
+    # ROTATE INTO A CANVAS BIG ENOUGH TO HOLD THE RESULT.
+    #
+    # Until 23 Oct this warped into the ORIGINAL (w, h), so every corner the
+    # rotation pushed outside the old rectangle was thrown away. On a 1280x800
+    # frame that is not a detail:
+    #
+    #     yaw      frame kept
+    #       0 deg    100.0%
+    #      30 deg     81.1%
+    #      51 deg    ~74%     <- vps_00076's median heading above 60 m
+    #      90 deg     62.5%
+    #
+    # and on that flight only 327 of 901 frames sat within 15 deg of axis
+    # aligned. So "full" delivered the whole frame on about a third of them and
+    # 62-92% on the rest: the name said full, the pixels did not. It also made
+    # the measured worth of "full" depend on the heading the flight happened to
+    # fly, which is not a property of the matcher.
+    #
+    # The bounding box of the rotated rectangle, with the rotation centre
+    # shifted to the middle of it. "square" is unaffected - it takes a centred
+    # square of the SHORT side, and that square was always inside the old
+    # canvas.
+    c_ = abs(math.cos(math.radians(yaw_deg)))
+    s_ = abs(math.sin(math.radians(yaw_deg)))
+    W = int(round(w * c_ + h * s_))
+    H = int(round(w * s_ + h * c_))
     M = cv2.getRotationMatrix2D((w / 2, h / 2), -yaw_deg, 1.0)
-    q = cv2.warpAffine(q, M, (w, h))
+    M[0, 2] += (W - w) / 2.0
+    M[1, 2] += (H - h) / 2.0
+    q = cv2.warpAffine(q, M, (W, H))
     if pt is not None:
         # The SAME M the image was warped by, so the point cannot disagree
         # with the pixels. Rotation is about the geometric centre; the
         # principal point is not at it, so it genuinely moves here.
         pt = M @ np.array([pt[0], pt[1], 1.0])
+    # The canvas grew, so everything below measures against the new one.
+    h, w = q.shape
 
     # The map's pixels are not square IN METRES, and that is a 16.5% error here.
     #

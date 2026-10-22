@@ -84,9 +84,58 @@ class VpsConfig:
                                    # height and NOT below it, which is why the
                                    # descent is uncorrected: error went 4.13 ->
                                    # 26.0 m in the 12 s of a 6 m/s descent.
-    map_window_alt_frac: float = 0.60   # 4 Oct: window was a fixed 100 m, which
-                                   # had the matcher guessing outside what the
-                                   # camera could see. Now 0.60 x altitude.
+    map_window_alt_frac: float = 0.60   # 4 Oct: a fixed 100 m -> 0.60 x
+                                   # altitude, because the matcher was guessing
+                                   # outside what the camera could see.
+                                   #
+                                   # 23 Oct: 0.90 and 0.805 were both tried and
+                                   # both are WORSE. Widening the window is not
+                                   # what the frame needed; the QUERY was the
+                                   # thing being thrown away. Measured on 40
+                                   # frames of vps_00084 at 85 m, scored against
+                                   # that run's own receiver with a PER-ROW
+                                   # origin:
+                                   #
+                                   #   full + 0.60    p50 10.28  p90 23.86
+                                   #   full + 0.805   p50 11.23  p90 38.98
+                                   #
+                                   # Until 23 Oct this constant was DEAD - it
+                                   # was defined here and nothing read it,
+                                   # because VpsNode built MapFixWorker without
+                                   # passing it and the worker's own default
+                                   # won. It is wired now, so changing it here
+                                   # changes what flies.
+    map_query_shape: str = "full"  # What of the frame reaches the matcher.
+                                   # "square" is a centred square of 0.95 x the
+                                   # SHORT side - 760x760 on a 1280x800 frame,
+                                   # so 44% of the frame never arrived. "full"
+                                   # keeps the whole rotated frame.
+                                   #
+                                   # The two sizes are one decision. At 60-83 m
+                                   # the camera sees 117 x 81 m; a square query
+                                   # is 77 x 77 m, and in a 0.60 window (97 m
+                                   # across) it can slide only +-9.7 m while our
+                                   # own prior is 10.6 m out at p50 and 20.5 at
+                                   # p90. The truth was outside the searchable
+                                   # range on 52.5% of attempts - geometry
+                                   # refusing the fix before any matching.
+                                   #
+                                   # 301 frames of vps_00076, scored against
+                                   # that run's own GPS:
+                                   #   square 0.60   85/301 (28.2%)  14.17 m
+                                   #   square 0.90   63/301 (20.9%)  14.70 m
+                                   #   full   0.60  100/301 (33.2%)  12.81 m
+                                   #   full   0.90  147/301 (48.8%)  13.59 m
+                                   # Nearly double the fix RATE at the same
+                                   # per-fix error, and the rate is what sets
+                                   # the system error: 0 fixes gave 38-68 m,
+                                   # 19 gave 4.50 m.
+                                   #
+                                   # The square rows are why "bigger window" sat
+                                   # on the do-not-retry list. With the query
+                                   # held at 77 m more map is only more chance
+                                   # to match wrong. The window was never the
+                                   # mistake on its own; the RATIO was.
     fix_period_s: float = 2.0      # 5 Oct: 0.4 -> 2.0 s. At 0.4 s the map pushed
                                    # a STATIONARY aircraft at 1.18 m/s above 80 m
                                    # while the drift it exists to catch is

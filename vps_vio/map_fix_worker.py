@@ -130,6 +130,7 @@ class FixResult:
 class MapFixWorker:
     def __init__(self, cache, *, focal_px: float, matcher: str = "xfeat",
                  radius_m: float = 150.0, window_alt_frac: float = 0.60,
+                 query_shape: str = "full",
                  min_alt_m: float = 60.0, fix_period_s: float = 2.0,
                  min_score: float | None = None,
                  min_margin: float | None = None,
@@ -148,6 +149,10 @@ class MapFixWorker:
         self.matcher = matcher.lower()
         self.radius_m = float(radius_m)
         self.window_alt_frac = float(window_alt_frac)
+        # How much of the frame reaches the matcher. Paired with
+        # window_alt_frac above and meaningless apart from it - see
+        # VpsConfig.map_query_shape for the measurement.
+        self.query_shape = str(query_shape)
         self.min_alt_m = float(min_alt_m)
         self.fix_period_s = float(fix_period_s)
 
@@ -246,7 +251,8 @@ class MapFixWorker:
                         map_gsd_x_m=getattr(self.cache, "gsd_x", None),
                         min_score=self.min_score, min_margin=self.min_margin,
                         window_is_edges=(self._window_kind == "edges"),
-                        principal_xy=self.principal_xy)
+                        principal_xy=self.principal_xy,
+                        query_shape=self.query_shape)
             except Exception:
                 res = None
             out = None

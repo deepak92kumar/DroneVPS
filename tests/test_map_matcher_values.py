@@ -34,11 +34,50 @@ L = inspect.signature(MX.locate).parameters
 
 # ------------------------------------------------- the search window
 
-print("the search window - 4 Oct, flown and kept")
+print("the search window and the query shape - ONE decision, 22 Oct")
+# 4 Oct took this from a fixed 100 m to 0.60 x altitude, because the matcher
+# was guessing outside what the frame could see. 23 Oct took it to 0.90, and
+# the pairing below is the whole point.
 check("0.60 x altitude", W["window_alt_frac"].default == 0.60,
-      '"fixed 100 m -> 0.60. The matcher was guessing outside what the '
-      'frame could see at low altitude and cropping the search too tight at '
-      'high"')
+      '"0.90 and 0.805 both measured WORSE on 40 frames with a per-row '
+      'origin: full+0.60 p90 23.86 m against full+0.805 p90 38.98 m"')
+check("the whole frame reaches the matcher",
+      W["query_shape"].default == "full",
+      '"a centred square is 0.95 x the SHORT side, so 44% of a 1280x800 '
+      'frame never arrived"')
+
+# THE PAIRING. These two are not independent and the measurement says so:
+#
+#     square 0.60   85/301 (28.2%)      full 0.60  100/301 (33.2%)
+#     square 0.90   63/301 (20.9%)      full 0.90  147/301 (48.8%)
+#
+# A wider window with the query still square is the WORST row of the four -
+# worse than changing nothing - and that is exactly why "bigger window" sits
+# on the do-not-retry list. With the query held at 77 m more map is only more
+# chance to match wrong. Whoever widens the window next must carry the shape
+# with it, so this refuses the combination rather than trusting a comment.
+# The window was never the thing to change. Widening it was measured three
+# ways - 0.90, 0.805 and 1.30 - and every one was worse than leaving it at
+# 0.60 while giving the matcher the whole FRAME instead of a centred square.
+check("the window is not widened", W["window_alt_frac"].default <= 0.60,
+      "0.90 and 0.805 both measured worse; the query was the thing being cut")
+
+# AND THE CONSTANTS MUST REACH THE CODE. Until 23 Oct map_window_alt_frac sat
+# in config being read by nothing - VpsNode built MapFixWorker without passing
+# it, so the worker's own default won and the config value was decoration. The
+# next person to change it would have measured no difference and concluded the
+# window does not matter.
+from config import VpsConfig  # noqa: E402
+_c = VpsConfig()
+check("config's window is the one the worker uses",
+      _c.map_window_alt_frac == W["window_alt_frac"].default,
+      f"config {_c.map_window_alt_frac} vs worker {W['window_alt_frac'].default}")
+check("config's shape is the one the worker uses",
+      _c.map_query_shape == W["query_shape"].default,
+      f"config {_c.map_query_shape!r} vs worker {W['query_shape'].default!r}")
+check("and live_node passes both, not neither",
+      "window_alt_frac=" in live and "query_shape=" in live,
+      "VpsNode must hand them to MapFixWorker or config is decoration again")
 check("floored at 40 m and capped at radius_m",
       "np.clip(self.window_alt_frac * altitude_m, 40.0, self.radius_m)"
       in open(os.path.join(HERE, "vps_vio", "map_fix_worker.py")).read())

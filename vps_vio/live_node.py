@@ -1547,6 +1547,18 @@ class Notifier:
                    f"{est.get('src') or '?'}", self.SEV_INFO)
 
 
+def _vps_config():
+    """VpsConfig, or an empty stand-in. Never raises: a missing config must
+    not stop the node from flying, and every caller supplies a default."""
+    try:
+        from config import VpsConfig
+        return VpsConfig()
+    except Exception:
+        class _Empty:
+            pass
+        return _Empty()
+
+
 class VpsNode:
     # How much faster the estimate doubts itself while dead reckoning. 3x is a
     # starting value, not a measured one: it wants a sweep against a recording
@@ -1655,8 +1667,17 @@ class VpsNode:
         # are 80 px apart on the leg-cropped frame = 11 m at 110 m, and
         # FlowTracker has always used cx/cy, so this is also what stops the
         # map path and the flow path disagreeing about where the aircraft is.
+        # The window and the query shape come from config, and they come
+        # TOGETHER. Until 23 Oct neither was passed: map_window_alt_frac sat
+        # in config being read by nothing while the worker's own default won,
+        # and query_shape was never mentioned at all. A constant that does not
+        # reach the thing it names is worse than no constant, because the next
+        # person changes it and measures no difference.
+        _cfg = _vps_config()
         self.worker = MapFixWorker(
             cache, focal_px=focal_px, radius_m=radius_m,
+            window_alt_frac=getattr(_cfg, "map_window_alt_frac", 0.90),
+            query_shape=getattr(_cfg, "map_query_shape", "full"),
             principal_xy=(None if K is None
                           else (float(np.asarray(K).reshape(3, 3)[0, 2]),
                                 float(np.asarray(K).reshape(3, 3)[1, 2]))))
