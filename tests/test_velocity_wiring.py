@@ -16,6 +16,7 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 "vps_vio"))
 from live_node import VpsNode               # noqa: E402
+from velocity_bridge import VelocityBridge  # noqa: E402
 
 FOCAL = 791.72        # measured on this OAK-D
 ALT = 110.0
@@ -94,7 +95,12 @@ for k in ("vn", "ve", "speed_mps", "valid", "sent_vn", "sent_ve", "deadbanded",
     print(f"    {k:<14} {getattr(v, k)!r}")
 check("flow_updates counted", v.flow_updates > 10, f"{v.flow_updates}")
 check("bias stayed frozen through the run", v.bias_frozen is True, "")
-check("deadband scaled with height", abs(v.deadband_mps - (0.35 + 0.005 * ALT)) < 1e-9,
+# The coefficient lives in one place; this checks the WIRING, that the
+# carried altitude reaches the threshold, not the value. 0.005 -> 0.010 on
+# 22 Oct: at 83 m the old 0.77 m/s sat below a sustained phantom whose p90
+# was 0.91, so the worst ones passed and LOITER flew them out.
+_PER_M = VelocityBridge().deadband_per_m
+check("deadband scaled with height", abs(v.deadband_mps - (0.35 + _PER_M * ALT)) < 1e-9,
       f"{v.deadband_mps:.3f} at {ALT:.0f} m")
 
 node.stop()

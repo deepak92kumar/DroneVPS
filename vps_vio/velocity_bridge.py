@@ -143,7 +143,43 @@ class VelocityBridge:
 
     def __init__(self, *, tau_s: float = 0.35, flow_timeout_s: float = 0.6,
                  deadband_base_mps: float = 0.35,
-                 deadband_per_m: float = 0.005,
+                 # 0.005 -> 0.010 ON 22 OCT, measured on log 227, which
+                 # would not hold in any of four VPS windows.
+                 #
+                 # The deadband's job is to suppress a phantom speed that the
+                 # aircraft is not doing, and the phantom grows with height
+                 # because velocity is pixels x altitude / focal. At 83 m the
+                 # old threshold was 0.35 + 0.005*83 = 0.77 m/s while the
+                 # sustained phantom measured over 10 s windows ran p50 0.17
+                 # and p90 0.91 m/s - so the worst ones passed straight
+                 # through, and a sustained false velocity is the one thing
+                 # LOITER cannot settle against. With no stick input it can
+                 # only cancel a velocity error by flying, which is exactly
+                 # what log 227 did: in every window the aircraft moved
+                 # OPPOSITE to the phantom, 19.8 m in 7.7 s in the worst.
+                 #
+                 # Swept against the raw receiver over 12606 samples above
+                 # 5 m, counting rows the deadband would zero:
+                 #
+                 #   base  per_m   31m    83m   phantom killed   real motion
+                 #                                              wrongly killed
+                 #   0.35  0.005  0.51   0.77      19.2%            1.4%
+                 #   0.35  0.010  0.66   1.18      26.9%            3.2%
+                 #   0.35  0.015  0.81   1.59      32.7%            5.2%
+                 #   0.35  0.020  0.97   2.01      37.1%            8.4%
+                 #
+                 # 0.010 puts the threshold above the p90 phantom and buys
+                 # 7.7 points of suppression for 1.8 points of real motion,
+                 # a ratio of 4.3:1. 0.015 falls to 3.6:1 and zeroes 47% of a
+                 # VPS window outright, which approaches withholding the
+                 # velocity - and the archived reports measured what that
+                 # costs: "the EKF differentiates our position and believed
+                 # 0.21 m/s while the aircraft did 1.09".
+                 #
+                 # A zeroed velocity is still SENT. The estimate stays valid
+                 # and the FC is told zero, which for a hovering aircraft is
+                 # the truth; deadbanded is recorded so a log can show it.
+                 deadband_per_m: float = 0.010,
                  max_accel_mps2: float = 8.0,
                  slew_mps2: float = 5.0,
                  slew_hold_s: float = 2.0,

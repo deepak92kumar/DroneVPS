@@ -86,7 +86,10 @@ class VpsConfig:
     # discards 49% of genuine motion, which is why the aircraft wanders under
     # 10 m while its POSITION there is accurate to 2 cm.
     hover_deadband_base_mps: float = 0.35
-    hover_deadband_per_m: float = 0.005
+    # 0.005 -> 0.010, 22 Oct. See VelocityBridge's deadband_per_m: at 83 m
+    # the old threshold was 0.77 m/s against a sustained phantom whose p90 was
+    # 0.91, so the worst ones passed and LOITER flew them out.
+    hover_deadband_per_m: float = 0.010
 
     # --- camera (OAK-D Pro mono pair) ---
     # Measured on this device 19 Oct: THE_800_P gives 1280x800 and 29.8-30.7 fps
