@@ -113,6 +113,9 @@ def node():
     n._vel_frames_high = int(_cfg.flow_vel_frames_high)
     n._vel_alt_m = float(_cfg.flow_vel_alt_m)
     n._vel_alt_span_m = 15.0
+    # The step gate's recorded input, also skipped with __init__.
+    n.step_px = None
+    n.step_action = "ok"
     n._vel_cum_n = n._vel_cum_e = 0.0
     n._vel_hist = _c.deque(maxlen=max(n._vel_frames, n._vel_frames_high) + 1)
     # The bare node skips __init__, so the derotation source has to be set

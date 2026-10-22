@@ -822,6 +822,10 @@ CSV_COLUMNS = ["t", "north_m", "east_m", "lon", "lat", "sigma_m",
     # configuration carried an 8.61 m east bias this code never had. Now the
     # fix's own position is in the log and the dependence is ours to measure.
     "fix_lon", "fix_lat", "fix_score", "fix_inliers", "fix_alt_m",
+    # THE STEP GATE'S INPUT. A refused step enters the position as zero and a
+    # clipped one at the ceiling, so n_step_rej counts the bites but nothing
+    # records what was bitten. 22 Oct.
+    "step_px", "step_action",
     # Derotation: what the FC said the tilt did, and what the
     # camera's own gyro integrated over the same interval.
     # Logged side by side because the gyro's axis mapping and
@@ -942,6 +946,8 @@ def csv_row(est, f, v, gN, gE, err):
             "" if est.get("fix_score") is None else f"{est['fix_score']:.4f}",
             "" if est.get("fix_inliers") is None else f"{est['fix_inliers']:d}",
             "" if est.get("fix_alt_m") is None else f"{est['fix_alt_m']:.1f}",
+            "" if est.get("step_px") is None else f"{est['step_px']:.2f}",
+            est.get("step_action", ""),
             "" if est["fc_d_roll"] is None else f"{est['fc_d_roll']:.4f}",
             "" if est["fc_d_pitch"] is None else f"{est['fc_d_pitch']:.4f}",
             "" if est["gyro_d_roll"] is None else f"{est['gyro_d_roll']:.4f}",
@@ -1541,6 +1547,8 @@ class VpsNode:
         # the other way.
         self._vel_alt_span_m = 15.0
         self._vel_cum_n = self._vel_cum_e = 0.0
+        self.step_px = None
+        self.step_action = "ok"
         # Held long enough for the LONGEST baseline; how far back is actually
         # read is chosen per frame from the height.
         self._vel_hist = collections.deque(
@@ -1648,13 +1656,26 @@ class VpsNode:
         judge the step against, so it is used as measured. Refusing on no
         evidence would throw away the first flowed frame of every run.
         """
+        self.step_px = None
+        self.step_action = "ok"
         if dt is None or not (0.0 < dt < 0.5) or not (altitude_m > 0.0):
             return dn, de, "ok"
         mag = float(np.hypot(dn, de))
+        # The step as the gate SAW it, before it was refused or clipped, in
+        # pixels - which is the unit the ceiling is in and the only unit the
+        # flow's error is constant in. Added 22 Oct: a refused step enters the
+        # position as zero and a clipped one at exactly the ceiling, so after
+        # the fact the log cannot tell a justified refusal from a lost real
+        # step. Measured post-gate the accepted steps run p50 3.4-4.9 px and
+        # p99 32-40 against this 50 px ceiling, and at 85 m a real 3 m/s is
+        # 0.93 px per frame - so whether the top few percent were noise or
+        # motion has never been checked.
+        self.step_px = mag * self.focal / altitude_m
         # The ceiling in metres for THIS frame: pixels x metres-per-pixel.
         ceiling = self.STEP_MAX_PX * (altitude_m / self.focal)
         if mag <= ceiling:
             self._step_refusals = 0
+            self.step_action = "ok"
             return dn, de, "ok"
         self._step_refusals += 1
         self.n_step_rejected += 1
@@ -1663,7 +1684,9 @@ class VpsNode:
             # isolated glitch still dies rather than the gate standing open.
             self._step_refusals = 0
             k = ceiling / mag
+            self.step_action = "clipped"
             return dn * k, de * k, "clipped"
+        self.step_action = "refused"
         return 0.0, 0.0, "refused"
 
     def to_lonlat(self, north: float, east: float):
@@ -1905,7 +1928,8 @@ class VpsNode:
             fix_alt = float(getattr(res, "altitude_m", 0.0)) or None
 
         lon, lat = self.to_lonlat(*self.fuser.pos)
-        return dict(fix_lon=fix_lon, fix_lat=fix_lat, fix_score=fix_score,
+        return dict(step_px=self.step_px, step_action=self.step_action,
+                    fix_lon=fix_lon, fix_lat=fix_lat, fix_score=fix_score,
                     fix_inliers=fix_inl, fix_alt_m=fix_alt,
                     north=float(self.fuser.pos[0]), east=float(self.fuser.pos[1]),
                     lon=lon, lat=lat, sigma=self.fuser.sigma_m,

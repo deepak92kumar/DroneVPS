@@ -103,7 +103,13 @@ check("widths match", len(row) == len(CSV_COLUMNS),
 # out and a fix 2 m out leave the same trace in the fused position - which
 # meant the matcher's error by height could only be taken from an archived
 # report whose configuration carried an 8.61 m east bias this code never had.
-check("and there are the columns we expect", len(CSV_COLUMNS) == 64,
+# 66 once the step gate's INPUT joined them. n_step_rej counted the bites and
+# nothing recorded what was bitten: a refused step enters the position as zero
+# and a clipped one at exactly the ceiling, so the log could not tell a
+# justified refusal from a lost real step. Post-gate the accepted steps run
+# p50 3.4-4.9 px against a 50 px ceiling, and at 85 m a real 3 m/s is 0.93 px
+# per frame, so the question is whether the top few percent were noise at all.
+check("and there are the columns we expect", len(CSV_COLUMNS) == 66,
       str(len(CSV_COLUMNS)))
 i = CSV_COLUMNS.index("fc_d_roll")
 check("the three derotation opinions sit together",
