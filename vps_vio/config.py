@@ -31,11 +31,32 @@ class VpsConfig:
     # vio_y = -0.225 with 100% on that axis, exactly as this matrix predicts.
     # Rows map a VIO vector to [forward, right, down] in the body frame; the
     # compass supplies body->NED heading at runtime (VioToNed.heading_align_rad).
+    #
+    # ALSO DEAD, AS OF 22 OCT: nothing in the flight path reads this. It was
+    # the cuVSLAM VIO's axis mapping, and cuVSLAM was rejected on 28 Sep - the
+    # OAK-D's 7.5 cm baseline gives under 0.3 px of disparity above ~25 m
+    # against a 100-150 m mission, and it contributed exactly 0 over 1680
+    # frames. vio_source.py and oak_rig.py went with it. The flow path's own
+    # axis mapping lives in flow_odom.shift_to_ne, and the founding brief's
+    # note that this matrix was "an identity placeholder" is the same class of
+    # fault that caused the 21 Oct runaway: an unmeasured sign.
     R_vio_to_ned: list = field(default_factory=lambda: [[0.0, -1.0, 0.0],
                                                         [1.0,  0.0, 0.0],
                                                         [0.0,  0.0, 1.0]])
 
     # --- ArUco-as-anchor fusion (mirror of marker_fix_step; keep FLAT) ---
+    #
+    # DEAD, AS OF 22 OCT: nothing reads either of these. They belong to the
+    # AnchorFuser in vps_vio/anchor.py, which went with the SSD along with the
+    # cuVSLAM path; MapFuser replaced it and uses max_correction_m and
+    # gate_sigmas instead. They are left here, labelled, because the project's
+    # founding brief singles them out - "keep corr_rate_mps and reanchor_m
+    # FLAT - never scale with height. (Scaling them previously cost two
+    # flights and was reverted.)" - so a reader who finds them will reasonably
+    # think they fly. Tuning them changes nothing.
+    #
+    # The warning itself has NOT expired, and it is the nearest thing this
+    # project has to a rule about height-scaled gains.
     corr_rate_mps: float = 4.0     # max slew speed of the offset correction, m/s. FLAT.
     reanchor_m: float = 6.0        # horizontal residual above which we snap. FLAT.
     marker_timeout_s: float = 2.0  # ignore marker fixes older than this
