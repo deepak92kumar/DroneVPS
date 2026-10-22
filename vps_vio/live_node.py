@@ -111,11 +111,37 @@ class LiveSource:
         mono = {}
         # CAM_B alone unless depth is wanted; depth needs the pair.
         sockets = [("mono", dai.CameraBoardSocket.CAM_B)]
+        # IR LASER AND FLOOD OFF, at the pilot's instruction. The OAK-D Pro's
+        # dot projector and flood LED do nothing for this mission - the ground
+        # is tens of metres away and the stereo pair is only used as a
+        # same-surface check below 30 m - and they draw power from the same
+        # rail as the sensors. They default to 0 on this device and are set
+        # explicitly so a firmware default cannot turn them on quietly.
+        #
+        # The RGB sensor (CAM_A, IMX378) is not in this pipeline at all, which
+        # is the other half of what was asked: it is never created, so it is
+        # never streamed, encoded or powered for our sake.
+        self._ir_off = True
+
         if stereo_depth:
             sockets.append(("mono_right", dai.CameraBoardSocket.CAM_C))
         for name, sock in sockets:
             m = p.create(dai.node.MonoCamera)
             m.setBoardSocket(sock)
+            # THE_800_P IS THIS SENSOR'S MAXIMUM, not a choice. Asked on
+            # 22 Oct whether the monos could run at 1200 as an earlier build
+            # was remembered doing: the device itself says no. CAM_B and CAM_C
+            # are OV9282 and report exactly three sizes - 640x400, 1280x720
+            # and 1280x800. THE_1200_P is in depthai's enum for other sensors,
+            # and asking for it here crashes the Myriad X firmware with
+            # RTEMS_FATAL_SOURCE_ASSERT 4.4 s after boot, every configuration,
+            # even one stream with no depth and no IMU, while 800p runs at
+            # 29.9 Hz.
+            #
+            # The only resolution headroom on this camera is CAM_A, the
+            # IMX378, which offers up to 4056x3040 and has fx about 1943 at
+            # 2560x1440 against this sensor's 791.72 - 2.45x the pixels on the
+            # same ground. It is not in this pipeline.
             m.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)
             m.setFps(fps)
             m.initialControl.setAutoExposureLimit(8000)
@@ -227,6 +253,16 @@ class LiveSource:
             st.depth.link(xd.input)
 
         self.dev = dai.Device()
+        # Both off, explicitly. See the note where _ir_off is set: neither does
+        # anything for ground tens of metres away, and a firmware default must
+        # not be able to turn them on quietly. Wrapped because the call does
+        # not exist on every OAK model and a missing projector is not an error.
+        for _setter in ("setIrLaserDotProjectorBrightness",
+                        "setIrFloodLightBrightness"):
+            try:
+                getattr(self.dev, _setter)(0)
+            except Exception:
+                pass
         cal = self.dev.readCalibration()
         # The IMU is not bolted to the camera's axes, and the documented body
         # mapping (config.R_vio_to_ned) is written in the CAMERA frame - the
