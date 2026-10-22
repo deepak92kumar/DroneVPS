@@ -1308,9 +1308,23 @@ class Notifier:
 
     SEV_CRIT, SEV_WARN, SEV_INFO = 2, 4, 6
 
+    # How long a depth median is believed after the last one arrived. The
+    # depth queue is read non-blocking at its own rate, so a single missing
+    # cycle means nothing; two seconds of silence does.
+    DEPTH_SEEN_S = 2.0
+    # Above this the stereo pair cannot contribute and the depth gate stands
+    # itself down (FlowTracker.DEPTH_MAX_M). Kept here as the altitude the
+    # PILOT is told about, which is a different thing from the gate's own
+    # threshold and must not silently follow it.
+    DEPTH_USELESS_ABOVE_M = 30.0
+    # Dead band on that threshold, so climbing through it is not an event.
+    DEPTH_HYST_M = 5.0
+
     def __init__(self, link, period_s: float = 10.0, enabled: bool = True):
         self.link = link                    # anything with .mav.statustext_send
         self.period = float(period_s)
+        self._depth_seen_t = None
+        self._depth_high = False
         self.enabled = bool(enabled) and link is not None
         self._next = 0.0
         self._state = {}
@@ -1357,10 +1371,44 @@ class Notifier:
                    else "VPS ACCEL SILENT - FLOW ONLY, NO VIO",
                    self.SEV_INFO if a_n > 0 else self.SEV_CRIT)
 
+        # THE DEPTH LINE WAS THE NOISIEST THING ON THE RADIO. On log 229 it
+        # sent 154 of the flight's 363 messages, flipping at a median 0.04 s
+        # apart - 25 Hz, almost every frame.
+        #
+        # The event() mechanism was working; the PREDICATE was wrong. It asked
+        # "did a depth frame arrive on THIS cycle", and the depth queue is
+        # read with tryGet() at its own rate, so that flips as an accident of
+        # timing rather than as anything the pilot can act on.
+        #
+        # It is a HELD state now: has a depth median arrived in the last
+        # DEPTH_SEEN_S. And above FlowTracker.DEPTH_MAX_M the gate stands
+        # itself down - the OAK-D's 7.5 cm baseline gives under 0.3 px of
+        # disparity past about 25 m, which is why log 229 read a median of
+        # 5.00 m while the aircraft sat at 32-86 m - so up there it says so
+        # instead of calling it a fault.
         dm = est.get("depth_med_m")
-        self.event("depth", dm is not None,
-                   f"VPS STEREO OK {dm:.1f}m" if dm is not None
-                   else "VPS STEREO OFF/OUT OF RANGE", self.SEV_INFO)
+        if dm is not None:
+            self._depth_seen_t = t
+        seen = (self._depth_seen_t is not None
+                and (t - self._depth_seen_t) < self.DEPTH_SEEN_S)
+        # Hysteresis on the altitude, or climbing through the threshold flaps
+        # it: on log 229 the held-state fix alone took 154 messages to 15, and
+        # eleven of those fifteen were the aircraft crossing 30 m.
+        alt_now = est.get("alt")
+        if alt_now is not None and np.isfinite(alt_now):
+            if self._depth_high:
+                self._depth_high = alt_now > self.DEPTH_USELESS_ABOVE_M - self.DEPTH_HYST_M
+            else:
+                self._depth_high = alt_now > self.DEPTH_USELESS_ABOVE_M
+        too_high = self._depth_high
+        if too_high:
+            self.event("depth", "high",
+                       "VPS STEREO IDLE - above %.0fm, baseline too short"
+                       % self.DEPTH_USELESS_ABOVE_M, self.SEV_INFO)
+        else:
+            self.event("depth", bool(seen),
+                       f"VPS STEREO OK {dm:.1f}m" if (seen and dm is not None)
+                       else "VPS STEREO OFF/OUT OF RANGE", self.SEV_INFO)
 
         # "NO MAP FIX" on its own reads as a failure when the usual cause is
         # simply being too low for the map to mean anything. Log 214 sat at
