@@ -97,7 +97,13 @@ check("widths match", len(row) == len(CSV_COLUMNS),
 # could not be replayed at a different tau_s because neither input had been
 # written down. The gain had to be reasoned instead of swept. That is the
 # second time a velocity fault has been undiagnosable from the recording.
-check("and there are the columns we expect", len(CSV_COLUMNS) == 59,
+# 64 once the map fix's OWN position joined them. fix_used recorded only that
+# a fix had been applied; where the matcher actually put the aircraft was
+# never written down. max_correction_m caps every fix at 0.5 m, so a fix 40 m
+# out and a fix 2 m out leave the same trace in the fused position - which
+# meant the matcher's error by height could only be taken from an archived
+# report whose configuration carried an 8.61 m east bias this code never had.
+check("and there are the columns we expect", len(CSV_COLUMNS) == 64,
       str(len(CSV_COLUMNS)))
 i = CSV_COLUMNS.index("fc_d_roll")
 check("the three derotation opinions sit together",

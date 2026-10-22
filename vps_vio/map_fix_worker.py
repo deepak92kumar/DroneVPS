@@ -81,6 +81,13 @@ class FixResult:
     inliers: int = 0      # RANSAC inliers behind the fix
     total_matches: int = 0
     reason: str = ""      # why a rejected fix was rejected, for the recorder
+    # The altitude the MATCH was made at, not the altitude now. Added 22 Oct:
+    # the matcher's error depends strongly on height, because the search
+    # window is window_alt_frac x altitude and a smaller window holds fewer
+    # features - and until now the fix's own position was never written down,
+    # so that dependence could only be taken from an archived report of a
+    # configuration this code does not share. It is measurable here instead.
+    altitude_m: float = 0.0
 
 
 class MapFixWorker:
@@ -211,7 +218,8 @@ class MapFixWorker:
                                 time.monotonic() - t0, plon, plat,
                                 getattr(res, "inliers", 0),
                                 getattr(res, "total_matches", 0),
-                                getattr(res, "reason", ""))
+                                getattr(res, "reason", ""),
+                                float(alt))
             with self._lock:
                 self._result = out
                 self._job = None

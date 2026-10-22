@@ -816,6 +816,12 @@ CSV_COLUMNS = ["t", "north_m", "east_m", "lon", "lat", "sigma_m",
     # accel blend was inflating the speed and then could not be replayed
     # at a different tau_s: neither term was written down.
     "vel_flow_vn", "vel_flow_ve", "vel_accel_n", "vel_accel_e",
+    # THE MAP FIX ITSELF. Added 22 Oct. fix_used said only that one was
+    # applied; where it actually put the aircraft was never recorded, so the
+    # matcher's error by height had to be read off an archived report whose
+    # configuration carried an 8.61 m east bias this code never had. Now the
+    # fix's own position is in the log and the dependence is ours to measure.
+    "fix_lon", "fix_lat", "fix_score", "fix_inliers", "fix_alt_m",
     # Derotation: what the FC said the tilt did, and what the
     # camera's own gyro integrated over the same interval.
     # Logged side by side because the gyro's axis mapping and
@@ -931,6 +937,11 @@ def csv_row(est, f, v, gN, gE, err):
             int(v.bias_frozen), v.reason,
             f"{v.flow_vn:.3f}", f"{v.flow_ve:.3f}",
             f"{v.accel_n:.3f}", f"{v.accel_e:.3f}",
+            "" if est.get("fix_lon") is None else f"{est['fix_lon']:.7f}",
+            "" if est.get("fix_lat") is None else f"{est['fix_lat']:.7f}",
+            "" if est.get("fix_score") is None else f"{est['fix_score']:.4f}",
+            "" if est.get("fix_inliers") is None else f"{est['fix_inliers']:d}",
+            "" if est.get("fix_alt_m") is None else f"{est['fix_alt_m']:.1f}",
             "" if est["fc_d_roll"] is None else f"{est['fc_d_roll']:.4f}",
             "" if est["fc_d_pitch"] is None else f"{est['fc_d_pitch']:.4f}",
             "" if est["gyro_d_roll"] is None else f"{est['gyro_d_roll']:.4f}",
@@ -1840,14 +1851,28 @@ class VpsNode:
                                   altitude_m=f["alt"], yaw_deg=f["yaw"]):
                 self._next_fix = f["t"] + self.fix_period
         res = self.worker.poll()
+        fix_lon = fix_lat = fix_score = fix_alt = None
+        fix_inl = None
         if res is not None and res.ok:
             fN = (res.lat - self.origin[1]) * M_PER_DEG_LAT
             fE = (res.lon - self.origin[0]) * self.mlon
             fix_used = self.fuser.update(fN, fE)
             self.n_fix += 1
+            # Where the MATCHER put us, before the fuser weighed and capped
+            # it, and the height it was matched at. This is the raw number the
+            # matcher's error-by-height has to be measured from; the fused
+            # position cannot show it because max_correction_m caps every fix
+            # at 0.5 m, so a fix 40 m out and a fix 2 m out move the estimate
+            # by the same amount and leave the same trace.
+            fix_lon, fix_lat = float(res.lon), float(res.lat)
+            fix_score = float(getattr(res, "score", 0.0))
+            fix_inl = int(getattr(res, "inliers", 0))
+            fix_alt = float(getattr(res, "altitude_m", 0.0)) or None
 
         lon, lat = self.to_lonlat(*self.fuser.pos)
-        return dict(north=float(self.fuser.pos[0]), east=float(self.fuser.pos[1]),
+        return dict(fix_lon=fix_lon, fix_lat=fix_lat, fix_score=fix_score,
+                    fix_inliers=fix_inl, fix_alt_m=fix_alt,
+                    north=float(self.fuser.pos[0]), east=float(self.fuser.pos[1]),
                     lon=lon, lat=lat, sigma=self.fuser.sigma_m,
                     # Two sigmas, and the difference is the whole 20 Oct
                     # finding. `sigma` is the fuser's own - the uncertainty of

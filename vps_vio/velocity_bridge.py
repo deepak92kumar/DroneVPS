@@ -430,3 +430,29 @@ class VelocityBridge:
         st.sent_vn, st.sent_ve = want_n, want_e
         st.slew_count = self.slewed
         return st
+
+
+# --------------------------------------------------------------------------- #
+# WHY THE VELOCITY IS SENT AT ALL, and why switching it off is not a fallback.
+#
+# Recorded 22 Oct 2026 from the archived reports of the pre-SSD project, which
+# tried it and measured the result:
+#
+#     "send-veloff -> ON. Without it the EKF differentiates our position and
+#      believed 0.21 m/s while the aircraft did 1.09."
+#
+# That is the 8 Oct failure mode reached by a different route: a fifth of the
+# true speed, with nothing aboard able to tell. The EKF's own differentiation
+# of a GPS_INPUT position is heavily filtered, so it lags and attenuates - the
+# very thing this module exists to prevent.
+#
+# It matters because the obvious response to a high XKF4.SV is to stop sending
+# velocity and let the position carry the flight, and on 22 Oct that is what
+# was about to be proposed. The position IS the good signal here (SP never
+# left 0.56 against a 1.2 gate on log 226, and the GPS->VPS handover lands
+# within a metre) which makes the idea look safe. It is not: the EKF would
+# then fly on a velocity five times too small rather than one that is noisy.
+#
+# The answer to a noisy velocity is to measure it better - a longer baseline,
+# VpsConfig.flow_vel_frames - and to declare its accuracy honestly, which is
+# VEL_ACC_PER_M in live_node. Not to withhold it.
