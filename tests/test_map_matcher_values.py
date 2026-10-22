@@ -90,14 +90,31 @@ check("not 30", W["min_alt_m"].default != 30.0,
 
 # ------------------------------------------------- the fix period
 
-print("\nthe fix period - 5 Oct, and the reason is not CPU")
-check("MapFixWorker's default is 2.0", W["fix_period_s"].default == 2.0)
-check("the CLI agrees", 'ap.add_argument("--fix-period", type=float, default=2.0,' in live,
-      '5 Oct: "It now runs every 2 s instead of every 0.4, which keeps the '
-      'bound and removes most of the shove" - 1.18 m/s of push on a '
-      'stationary aircraft above 80 m')
-check("and so does VpsNode", "fix_period_s: float = 2.0" in live,
+print("\nthe fix period - 1.0, which is what 11 Oct actually flew")
+# The history matters, because 2.0 came back with the rebuild and looked like
+# the settled value when it was only the middle of a sweep:
+#
+#   0.4 s  5 Oct: "It now runs every 2 s instead of every 0.4, which keeps
+#          the bound and removes most of the shove" - 1.18 m/s of push on a
+#          stationary aircraft above 80 m. This is the measurement that
+#          rules out a FAST period, and 0.4 is what it ruled out.
+#   2.0 s  what 5 Oct moved to, and what the post-SSD rebuild took.
+#   1.0 s  what the project was flying by 11 Oct, from the pilot's archived
+#          reports: "the step cap is 0.500 m per fix at 1 fix/s". Later
+#          evidence than 5 Oct, and it sits between the two, so it is not
+#          the experiment that was ruled out.
+#
+# The matcher costs 0.20 s at a 90 m window measured 21 Oct, so 1.0 s is not
+# a CPU question either way.
+check("MapFixWorker's default is 1.0", W["fix_period_s"].default == 1.0)
+check("the CLI agrees",
+      'ap.add_argument("--fix-period", type=float, default=1.0,' in live)
+check("and so does VpsNode", "fix_period_s: float = 1.0" in live,
       "three defaults for one number is how 0.5 survived")
+check("but it is not back at the 0.4 s that WAS ruled out",
+      W["fix_period_s"].default >= 1.0,
+      '5 Oct measured 1.18 m/s of push on a stationary aircraft at 0.4 s')
+# And the other half of the same lever, which must NOT move with it.
 
 # ------------------------------------------------- the fuser
 
@@ -108,7 +125,8 @@ check("fix_sigma_m 20", abs(f.fix_var ** 0.5 - 20.0) < 1e-6,
 check("max_correction_m 0.5", abs(f.max_correction_m - 0.5) < 1e-9,
       '3 Oct: raised to 1.5-3.0 once and "the hold fell from 11-14 s to '
       '4.5-9.0 s while map_move_m sat at exactly 1.50". Reverted the same '
-      'afternoon')
+      'afternoon, and 11 Oct still records "0.500 m per fix" - so the rate '
+      'comes from fix_period, which 11 Oct flew at 1 fix/s, not from here')
 check("gate_sigmas 3.0", abs(f.gate - 3.0) < 1e-9)
 
 # ------------------------------------------------- what must NOT come back

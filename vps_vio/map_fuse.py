@@ -60,6 +60,46 @@ class MapFuser:
                  gate_sigmas: float = 3.0,
                  max_sigma_m: float = 400.0,
                  init_sigma_m: float = 2.0,
+                 # 0.5, AND BOTH WAYS OF RAISING THE CORRECTION RATE HAVE
+                 # BEEN FLOWN AND REVERTED. Recorded here together because on
+                 # 22 Oct each was proposed again in turn:
+                 #
+                 #   this cap 0.5 -> 1.5-3.0, 3 Oct: "the hold fell from 11-14 s
+                 #     to 4.5-9.0 s while map_move_m sat at exactly 1.50".
+                 #     Reverted the same afternoon.
+                 #   fix_period 2.0 -> lower, 5 Oct: "faster was measured to
+                 #     push a stationary aircraft at 1.18 m/s above 80 m while
+                 #     buying no extra bound on drift".
+                 #
+                 # The cap being hit on EVERY fix - map_move_m "at exactly
+                 # 1.50" - is what the 3 Oct result turns on. A cap that is
+                 # always saturated means the matcher is persistently far from
+                 # the estimate, so raising it hands the estimate to whichever
+                 # is wrong, and on that afternoon it was the matcher.
+                 #
+                 # This is NOT because a step is harmful. Log 226's three
+                 # handovers applied a deliberate step toward the receiver's
+                 # known position:
+                 #
+                 #     step applied    EKF moved    the AIRCRAFT moved
+                 #        8 m           2.46 m          0.40 m
+                 #        4 m           0.41 m          0.38 m
+                 #       15 m           8.83 m          2.15 m
+                 #
+                 # 86% of a 15 m step went into the estimate and left the
+                 # aircraft where it was, which is the behaviour the pilot
+                 # asked for - the flight controller absorbs it rather than
+                 # flying it out. So a step toward a TRUSTWORTHY source is
+                 # absorbed and gentle; a step toward this matcher is not,
+                 # because the matcher's own error on this airframe has never
+                 # been measured. The cap is protecting us from that, not
+                 # limiting us.
+                 #
+                 # So the bottleneck is the matcher's accuracy, not this
+                 # number, and it is now measurable: FixResult carries
+                 # altitude_m and the recorder carries fix_lon / fix_lat /
+                 # fix_score / fix_inliers / fix_alt_m. Until a flight has
+                 # those, raising this is the same experiment twice.
                  max_correction_m: float = 0.5):
         """Defaults are swept on the 27 Sep flight, not assumed.
 

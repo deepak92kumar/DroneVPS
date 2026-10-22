@@ -1429,7 +1429,7 @@ class VpsNode:
     STEP_ESCAPE_N = 5
 
     def __init__(self, cache: MapCache, focal_px: float, *,
-                 fix_period_s: float = 2.0, radius_m: float = 150.0,
+                 fix_period_s: float = 1.0, radius_m: float = 150.0,
                  max_corners: int = 300, K=None, D=None, focal_y_px=None,
                  derotate: str = "fc"):
         self.cache = cache
@@ -1941,11 +1941,17 @@ def main():
                     help="camera IMU report rate in Hz for all three sensors "
                          "(default from VpsConfig.imu_rate, 100). They share "
                          "one packet, so this sets them together.")
-    ap.add_argument("--fix-period", type=float, default=2.0,
-                    help="seconds between map fixes. 2.0 is the 5 Oct value: "
-                         "faster was measured to push a stationary aircraft "
-                         "at 1.18 m/s above 80 m while buying no extra bound "
-                         "on drift")
+    ap.add_argument("--fix-period", type=float, default=1.0,
+                    help="seconds between map fixes. 1.0 is the state the "
+                         "project was actually flying by 11 Oct, recovered "
+                         "from the pilot's archived reports: 'the step cap is "
+                         "0.500 m per fix at 1 fix/s'. The rebuild had taken "
+                         "the older 5 Oct value of 2.0, whose caution was "
+                         "that 'faster was measured to push a stationary "
+                         "aircraft at 1.18 m/s above 80 m' - but 11 Oct flew "
+                         "1 fix/s after that, so the later evidence wins. "
+                         "Raising the CAP instead is the 3 Oct experiment and "
+                         "was reverted; see map_fuse.max_correction_m")
     ap.add_argument("--radius", type=float, default=150.0)
     ap.add_argument("--corners", type=int, default=300)
     ap.add_argument("--origin", help="lon,lat - GPS-denied start")
