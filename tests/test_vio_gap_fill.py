@@ -102,6 +102,14 @@ def node():
     n.n_fix = n.n_flow = n.n_dr = 0
     n.n_step_rejected = 0
     n._step_refusals = 0
+    # The flow velocity's baseline, also skipped with __init__. See
+    # VpsConfig.flow_vel_frames: the velocity is measured over the span of the
+    # last N accepted displacements, not over one frame.
+    import collections as _c
+    from config import VpsConfig as _Cfg
+    n._vel_frames = int(_Cfg().flow_vel_frames)
+    n._vel_cum_n = n._vel_cum_e = 0.0
+    n._vel_hist = _c.deque(maxlen=n._vel_frames + 1)
     # The bare node skips __init__, so the derotation source has to be set
     # here. "gyro" is the flying default; this fixture's frames carry no gyro
     # delta, so it falls back to the FC attitude on its own.

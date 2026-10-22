@@ -165,12 +165,22 @@ print("\nthe wiring: one decision, both consumers, and a gap on refusal")
 check("the gate runs BEFORE predict",
       src.index("self.gate_step(dn, de, dt_step, f[\"alt\"])")
       < src.index("self.fuser.predict(dn, de"))
-check("push_flow is inside the same branch, on the GATED step",
-      "self.vel.push_flow(f[\"t\"], dn / dt_step, de / dt_step)" in src
-      and src.index("dn, de, action = self.gate_step(")
-      < src.index("self.vel.push_flow(f[\"t\"], dn / dt_step"),
+# Matched on ORDER and on which variables are used, not on call text - the
+# comment above says exactly that, and the line this replaced pinned
+# "push_flow(f[\"t\"], dn / dt_step, de / dt_step)" and broke the moment the
+# velocity moved onto a multi-frame baseline on 22 Oct. The property is
+# unchanged: the velocity is built from the SAME gated dn/de the fuser got.
+check("the velocity is built from the GATED step, after the gate",
+      src.index("dn, de, action = self.gate_step(")
+      < src.index("self._vel_cum_n += dn")
+      < src.index("self.vel.push_flow("),
       "the position must not swallow what the velocity refuses, and a clipped "
       "step must reach both")
+check("and it accumulates both axes from those same values",
+      "self._vel_cum_n += dn" in src and "self._vel_cum_e += de" in src)
+check("the baseline is dropped when a frame does not flow",
+      src.index("if not flowed:") < src.index("self._vel_hist.clear()"),
+      "a span across a gap carries the gap's time but not its displacement")
 check("a refused frame leaves flowed False, so the gap handling runs",
       "# else: flowed stays False" in src,
       "the accelerometer carries it and the variance grows DR_TRUST faster")

@@ -134,6 +134,38 @@ class VpsConfig:
     # look at where the vibration actually is.
     imu_rate: int = 400
 
+    # How many frames the flow VELOCITY is measured over. Position is
+    # unaffected - it integrates every frame as before.
+    #
+    # It was one frame until 22 Oct, which is the worst possible choice,
+    # because velocity = pixels x altitude / focal: at 80 m one pixel is
+    # 80/791.72 = 0.101 m, and at 30 fps that is 3.03 m/s PER PIXEL of
+    # frame-to-frame jitter. Measured on log 226, per-axis error against the
+    # raw receiver, by baseline length:
+    #
+    #     N frames   lag     5-25m   25-45m   45-70m   70-85m
+    #        1      0.02 s    1.79     8.45     9.67    17.79 m/s
+    #       20      0.33 s    0.25     1.76     1.31     3.75
+    #       30      0.50 s    0.15     1.31     0.83     2.61
+    #
+    # Summing N displacements and dividing by their span divides coherent
+    # motion by N but white jitter only by sqrt(N), so the noise falls as
+    # 1/sqrt(N) while real motion is preserved. The cost is lag: the estimate
+    # is the average over the span, so it is centred N/2 frames in the past.
+    #
+    # 20 and not 30. The lag is NOT compensated - GPS2_DELAY_MS stays 0 -
+    # because one GPS delay applies to the position too, and the position is
+    # the part that works (SP never left 0.56 against a 1.2 gate on log 226).
+    # Delaying it to help the velocity would trade the good signal for the
+    # bad one. The lag penalty is therefore already inside the numbers above:
+    # they are measured against the receiver's speed AT THE SAME INSTANT, not
+    # against a shifted copy.
+    #
+    # The displacements are the SAME ones the fuser consumed, so position and
+    # velocity still cannot disagree about what the camera saw - which is what
+    # the EKF reads as a velocity innovation.
+    flow_vel_frames: int = 20
+
     # Stereo depth: ON, and for VIO ONLY.
     #
     # It is cheap where it was feared to be expensive. Measured 19 Oct on this

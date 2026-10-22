@@ -16,7 +16,7 @@ and that is refused unless the aircraft is disarmed, so the first transmission
 can only ever happen on a bench.
 """
 from __future__ import annotations
-import argparse, csv, io, os, sys, time
+import argparse, collections, csv, io, os, sys, time
 import numpy as np, cv2
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -1512,6 +1512,17 @@ class VpsNode:
         # which is what a replayed recording and a silent IMU both look like,
         # and says how stale it is either way.
         self.vel = VelocityBridge()
+        # THE FLOW VELOCITY'S BASELINE. See VpsConfig.flow_vel_frames: one
+        # frame was the worst choice available, because a pixel of jitter is
+        # 3.03 m/s at 80 m and 30 fps. These hold the running sum of the
+        # displacements the fuser accepted, so the velocity is measured over
+        # the span of the last N of them and still comes from exactly what the
+        # position came from.
+        from config import VpsConfig as _Cfg
+        self._vel_frames = int(_Cfg().flow_vel_frames)
+        self._vel_cum_n = self._vel_cum_e = 0.0
+        # maxlen N+1: N intervals need N+1 endpoints.
+        self._vel_hist = collections.deque(maxlen=self._vel_frames + 1)
 
     def set_origin(self, lon: float, lat: float, sigma_m: float | None = None):
         """Place the origin, and record how well that point is known.
@@ -1755,11 +1766,47 @@ class VpsNode:
                 # disagree about what the camera saw - and disagreement
                 # between them is what the EKF reads as a velocity innovation.
                 if dt_step is not None and 0.0 < dt_step < 0.5:
-                    self.vel.push_flow(f["t"], dn / dt_step, de / dt_step)
+                    # Accumulate, then measure over the longest span held.
+                    # The deque grows from empty, so the baseline lengthens
+                    # from one frame to flow_vel_frames over the first ~0.7 s
+                    # instead of there being no velocity at all until it
+                    # fills - an aircraft that has just switched to the VPS
+                    # cannot wait for that.
+                    if not self._vel_hist:
+                        # Seed with the CUMULATIVE sum as it stands, not with
+                        # zero. Zero is only right on the very first frame of
+                        # a run; after a mid-flight gap clears the history the
+                        # running total is already large, and measuring it
+                        # against a zero endpoint over one frame's span read
+                        # 82 m/s in the test that caught this.
+                        self._vel_hist.append(
+                            (f["t"] - dt_step, self._vel_cum_n,
+                             self._vel_cum_e))
+                    self._vel_cum_n += dn
+                    self._vel_cum_e += de
+                    self._vel_hist.append(
+                        (f["t"], self._vel_cum_n, self._vel_cum_e))
+                    t0, n0, e0 = self._vel_hist[0]
+                    span = f["t"] - t0
+                    if span > 0.0:
+                        self.vel.push_flow(f["t"],
+                                           (self._vel_cum_n - n0) / span,
+                                           (self._vel_cum_e - e0) / span)
                 flowed = True
             # else: flowed stays False, so the gap handling below carries the
             # position on the accelerometer and grows the variance DR_TRUST
             # times faster. A refused frame IS a lost frame.
+
+        if not flowed:
+            # THE BASELINE BREAKS ON A GAP, and it has to. The velocity is a
+            # sum of displacements divided by its own span; if a frame is
+            # refused or tracking is lost, the time passes but the
+            # displacement is missing, so a span that straddles the gap
+            # reports less motion than there was - the 8 Oct failure mode
+            # exactly, a fraction of truth that nothing aboard can see.
+            # Restarting costs a few noisy frames while it refills, which is
+            # the honest trade. Log 226 refused 8 frames in 10406.
+            self._vel_hist.clear()
 
         # Flow produced nothing this frame - tracking lost, too few corners, or
         # the first frame after a reset. THIS is the gap, and it is where the
