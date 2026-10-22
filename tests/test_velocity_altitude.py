@@ -188,23 +188,41 @@ check("live_node no longer sends a flat 0.4 m/s",
       "that line told the EKF a 24.6 m/s reading was good to 0.4 m/s")
 check("it scales on the carried altitude",
       "self.VEL_ACC_PER_M * max(0.0, vel.altitude_m)" in src)
-check("with the coefficient fitted on the SLEWED output",
-      "VEL_ACC_PER_M = 0.025" in src,
-      "0.0867 was fitted on the raw flow, before the slew was restored")
-check("and a floor, because the slewed error is nearly flat",
+check("with a coefficient that covers the error at height",
+      "VEL_ACC_PER_M = 0.048" in src,
+      "0.0867 was fitted on the raw flow; 0.025 on hovers that sat low")
+check("and a floor, which is pessimistic below 25 m - the safe direction",
       "VEL_ACC_FLOOR = 0.6" in src)
 
-# The promise this makes, against the sigma measured on the bridge's OUTPUT
-# over all thirteen recorded VPS flights. The test is one-sided on purpose:
-# declaring MORE error than there is costs weight in the EKF, declaring less
-# is how a bad number gets flown.
-FLOOR, PER_M = 0.6, 0.025
-for alt, measured in ((5.0, 0.561), (15.0, 0.686), (25.0, 0.627),
-                      (38.0, 1.166), (52.0, 1.198), (70.0, 2.394)):
+# THE PROMISE, and it is one-sided on purpose: declaring MORE error than
+# there is costs weight in the EKF, declaring LESS is how a bad number gets
+# flown. An accuracy handed to an EKF is a promise, and XKF4.SV is exactly
+# error / declared.
+#
+# Two sets of measurements have to be covered, and 0.025 covered only the
+# first. Thirteen recorded VPS flights, sigma of the bridge's OUTPUT at
+# hover (first six rows), and log 226 of 22 Oct, which flew to 82.7 m with
+# the bridge's inputs recorded, PER-AXIS against the raw receiver (last
+# four). 0.025 under-stated the 226 rows by 0.6-1.5 m/s, SV sat at p50 1.26
+# against FS_EKF_THRESH 1.2, and the aircraft went to ALT_HOLD twice.
+FLOOR, PER_M = 0.6, 0.048
+MEASURED = ((5.0, 0.561, "13 flights, hover"), (15.0, 0.686, "13 flights, hover"),
+            (25.0, 0.627, "13 flights, hover"), (38.0, 1.166, "13 flights, hover"),
+            (52.0, 1.198, "13 flights, hover"), (70.0, 2.394, "13 flights, hover"),
+            (15.0, 0.41, "log 226, 5-25 m"), (35.0, 2.09, "log 226, 25-45 m"),
+            (57.0, 2.05, "log 226, 45-70 m"), (77.0, 4.19, "log 226, 70-85 m"))
+for alt, measured, whose in MEASURED:
     said = FLOOR + PER_M * alt
-    check(f"at {alt:g} m it tells the FC {said:.2f} m/s",
-          said >= measured - 0.05,
-          f"measured sigma of the sent speed there was {measured:.2f}")
+    check(f"at {alt:g} m it tells the FC {said:.2f} m/s, over {measured:.2f}",
+          said >= measured - 0.05, whose)
+
+# And the thing that was actually broken: the OLD coefficient does not keep
+# the promise on the new rows. This is kept as a check so the number cannot
+# quietly go back.
+broke = [f"{alt:g} m" for alt, measured, whose in MEASURED
+         if whose.startswith("log 226") and (0.6 + 0.025 * alt) < measured - 0.05]
+check("the old 0.025 would still break the promise at height",
+      broke == ["35 m", "77 m"], f"it under-states at {', '.join(broke)}")
 
 print("\n" + ("ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}"))
 sys.exit(1 if fails else 0)

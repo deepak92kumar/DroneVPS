@@ -598,8 +598,40 @@ class GpsInputSender:
     # model under-states by 1.2. This one is never more than 0.044 m/s optimistic
     # across the whole range, and at 70 m it declares 2.35 m/s against a measured
     # 2.39 - against log 00000194's p50 of 0.93 on a quieter day.
+    #
+    # 22 OCT: THE PER_M TERM WAS NO LONGER TRUE AND THE PROMISE WAS BEING
+    # BROKEN. Those six numbers came from hovers on thirteen flights that
+    # mostly sat low. Log 226 flew to 82.7 m with the bridge's own inputs
+    # recorded, and the PER-AXIS error against the raw receiver reads:
+    #
+    #     altitude        5-25    25-45    45-70    70-85 m
+    #     real error sd   0.41     2.09     2.05     4.19 m/s
+    #     declared        0.92     1.50     2.02     2.66 m/s
+    #     ratio           0.44     1.40     1.02     1.57
+    #
+    # So at the heights the aircraft actually flies, the declaration was
+    # optimistic by 0.7 to 1.5 m/s - not 0.044 - and XKF4.SV is exactly
+    # error / declared. SV sat at p50 1.26 against FS_EKF_THRESH 1.2 and put
+    # the aircraft in ALT_HOLD twice.
+    #
+    # The slewed column being "nearly flat" was an artefact of the altitude
+    # range it was measured over. Fitted on log 226's per-band sigma, the
+    # error is proportional to height after all - which it must be, because
+    # velocity is pixels x altitude / focal, so one pixel of frame-to-frame
+    # jitter is 0.10 m at 80 m and 3.03 m/s at 30 fps:
+    #
+    #     per-band sd = 0.0476 x altitude - 0.11
+    #
+    # Keeping the 0.6 floor (it is pessimistic below 25 m, which is the safe
+    # direction) gives 0.6 + 0.0476 x alt: 2.27 m/s at 35 m against 1.48
+    # before, and 4.55 at 83 m against 2.68. Predicted SV p50 1.26 -> 0.82.
+    #
+    # THIS DOES NOT MAKE THE VELOCITY BETTER. It stops the EKF being lied to
+    # about how bad it is. The velocity itself is still noise proportional to
+    # height, and the fix for that is a longer measurement baseline, not a
+    # number here.
     VEL_ACC_FLOOR = 0.6
-    VEL_ACC_PER_M = 0.025
+    VEL_ACC_PER_M = 0.048
     # The vertical accuracy the working flights declared: a constant 3.0 m
     # (GPA.VAcc is exactly 3.00 throughout logs 00000191 and 00000194). It had
     # been sigma_m * 2 here, which at a typical sigma of 21 m declares 42 m of
