@@ -90,30 +90,37 @@ check("not 30", W["min_alt_m"].default != 30.0,
 
 # ------------------------------------------------- the fix period
 
-print("\nthe fix period - 1.0, which is what 11 Oct actually flew")
-# The history matters, because 2.0 came back with the rebuild and looked like
-# the settled value when it was only the middle of a sweep:
+print("\nthe fix period - 2.0, and 1.0 was flown and reverted on 22 Oct")
+# The full history, because 1.0 looked like recovered knowledge and was not:
 #
 #   0.4 s  5 Oct: "It now runs every 2 s instead of every 0.4, which keeps
 #          the bound and removes most of the shove" - 1.18 m/s of push on a
-#          stationary aircraft above 80 m. This is the measurement that
-#          rules out a FAST period, and 0.4 is what it ruled out.
+#          stationary aircraft above 80 m.
 #   2.0 s  what 5 Oct moved to, and what the post-SSD rebuild took.
-#   1.0 s  what the project was flying by 11 Oct, from the pilot's archived
-#          reports: "the step cap is 0.500 m per fix at 1 fix/s". Later
-#          evidence than 5 Oct, and it sits between the two, so it is not
-#          the experiment that was ruled out.
+#   1.0 s  what the pilot's archived 11 Oct reports record - "the step cap is
+#          0.500 m per fix at 1 fix/s" - and later evidence than 5 Oct, so it
+#          was tried on 22 Oct. Flown as log 227 and reverted the same day.
 #
-# The matcher costs 0.20 s at a 90 m window measured 21 Oct, so 1.0 s is not
-# a CPU question either way.
-check("MapFixWorker's default is 1.0", W["fix_period_s"].default == 1.0)
+# What log 227 measured, against log 226 of the day before at the same height:
+#
+#     at 82-83 m     XKF4.SP max     fix_period
+#       log 226          0.13            2.0 s
+#       log 227          1.17            1.0 s     against a 1.2 gate
+#
+# Nine times worse, and the mechanism is plain: map_fuse.update moves the
+# POSITION by up to max_correction_m and does not touch the velocity, which
+# is built only from flow. At 1 Hz the EKF is told the aircraft jumped
+# without moving, twice as often, and its position and velocity states
+# disagree. 5 Oct's 1.18 m/s of push is the same fault seen from outside.
+#
+# So an archived value from the old airframe does not override a measurement
+# on this one, however much later the archive is.
+check("MapFixWorker's default is 2.0", W["fix_period_s"].default == 2.0)
 check("the CLI agrees",
-      'ap.add_argument("--fix-period", type=float, default=1.0,' in live)
-check("and so does VpsNode", "fix_period_s: float = 1.0" in live,
+      'ap.add_argument("--fix-period", type=float, default=2.0,' in live)
+check("and so does VpsNode", "fix_period_s: float = 2.0" in live,
       "three defaults for one number is how 0.5 survived")
-check("but it is not back at the 0.4 s that WAS ruled out",
-      W["fix_period_s"].default >= 1.0,
-      '5 Oct measured 1.18 m/s of push on a stationary aircraft at 0.4 s')
+
 # And the other half of the same lever, which must NOT move with it.
 
 # ------------------------------------------------- the fuser
