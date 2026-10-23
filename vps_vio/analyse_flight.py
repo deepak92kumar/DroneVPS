@@ -24,12 +24,29 @@ height per image, which is all the matcher needs as a prior.
 
 WHAT "ERROR" MEANS IN EACH SHAPE. record_flight's index.csv records the
 aircraft's own GPS, so the error is against that and nothing else. live_node's
-CSV has two positions per row: lat/lon is the VPS ESTIMATE (what the node
-believed, which on an injecting flight is partly what the aircraft then flew
-on) and gps_north_m/gps_east_m is the real receiver, in metres from the node's
-origin. The receiver is the truth; the estimate is scored beside it so a match
-can be compared against what the node thought at the same instant. Rows with
-no receiver fix carry no truth, and are counted rather than quietly dropped.
+CSV has THREE positions per row, and picking the wrong one is how 23 Oct's
+conclusions were drawn and then withdrawn:
+
+  lat / lon                   the VPS ESTIMATE - what the node believed
+  gps1_north_m / gps1_east_m  GPS_RAW_INT, the receiver BEFORE the EKF.
+                              The only independent truth in the file.
+  gps_north_m / gps_east_m    GLOBAL_POSITION_INT, the EKF's FUSED position.
+                              On a flight that injects, this is driven by what
+                              WE send, so scoring against it compares the VPS
+                              with itself. The two agree to 0.10 m while src
+                              is GPS1 and differ by 5.59 m p50 while src is
+                              VPS - which is exactly the part anyone cares
+                              about.
+
+So gps1_* is used when the row has it and gps_* is the fallback for
+recordings made before those columns existed, which is what match_flight.py
+already did; this module was simply never updated to match. Every run says
+which it used rather than implying it. Rows with no fix carry no truth, and
+are counted rather than quietly dropped.
+
+The honest limit, unchanged: the receiver itself wandered 2.4 to 27.4 m on the
+ground (10 Oct), and the surveyed point asked for on three separate days has
+still not been taken. Independent is not the same as correct.
 """
 from __future__ import annotations
 import argparse, csv, glob, io, os, sys, time
@@ -115,12 +132,21 @@ def read_flight(folder: str):
                      "to score against")
 
     frames, no_truth = [], 0
+    n_raw = n_fused = 0
     for r in rows:
         name = r.get("frame_file") or ""
         if not name:
             continue                      # most rows: the rate gate saved none
         alt = _f(r, "alt_m")
-        gn, ge = _f(r, "gps_north_m"), _f(r, "gps_east_m")
+        # The RAW receiver first. See the module docstring: the fused pair
+        # measures the VPS against itself on any flight that injects.
+        gn, ge = _f(r, "gps1_north_m"), _f(r, "gps1_east_m")
+        if None not in (gn, ge):
+            n_raw += 1
+        else:
+            gn, ge = _f(r, "gps_north_m"), _f(r, "gps_east_m")
+            if None not in (gn, ge):
+                n_fused += 1
         truth = None
         if origin is not None and None not in (gn, ge):
             truth = (origin[0] + ge / origin[2], origin[1] + gn / M_PER_DEG_LAT)
@@ -135,6 +161,19 @@ def read_flight(folder: str):
     if no_truth:
         notes.append(f"{no_truth} of {len(frames)} frames have no receiver fix "
                      f"on their row - matched but not scored")
+    # SAY WHAT THIS WAS SCORED AGAINST. A reader cannot tell otherwise, and on
+    # 23 Oct that is precisely what went wrong.
+    if n_raw:
+        notes.append(f"truth: GPS_RAW_INT, the raw receiver ({n_raw} frames"
+                     + (f"; {n_fused} fell back to the EKF's fused position)"
+                        if n_fused else ")"))
+    elif n_fused:
+        notes.append(f"truth: GLOBAL_POSITION_INT, the EKF's FUSED position "
+                     f"({n_fused} frames) - independent ONLY where src was "
+                     f"GPS1, because on the VPS it is driven by our own "
+                     f"injection")
+    else:
+        notes.append("truth: none - no position to compare against")
     return "live_node", frames, notes
 
 

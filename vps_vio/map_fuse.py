@@ -106,34 +106,33 @@ class MapFuser:
                  # so what is declared here is knowingly optimistic. That is
                  # recorded rather than hidden.
                  flow_noise_rate_m_per_sqrt_s: float = 0.25,
-                 # 8, lowered from 20 on 23 Oct, and the reason the number
-                 # moved is that the question changed. The 9 Oct report set
-                 # 20 from the map's own median error ("the map's median error
-                 # is 20.0 m against our own 6.6 m"), which is the right way
-                 # to pick it if the flow is the better source. Above 60 m it
-                 # is not: log 232 says the flow's tracking weakens with
-                 # height while the map holds, and the pilot asked for the map
-                 # to carry more weight up there.
+                 # 23 OCT, EVENING: BACK TO 20, AND THE MORNING'S 8 WAS MEASURED AGAINST
+                 # THE WRONG TRUTH.
                  #
-                 # Swept on log 232's 818 frames above 60 m, at a 1 s fix
-                 # period, scoring against the map fixes' own lat/lon:
+                 # The sweep that produced 8 scored the position against the MAP FIXES'
+                 # own lat/lon. The pilot said that was marking our own homework and was
+                 # right. The only independent truth is GPS_RAW_INT, the receiver before
+                 # the EKF touches it, which the recorder carries as gps1_north_m /
+                 # gps1_east_m. The column used instead - gps_north_m - is
+                 # GLOBAL_POSITION_INT, the EKF's own fused position, and while the
+                 # aircraft is on the VPS that is driven by what WE inject. The two agree
+                 # to 0.10 m on GPS1 and differ by 5.59 m p50 on the VPS, which is exactly
+                 # the window the conclusion was drawn from.
                  #
-                 #       fix_sigma    fixes    err p50    err p90
-                 #          20 (old)    113     13.38      20.34
-                 #          12          113     12.90      20.69
-                 #           8          120     11.91      19.58
-                 #           5          113     13.16      20.72
+                 # Scored against gps1, VPS rows only (the error north_m - gps1_north_m is
+                 # origin-invariant, so a handover re-taking the origin does not disturb
+                 # it and nothing needs masking):
                  #
-                 # 8 is a minimum, not an edge: 5 is worse again, so this is
-                 # not "trust the map as much as possible". It is also NOT a
-                 # claim that a fix is good to 8 m - it is how hard the filter
-                 # pulls. What we DECLARE to the flight controller is a
-                 # separate number, live_node.ORIGIN_UNKNOWN_SIGMA_M, which
-                 # stays at the map's measured 20 m. Those two were the same
-                 # constant until 23 Oct, and lowering this would otherwise
-                 # have told the aircraft its absolute position was worth 8 m
-                 # when the origin alone has been 147-157 m out.
-                 fix_sigma_m: float = 8.0,
+                 #                       2 s / sigma 20      1 s / sigma 8
+                 #     all VPS rows         1.35 m              5.33 m
+                 #     above 100 m          2.76 m             11.16 m
+                 #     declared vs real     0.92x               3.72x
+                 #
+                 # 683 and 684 rows above 100 m, so the samples are comparable. Tuning
+                 # the filter to agree with the map moved it four times further from the
+                 # receiver. More fixes, pulled harder, towards a map whose own error is
+                 # 6-20 m: that is what the numbers above are.
+                 fix_sigma_m: float = 20.0,
                  gate_sigmas: float = 3.0,
                  max_sigma_m: float = 400.0,
                  init_sigma_m: float = 2.0,
@@ -181,14 +180,20 @@ class MapFuser:
         """Defaults are swept on the 27 Sep flight, not assumed.
 
         fix_sigma_m is a WEIGHT, not a statement of how good a fix is. It
-        says how hard the filter pulls towards the map against the flow. It
-        sat at 20 - the map's own median error - while the flow was the
-        better source over a few hundred metres, and the growing variance was
-        left to hand authority to the map on a long mission by itself. Log
-        232 showed that is too slow above 60 m, where the flow weakens with
-        height, so it is 8 there and in general; the sweep is in the comment
-        above. The number the flight controller is told remains the map's
-        measured 20 m, in live_node.ORIGIN_UNKNOWN_SIGMA_M."""
+        says how hard the filter pulls towards the map against the flow, and
+        it is the map's own median error - 20 m - because over a few hundred
+        metres the flow is the better of the two sources and the growing
+        variance hands authority to the map on a long mission by itself.
+
+        It was lowered to 8 on the morning of 23 Oct and put back the same
+        evening. Both the lowering and the reversal were measured; the
+        difference was WHAT THEY WERE MEASURED AGAINST, and the comment above
+        has the numbers. Anything that proposes moving this again should say
+        which truth it used first.
+
+        What the flight controller is told about absolute position is a
+        separate number - live_node.ORIGIN_UNKNOWN_SIGMA_M - and that split
+        is kept. It was never the problem; one constant doing two jobs was."""
         # The most one map fix may move the estimate, metres. At the pilot's
         # instruction, 20 Oct. The Kalman gain already shrinks a correction,
         # but it shrinks it in PROPORTION - a fix 40 m out still moves the

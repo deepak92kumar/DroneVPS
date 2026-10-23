@@ -194,7 +194,7 @@ class FakeNode:
             float(self.fuser.sigma_m))))
 
 
-f = MapFuser(flow_drift_frac=0.07, fix_sigma_m=8.0)
+f = MapFuser(flow_drift_frac=0.07, fix_sigma_m=20.0)
 n = FakeNode(f)
 check("with no origin accuracy it never claims better than the map",
       n.absolute_sigma_m >= 20.0,
@@ -216,14 +216,14 @@ check("a receiver origin is worth much better than that",
 for d, expect in ((383, "the longest flight so far"),
                   (3000, "the short end of the mission"),
                   (8000, "where the drift reaches the map's own error")):
-    g = MapFuser(flow_drift_frac=0.07, fix_sigma_m=8.0)
+    g = MapFuser(flow_drift_frac=0.07, fix_sigma_m=20.0)
     nn = FakeNode(g)
     nn.origin_sigma_m = 2.46
     for _ in range(d):
         g.predict(1.0, 0.0)
     print(f"    after {d:5d} m ({expect}): drift {g.sigma_m:5.2f} m, "
           f"declared {nn.absolute_sigma_m:5.2f} m")
-g = MapFuser(flow_drift_frac=0.07, fix_sigma_m=8.0)
+g = MapFuser(flow_drift_frac=0.07, fix_sigma_m=20.0)
 n2 = FakeNode(g)
 n2.origin_sigma_m = 2.46
 for _ in range(383):
@@ -239,12 +239,13 @@ check("it is never below the origin's own error",
 # ------------------------------------------------- the number that was wrong
 
 print("\nthe fuser the flying code builds")
-check("fix_sigma_m is 8, matching MapFuser's default and the log 232 sweep",
-      "MapFuser(flow_drift_frac=0.07, fix_sigma_m=8.0)" in src
-      and inspect.signature(MapFuser).parameters["fix_sigma_m"].default == 8.0,
+check("fix_sigma_m is 20, and live_node agrees with MapFuser's default",
+      "MapFuser(flow_drift_frac=0.07, fix_sigma_m=20.0)" in src
+      and inspect.signature(MapFuser).parameters["fix_sigma_m"].default == 20.0,
       "this check exists because live_node once said 12 while the default, "
-      "the docstring and the tests all said 20 - the value may move, the "
-      "disagreement may not")
+      "the docstring and the tests all said 20. The VALUE may move - it went "
+      "to 8 and back on 23 Oct - but the DISAGREEMENT may not, which is why "
+      "both halves are asserted here")
 check("and what the FC is told is still the map's measured 20 m",
       ORIGIN_UNKNOWN_SIGMA_M == 20.0,
       f"{ORIGIN_UNKNOWN_SIGMA_M} m - a weight that helps the filter is not "

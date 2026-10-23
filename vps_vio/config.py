@@ -136,35 +136,28 @@ class VpsConfig:
                                    # held at 77 m more map is only more chance
                                    # to match wrong. The window was never the
                                    # mistake on its own; the RATIO was.
-    fix_period_s: float = 1.0      # 5 Oct: 0.4 -> 2.0 s. At 0.4 s the map pushed
+    fix_period_s: float = 2.0      # 5 Oct: 0.4 -> 2.0 s. At 0.4 s the map pushed
                                    # a STATIONARY aircraft at 1.18 m/s above 80 m
                                    # while the drift it exists to catch is
                                    # 0.15-0.37 m/s. At 2 s it pushes 0.26, and the
                                    # worker drops from 75% of a core to 17%.
                                    #
-                                   # 23 OCT: BACK TO 1.0. The 22 Oct revert
-                                   # blamed 1.0 for XKF4.SP going nine times
-                                   # worse, but that flight was also sending the
-                                   # FC 25.47 m/s, and nothing in it separated
-                                   # the two. Velocity is capped now.
-                                   #
-                                   # Replayed on log 232's saved frames, with
-                                   # every fix regenerated from the position the
-                                   # node actually had at that moment:
-                                   #   2.0 s   36 fixes   p50 21.47 m
-                                   #   1.0 s  113 fixes   p50 13.38 m
-                                   # The count TRIPLES rather than doubles,
-                                   # because the matcher opens its window on our
-                                   # own position: a better position finds more
-                                   # fixes, which makes the position better, and
-                                   # that loop runs both ways. The 0.4 s finding
-                                   # above still stands - this is 1.0, not 0.4.
+                                   # 23 Oct morning: 1.0. 23 Oct evening: back to
+                                   # 2.0. The 1.0 sweep scored the position
+                                   # against the MAP's own fixes - circular, as
+                                   # the pilot said. Against the raw receiver
+                                   # (gps1_*, GPS_RAW_INT), VPS rows only:
+                                   #   2.0 s   all VPS 1.35 m   >100 m  2.76 m
+                                   #   1.0 s   all VPS 5.33 m   >100 m 11.16 m
+                                   # on 683 and 684 rows above 100 m. Pulling
+                                   # harder towards a map whose own error is
+                                   # 6-20 m moved us further from the truth.
                                    #
                                    # NOT WIRED. Nothing reads this field; the
-                                   # flying default is VpsNode's own, and the
-                                   # CLI's. All three say 1.0 and a test holds
-                                   # them together - three defaults for one
-                                   # number is how 0.5 survived once already.
+                                   # flying defaults are VpsNode's and the CLI's,
+                                   # and all three say 2.0 with a test holding
+                                   # them together. Three defaults for one number
+                                   # is how 0.5 survived once already.
 
     # --- recorder ---
     image_hz: float = 2.0          # 5 Oct: JPEGs gated separately from CSV rows

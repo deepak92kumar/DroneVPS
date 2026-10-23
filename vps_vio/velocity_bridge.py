@@ -147,12 +147,35 @@ class VelocityBridge:
     accel_e below were added for that reason and nothing else.
     """
 
-    # tau_s 0.35 -> 0.15 on 23 Oct. Replayed on log 232's own flow and accel:
-    # err p50 0.39 -> 0.36, p90 1.46 -> 1.33. A SHORTER time constant leans
-    # harder on the accelerometer between flow samples, which is the opposite
-    # of what 21 Oct concluded from an unequal comparison - that one smoothed
-    # the flow over 30 samples and read the output raw. See
-    # memory/dronevps-measure-fairly.md.
+    # tau_s 0.35 -> 0.15 on 23 Oct. KEPT after re-measurement, but the first
+    # claim for it was wrong and the margin is small.
+    #
+    # The morning's version of this comment said "faster is better at BOTH
+    # heights and MORE so at height". That was scored against gps_north_m,
+    # which is GLOBAL_POSITION_INT - the EKF's own fused position, driven by
+    # our injection while on the VPS. Re-scored against GPS_RAW_INT, and
+    # excluding rows within 2.5 s of an origin change (a handover re-takes the
+    # origin, which steps both north/east series, and differencing across that
+    # step reads as 30-60 m/s - a hexacopter does not do 33 m/s, and that
+    # artifact sat in the p99 column looking like a finding):
+    #
+    #     tau_s    below 60 m  p50 / p90      above 60 m  p50 / p90
+    #      0.35       0.106 / 0.862             0.109 / 3.361
+    #      0.25       0.104 / 0.796             0.111 / 3.188
+    #      0.15       0.104 / 0.756             0.122 / 3.062
+    #      0.08       0.103 / 0.741             0.133 / 2.934
+    #
+    # So p90 improves at both heights and p50 gets slightly WORSE above 60 m.
+    # 0.15 is kept for the p90, not because the morning's reasoning held.
+    #
+    # WHAT THIS CANNOT FIX, and the reason not to keep turning this dial:
+    # above 60 m the velocity error is p90 3.06 m/s against 0.76 below, and
+    # every tau from 0.35 to 0.08 lands within 14% of that. The noise is the
+    # flow's and it scales with height because metres per pixel does. On the
+    # 23 Oct flight ekf_vel_var correlated +0.63 with the SPEED WE SENT and
+    # breached its 1.2 gate on 15.7% of rows where velocity was sent against
+    # 6.4% where the deadband suppressed it. Smoothing is not the lever.
+    # See memory/dronevps-measure-fairly.md.
     def __init__(self, *, tau_s: float = 0.15, flow_timeout_s: float = 0.6,
                  deadband_base_mps: float = 0.35,
                  # 0.005 -> 0.010 ON 22 OCT, measured on log 227, which

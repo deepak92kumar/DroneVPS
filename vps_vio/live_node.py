@@ -1163,12 +1163,26 @@ class SourceWatcher:
     sending, and says out loud that it does not know.
     """
 
+    # How old a GPS_PRIMARY reading may be before the pilot is told it is
+    # old. The parameter is re-requested every period_s (0.5 s), so this is
+    # six missed answers. It does NOT change which source we use - see
+    # stale() for why that stays the pilot's decision and not ours.
+    STALE_AFTER_S = 3.0
+
     def __init__(self, link, period_s: float = 0.5):
         self.link = link
         self.period = float(period_s)
         self._next = 0.0
         self.value = None
         self.reads = 0
+        # When the FC last actually ANSWERED about GPS_PRIMARY, not when we
+        # last asked. 23 Oct: the node's reading was right and the switch
+        # script's was wrong, and the aircraft landed on the VPS with the
+        # transmitter asking for the receiver. Nothing anywhere said the two
+        # disagreed, and nothing said how old either belief was. This is the
+        # node's half of that: it cannot see the script, but it can say out
+        # loud when its own answer has gone quiet.
+        self.last_read_t = None
 
     def poll(self, t: float):
         """Returns GPS_PRIMARY as an int, or None if it has never been read."""
@@ -1182,6 +1196,7 @@ class SourceWatcher:
                 if msg.param_id == "GPS_PRIMARY":
                     self.value = int(msg.param_value)
                     self.reads += 1
+                    self.last_read_t = float(t)
             if t >= self._next:
                 self._next = t + self.period
                 self.link.mav.param_request_read_send(
@@ -1190,6 +1205,31 @@ class SourceWatcher:
         except Exception:
             pass
         return self.value
+
+    def age_s(self, t: float):
+        """Seconds since the FC last answered about GPS_PRIMARY, or None."""
+        if self.last_read_t is None:
+            return None
+        return max(0.0, float(t) - self.last_read_t)
+
+    def stale(self, t: float) -> bool:
+        """Has our reading gone quiet for longer than STALE_AFTER_S?
+
+        This REPORTS. It deliberately does not switch anything off.
+
+        Going silent toward the flight controller while the aircraft is
+        actually on the VPS is what left it with no position at all on
+        20 Oct, so a stale reading must not be allowed to cut the injection -
+        that would turn a lost parameter into a lost aircraft. And the stale
+        value is still the best information there is: the pilot's switch does
+        not move on its own.
+
+        What was missing was not a cut-off, it was a WORD. On 23 Oct two
+        processes held different values for four minutes and the radio said
+        nothing. So this exists to be said, and the pilot decides.
+        """
+        a = self.age_s(t)
+        return a is not None and a > self.STALE_AFTER_S
 
     def on_vps(self) -> bool:
         """True when the VPS may inject. Unknown counts as yes - see above."""
@@ -1624,7 +1664,7 @@ class VpsNode:
     STEP_ESCAPE_N = 5
 
     def __init__(self, cache: MapCache, focal_px: float, *,
-                 fix_period_s: float = 1.0, radius_m: float = 150.0,
+                 fix_period_s: float = 2.0, radius_m: float = 150.0,
                  max_corners: int = 300, K=None, D=None, focal_y_px=None,
                  derotate: str = "fc"):
         self.cache = cache
@@ -1667,40 +1707,21 @@ class VpsNode:
         # and correct, NOT because it is a fix for anything.
         self.focal_y = float(focal_px if focal_y_px is None else focal_y_px)
         self.tracker = FlowTracker(max_corners=max_corners, K=K, D=D)
-        # fix_sigma_m 8, measured on log 232. THIS LINE HAS A HISTORY, and
-        # the history matters more than the number.
+        # fix_sigma_m 20. Lowered to 8 on the morning of 23 Oct and put
+        # back the same evening, because the sweep behind the 8 scored the
+        # position against the MAP's own fixes. The only independent truth is
+        # gps1_* (GPS_RAW_INT); gps_* is GLOBAL_POSITION_INT, which on the
+        # VPS is driven by our own injection. Against gps1, VPS rows only:
         #
-        # It once said 12 while MapFuser's default, its docstring and
-        # tests/test_restored_from_flown_logs.py all said 20: the flying code
-        # was quietly using a value nothing else agreed with, and nobody could
-        # see it. That is what the tests on this constant are for, and why
-        # they were updated with this change rather than deleted.
+        #                      2 s / sigma 20     1 s / sigma 8
+        #     all VPS rows        1.35 m             5.33 m
+        #     above 100 m         2.76 m            11.16 m
         #
-        # It then said 20, from the 9 Oct report - "the map's median error is
-        # 20.0 m against our own 6.6 m". That reasoning was sound while the
-        # FLOW was the better source: set the map's weight to the map's own
-        # error and let the growing variance hand over authority on a long
-        # mission. Log 232 says that handover is far too slow above 60 m,
-        # where the flow weakens with height and the map does not, and the
-        # pilot asked for the map to carry more up there.
-        #
-        # Swept on that flight's 818 frames above 60 m at a 1 s period, every
-        # fix regenerated from the position the node actually had:
-        #     sigma 20  113 fixes  p50 13.38 m  p90 20.34
-        #     sigma 12  113        p50 12.90    p90 20.69
-        #     sigma  8  120        p50 11.91    p90 19.58
-        #     sigma  5  113        p50 13.16    p90 20.72
-        # 8 is a minimum and not an edge - 5 is worse again - so this is not
-        # "trust the map as hard as possible".
-        #
-        # TWO THINGS THIS IS NOT.
-        # It is not scaled with height. That is on the do-not-retry list and
-        # cost two flights.
-        # It is not a claim that a fix is good to 8 m, and it is no longer the
-        # number the flight controller is told. Those were the same constant
-        # until this change: see ORIGIN_UNKNOWN_SIGMA_M above, which stays at
-        # the map's measured 20 m.
-        self.fuser = MapFuser(flow_drift_frac=0.07, fix_sigma_m=8.0)
+        # MapFuser's own comment carries the full table and the reasoning.
+        # This line has twice been the place where a number nobody could see
+        # disagreed with every other copy of it, so it is written out rather
+        # than defaulted, and three tests pin it.
+        self.fuser = MapFuser(flow_drift_frac=0.07, fix_sigma_m=20.0)
         # K's cx/cy go to the worker, so a map fix means the point under the
         # camera rather than the point under the middle of the image. The two
         # are 80 px apart on the leg-cropped frame = 11 m at 110 m, and
@@ -2221,19 +2242,22 @@ def main():
                     help="camera IMU report rate in Hz for all three sensors "
                          "(default from VpsConfig.imu_rate, 100). They share "
                          "one packet, so this sets them together.")
-    ap.add_argument("--fix-period", type=float, default=1.0,
-                    help="seconds between map fixes. 2.0 until 23 Oct. It was "
-                         "tried at 1.0 on 22 Oct and reverted because log 227's "
-                         "XKF4.SP went nine times worse - but that flight was "
-                         "also sending the FC 25.47 m/s, so the test could not "
-                         "separate the two. Velocity is capped now. Replayed on "
-                         "log 232's own saved frames, regenerating every fix "
-                         "from the position the node actually had: 2.0 s gave "
-                         "36 fixes and p50 21.47 m, 1.0 s gave 113 and 13.38 m. "
-                         "More fixes is not only more correction - the matcher "
-                         "opens its window on OUR position, so a better "
-                         "position finds more fixes, which is why the count "
-                         "triples rather than doubles.")
+    ap.add_argument("--fix-period", type=float, default=2.0,
+                    help="seconds between map fixes. Went to 1.0 on the "
+                         "morning of 23 Oct and back to 2.0 the same evening. "
+                         "The 1.0 sweep scored the position against the map's "
+                         "own fixes, which is circular; against the raw "
+                         "receiver (gps1_*) 2.0 s gave 1.35 m p50 over all VPS "
+                         "rows and 2.76 m above 100 m, while 1.0 s gave 5.33 "
+                         "and 11.16 on a comparable sample. More fixes pulled "
+                         "harder towards a map whose own error is 6-20 m moved "
+                         "the aircraft further from the truth, not closer. "
+                         "Log 227's earlier revert was real but confounded - "
+                         "that flight was also sending 25.47 m/s - so this is "
+                         "the first clean measurement either way. What DID "
+                         "survive from the morning is the plumbing: VpsNode "
+                         "now actually passes this to MapFixWorker, which it "
+                         "never did.")
     ap.add_argument("--radius", type=float, default=150.0)
     ap.add_argument("--corners", type=int, default=300)
     ap.add_argument("--origin", help="lon,lat - GPS-denied start")
@@ -2637,6 +2661,21 @@ def main():
                 else "GPS1 ON - VPS data blocked" if watcher.value == 0
                 else "SOURCE UNKNOWN - cannot read GPS_PRIMARY",
                 Notifier.SEV_INFO if watcher.value == 1 else Notifier.SEV_CRIT)
+            # And whether that reading is still LIVE. The source line above
+            # says what we believe; this says whether anyone has confirmed it
+            # lately. 23 Oct: the aircraft landed on the VPS while the
+            # transmitter asked for the receiver, because the switch script's
+            # belief was wrong and nothing compared the two. The node cannot
+            # see the script, so it reports the one thing it does know - how
+            # old its own answer is. Keyed on the boolean, so it speaks once
+            # on the way out and once on the way back, not every frame.
+            _src_stale = watcher.stale(est["t"])
+            _src_age = watcher.age_s(est["t"])
+            notifier.event(
+                "source_age", _src_stale,
+                (f"GPS_PRIMARY STALE {_src_age:.0f}s - source unconfirmed"[:50]
+                 if _src_stale else "GPS_PRIMARY live"),
+                Notifier.SEV_WARN if _src_stale else Notifier.SEV_INFO)
 
             # The lidar's ZERO, announced on the radio while still on the
             # ground. ArduPilot will not declare the aircraft landed unless

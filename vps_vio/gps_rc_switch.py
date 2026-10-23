@@ -159,8 +159,31 @@ class RcGpsSwitch:
         except Exception:
             pass
 
+    def _drain_param_values(self):
+        """Throw away PARAM_VALUEs that are already queued.
+
+        23 OCT, AND THIS IS THE WHOLE BUG. The VPS node re-requests
+        GPS_PRIMARY every 0.5 s, and the router copies the answer to every
+        client, so this process's input queue is never empty of GPS_PRIMARY.
+        A read that takes the FIRST matching message therefore returns
+        whatever was already in flight - a value from BEFORE our own write.
+
+        That is what happened at 10:31:51 on the 23 Oct flight: this script
+        set GPS_PRIMARY=1, read back 0, believed 0, and then skipped the
+        pilot's next command because it matched that false belief. The
+        aircraft flew and landed on the VPS with the transmitter asking for
+        the receiver. See the skip in run() for the other half.
+        """
+        n = 0
+        while True:
+            msg = self.m.recv_match(type="PARAM_VALUE", blocking=False)
+            if msg is None:
+                return n
+            n += 1
+
     def get_param(self, name, timeout=4.0):
         for _ in range(3):
+            self._drain_param_values()
             self.m.mav.param_request_read_send(self.m.target_system,
                                                self.m.target_component,
                                                name.encode(), -1)
@@ -170,6 +193,25 @@ class RcGpsSwitch:
                 if msg and msg.param_id == name:
                     return msg.param_value
         return None
+
+    def set_and_verify(self, idx, tries=3):
+        """Write GPS_PRIMARY and read it back until the FC agrees.
+
+        Returns the value the FC last reported, or None if it never answered.
+        A write that is not read back is not a write - 23 Oct's flight is the
+        proof, and a silent failure here puts the aircraft on the wrong
+        source for the rest of the flight.
+        """
+        for k in range(tries):
+            self.set_primary(idx)
+            time.sleep(0.8)
+            got = self.get_param("GPS_PRIMARY")
+            if got is not None and int(got) == int(idx):
+                return int(got)
+            if k + 1 < tries:
+                print(f"     GPS_PRIMARY read back {got}, wanted {idx} - "
+                      f"retrying ({k + 2}/{tries})", flush=True)
+        return None if got is None else int(got)
 
     def set_primary(self, idx):
         self.m.mav.param_set_send(self.m.target_system, self.m.target_component,
@@ -277,17 +319,32 @@ class RcGpsSwitch:
                 self.want, self.stable = want, 1
             if self.stable != self.stable_n:
                 continue
-            if want == self.applied:
-                # The source is already what the switch is asking for. That is
-                # not nothing to the pilot: 20 Oct they flipped to the VPS, it
-                # was refused, they flipped back to the real receiver - and got
-                # silence, because nothing had changed. From the transmitter
-                # that is indistinguishable from a switch that is not working
-                # at all. Say where we are, once per move, not every frame.
-                if self._said_pos != want:
-                    self._said_pos = want
-                    self.say(f"Source already {'VPS (GPS2)' if want else 'GPS1'}")
-                continue
+            # THE SKIP THAT USED TO BE HERE IS GONE, 23 OCT.
+            #
+            # It read "if want == self.applied: continue" - do not command a
+            # source we believe is already selected. That turned one wrong
+            # READ into a wrong AIRCRAFT. On the 23 Oct flight this script
+            # set GPS_PRIMARY=1, read back 0 from a message that predated its
+            # own write (see _drain_param_values), and recorded applied=0.
+            # The pilot then asked for the receiver; want 0 matched the false
+            # applied 0; nothing was sent; GPS_PRIMARY stayed 1. The VPS node
+            # read 1 correctly and injected for another 238 seconds, and the
+            # aircraft landed on the VPS with the transmitter asking for GPS.
+            #
+            # A cached belief may now decide what we SAY. It may never decide
+            # whether the pilot's command is sent. The write is idempotent and
+            # fires once per stable RC move, so always sending it costs one
+            # parameter set per flip and removes the whole failure mode.
+            already = (want == self.applied)
+            if already and self._said_pos == want:
+                # Same position, already announced, and we are about to
+                # re-assert it anyway. Do not repeat ourselves on the radio.
+                pass
+            elif already:
+                # 20 Oct: the pilot flipped to the VPS, it was refused, they
+                # flipped back and got silence - indistinguishable from a dead
+                # switch. Say where we are, once per move.
+                self.say(f"Source already {'VPS (GPS2)' if want else 'GPS1'}")
             self._said_pos = want
 
             name = "VPS (GPS2)" if want else "real GPS (GPS1)"
@@ -310,16 +367,23 @@ class RcGpsSwitch:
                     self.stable = 0
                     continue
 
-            self.set_primary(want)
-            self.switches += 1
-            # Both directions, in the same words, so the pilot reads one line
-            # and knows which source is live and what the other one is doing.
-            self.say(f"SOURCE -> {name}"
-                     + (", VPS injecting" if want else ", VPS data blocked"))
-            time.sleep(0.8)
-            got = self.get_param("GPS_PRIMARY")
+            if not already:
+                self.switches += 1
+                # Both directions, in the same words, so the pilot reads one
+                # line and knows which source is live and what the other one
+                # is doing.
+                self.say(f"SOURCE -> {name}"
+                         + (", VPS injecting" if want else ", VPS data blocked"))
+            got = self.set_and_verify(want)
             self.applied = want if got is None else int(got)
             print(f"     (GPS_PRIMARY is now {got})", flush=True)
+            if got is None:
+                # The write went out and the FC never confirmed. The pilot has
+                # to know, because the aircraft may be on the other source.
+                self.say("SOURCE UNCONFIRMED - check GPS_PRIMARY"[:50])
+            elif int(got) != want:
+                # Worse: it answered, and it disagrees after three tries.
+                self.say(f"SOURCE FAILED - still {'VPS' if got else 'GPS1'}"[:50])
 
 
 def main():
