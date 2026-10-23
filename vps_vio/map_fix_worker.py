@@ -131,7 +131,7 @@ class MapFixWorker:
     def __init__(self, cache, *, focal_px: float, matcher: str = "xfeat",
                  radius_m: float = 150.0, window_alt_frac: float = 0.60,
                  query_shape: str = "full",
-                 min_alt_m: float = 60.0, fix_period_s: float = 2.0,
+                 min_alt_m: float = 60.0, fix_period_s: float = 1.0,
                  min_score: float | None = None,
                  min_margin: float | None = None,
                  principal_xy=None):

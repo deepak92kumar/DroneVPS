@@ -1559,6 +1559,23 @@ def _vps_config():
         return _Empty()
 
 
+# WHAT TO DECLARE WHEN THE ORIGIN'S ACCURACY IS UNKNOWN.
+#
+# Until 23 Oct this was taken from MapFuser's fix_sigma_m, and that was one
+# number doing two unrelated jobs. fix_sigma_m is how much the FUSER should
+# trust a map fix against the flow, and log 232 says 8 m - the fixes really
+# are that good. This is the floor on what we tell the flight controller our
+# ABSOLUTE position is worth when nothing has measured the origin, and 8 m
+# there would be a claim nothing supports: a hand-typed SCR_USER1/2 was
+# 147-157 m out on three flights.
+#
+# They moved together by accident. Lowering the first would have lowered the
+# second, and the flight controller would have been told 8 m while the origin
+# could be a hundred. Log 00000194, which flew, declared 21.36 m p50 - the
+# same order as this floor.
+ORIGIN_UNKNOWN_SIGMA_M = 20.0
+
+
 class VpsNode:
     # How much faster the estimate doubts itself while dead reckoning. 3x is a
     # starting value, not a measured one: it wants a sweep against a recording
@@ -1607,7 +1624,7 @@ class VpsNode:
     STEP_ESCAPE_N = 5
 
     def __init__(self, cache: MapCache, focal_px: float, *,
-                 fix_period_s: float = 2.0, radius_m: float = 150.0,
+                 fix_period_s: float = 1.0, radius_m: float = 150.0,
                  max_corners: int = 300, K=None, D=None, focal_y_px=None,
                  derotate: str = "fc"):
         self.cache = cache
@@ -1650,18 +1667,40 @@ class VpsNode:
         # and correct, NOT because it is a fix for anything.
         self.focal_y = float(focal_px if focal_y_px is None else focal_y_px)
         self.tracker = FlowTracker(max_corners=max_corners, K=K, D=D)
-        # fix_sigma_m 20, not 12. This line said 12 while MapFuser's own default,
-        # its docstring and tests/test_restored_from_flown_logs.py all said 20 -
-        # so the flying code was quietly using a number the evidence does not
-        # support. The 9 Oct report settled it with the fix's own lat/lon logged
-        # for the first time: "the map's median error is 20.0 m against our own
-        # 6.6 m ... the code's fix_sigma_m = 20 was already right."
+        # fix_sigma_m 8, measured on log 232. THIS LINE HAS A HISTORY, and
+        # the history matters more than the number.
         #
-        # It made no difference to the 20 Oct flights because they took no fixes
-        # at all (replayed: sigma p50 11.15 m at 12, 11.00 m at 20), but it
-        # decides how far each fix moves the aircraft the moment fixes return,
-        # and 12 trusts the map almost three times as much as it has earned.
-        self.fuser = MapFuser(flow_drift_frac=0.07, fix_sigma_m=20.0)
+        # It once said 12 while MapFuser's default, its docstring and
+        # tests/test_restored_from_flown_logs.py all said 20: the flying code
+        # was quietly using a value nothing else agreed with, and nobody could
+        # see it. That is what the tests on this constant are for, and why
+        # they were updated with this change rather than deleted.
+        #
+        # It then said 20, from the 9 Oct report - "the map's median error is
+        # 20.0 m against our own 6.6 m". That reasoning was sound while the
+        # FLOW was the better source: set the map's weight to the map's own
+        # error and let the growing variance hand over authority on a long
+        # mission. Log 232 says that handover is far too slow above 60 m,
+        # where the flow weakens with height and the map does not, and the
+        # pilot asked for the map to carry more up there.
+        #
+        # Swept on that flight's 818 frames above 60 m at a 1 s period, every
+        # fix regenerated from the position the node actually had:
+        #     sigma 20  113 fixes  p50 13.38 m  p90 20.34
+        #     sigma 12  113        p50 12.90    p90 20.69
+        #     sigma  8  120        p50 11.91    p90 19.58
+        #     sigma  5  113        p50 13.16    p90 20.72
+        # 8 is a minimum and not an edge - 5 is worse again - so this is not
+        # "trust the map as hard as possible".
+        #
+        # TWO THINGS THIS IS NOT.
+        # It is not scaled with height. That is on the do-not-retry list and
+        # cost two flights.
+        # It is not a claim that a fix is good to 8 m, and it is no longer the
+        # number the flight controller is told. Those were the same constant
+        # until this change: see ORIGIN_UNKNOWN_SIGMA_M above, which stays at
+        # the map's measured 20 m.
+        self.fuser = MapFuser(flow_drift_frac=0.07, fix_sigma_m=8.0)
         # K's cx/cy go to the worker, so a map fix means the point under the
         # camera rather than the point under the middle of the image. The two
         # are 80 px apart on the leg-cropped frame = 11 m at 110 m, and
@@ -1678,6 +1717,7 @@ class VpsNode:
             cache, focal_px=focal_px, radius_m=radius_m,
             window_alt_frac=getattr(_cfg, "map_window_alt_frac", 0.90),
             query_shape=getattr(_cfg, "map_query_shape", "full"),
+            fix_period_s=float(fix_period_s),
             principal_xy=(None if K is None
                           else (float(np.asarray(K).reshape(3, 3)[0, 2]),
                                 float(np.asarray(K).reshape(3, 3)[1, 2]))))
@@ -1797,7 +1837,7 @@ class VpsNode:
         drift = float(self.fuser.sigma_m)
         origin = self.origin_sigma_m
         if origin is None:
-            origin = float(np.sqrt(self.fuser.fix_var))
+            origin = ORIGIN_UNKNOWN_SIGMA_M
         return float(np.hypot(origin, drift))
 
     def gate_step(self, dn: float, de: float, dt: float | None,
@@ -2181,19 +2221,19 @@ def main():
                     help="camera IMU report rate in Hz for all three sensors "
                          "(default from VpsConfig.imu_rate, 100). They share "
                          "one packet, so this sets them together.")
-    ap.add_argument("--fix-period", type=float, default=2.0,
-                    help="seconds between map fixes. 1.0 was tried on 22 Oct "
-                         "because the pilot's archived 11 Oct reports record "
-                         "'0.500 m per fix at 1 fix/s' - later evidence than "
-                         "the 5 Oct value of 2.0. Flown as log 227 and "
-                         "reverted the same day: at 82-83 m, XKF4.SP max went "
-                         "0.13 (log 226, 2.0 s) to 1.17 (log 227, 1.0 s), "
-                         "nine times worse against a 1.2 gate. A map fix "
-                         "moves the POSITION by up to max_correction_m and "
-                         "the velocity not at all, so at 1 Hz the EKF is told "
-                         "the aircraft jumped without moving. 5 Oct's caution "
-                         "- 1.18 m/s of push on a stationary aircraft - was "
-                         "the same fault seen from the outside.")
+    ap.add_argument("--fix-period", type=float, default=1.0,
+                    help="seconds between map fixes. 2.0 until 23 Oct. It was "
+                         "tried at 1.0 on 22 Oct and reverted because log 227's "
+                         "XKF4.SP went nine times worse - but that flight was "
+                         "also sending the FC 25.47 m/s, so the test could not "
+                         "separate the two. Velocity is capped now. Replayed on "
+                         "log 232's own saved frames, regenerating every fix "
+                         "from the position the node actually had: 2.0 s gave "
+                         "36 fixes and p50 21.47 m, 1.0 s gave 113 and 13.38 m. "
+                         "More fixes is not only more correction - the matcher "
+                         "opens its window on OUR position, so a better "
+                         "position finds more fixes, which is why the count "
+                         "triples rather than doubles.")
     ap.add_argument("--radius", type=float, default=150.0)
     ap.add_argument("--corners", type=int, default=300)
     ap.add_argument("--origin", help="lon,lat - GPS-denied start")

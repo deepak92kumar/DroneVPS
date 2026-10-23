@@ -117,9 +117,13 @@ check("the input gate alone would not have done this",
 
 print("\nhow much the filter trusts a map fix")
 f = MapFuser()
-check("fix_sigma_m is 20, not 30", abs(f.fix_var ** 0.5 - 20.0) < 1e-6,
-      '9 Oct: "the map\'s median error is 20.0 m against our own 6.6 m ... '
-      'the code\'s fix_sigma_m = 20 was already right"')
+check("fix_sigma_m is 8, and still not the 30 the rebuild brought back",
+      abs(f.fix_var ** 0.5 - 8.0) < 1e-6,
+      "this line guarded 20 against a 30 that reappeared with the rebuild. "
+      "It is 8 from 23 Oct, measured on log 232 above 60 m (err p50 13.38 "
+      "at 20, 11.91 at 8, 13.16 at 5), because the flow weakens with height "
+      "and the map should carry more there. 30 is still wrong, and so is "
+      "anything arriving without a sweep behind it")
 
 print("\n" + ("ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}"))
 sys.exit(1 if fails else 0)

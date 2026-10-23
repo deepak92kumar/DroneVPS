@@ -95,10 +95,23 @@ sigma_90 = 0.0867 * 90.0
 out90, flow90 = fly(flow_noise=sigma_90)
 print(f"        sigma at 90 m = {sigma_90:.2f} m/s")
 print(f"        flow rms {flow90:.3f}  ->  output rms {out90:.3f}   ({out90 / flow90:.2f}x)")
-# Not an assertion about what is acceptable - a record of what is coming.
-# FS_EKF_THRESH is 1.2 and SV already reached 3.60 at 31 m.
-check("the reduction holds at height too", out90 < 0.67 * flow90,
-      f"{out90 / flow90:.2f}x")
+# 23 Oct: this demanded the same one-third reduction at 90 m as at 31 m, and
+# tau_s 0.15 gives 0.72x. It is now a floor of "reduces at all", because the
+# flight data says the model behind the stricter threshold has the trade
+# backwards. Replayed on log 232's own flow and accel, scored against the
+# receiver with identical smoothing on both sides:
+#
+#     tau_s      below 45 m          above 45 m
+#              p50     p90         p50     p90
+#     0.35    0.270   0.830       0.775   2.939
+#     0.15    0.253   0.736       0.671   2.735
+#     0.08    0.251   0.712       0.661   2.669
+#
+# Faster is better at BOTH heights and MORE so at height. Smoothing harder
+# removes noise and adds lag; against real truth the lag costs more than the
+# noise it buys. The direction is still pinned below - reduce, never amplify.
+check("the blend still reduces at height", out90 < flow90,
+      f"{out90 / flow90:.2f}x - one third is no longer demanded, see above")
 
 print("\n3. the property the 8 Oct module broke: no attenuation")
 for speed in (1.0, 3.0, 6.0):

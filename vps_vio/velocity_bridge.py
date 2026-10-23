@@ -147,7 +147,13 @@ class VelocityBridge:
     accel_e below were added for that reason and nothing else.
     """
 
-    def __init__(self, *, tau_s: float = 0.35, flow_timeout_s: float = 0.6,
+    # tau_s 0.35 -> 0.15 on 23 Oct. Replayed on log 232's own flow and accel:
+    # err p50 0.39 -> 0.36, p90 1.46 -> 1.33. A SHORTER time constant leans
+    # harder on the accelerometer between flow samples, which is the opposite
+    # of what 21 Oct concluded from an unequal comparison - that one smoothed
+    # the flow over 30 samples and read the output raw. See
+    # memory/dronevps-measure-fairly.md.
+    def __init__(self, *, tau_s: float = 0.15, flow_timeout_s: float = 0.6,
                  deadband_base_mps: float = 0.35,
                  # 0.005 -> 0.010 ON 22 OCT, measured on log 227, which
                  # would not hold in any of four VPS windows.
@@ -188,6 +194,15 @@ class VelocityBridge:
                  deadband_per_m: float = 0.010,
                  max_accel_mps2: float = 8.0,
                  slew_mps2: float = 5.0,
+                 # 6.0, and 23 Oct looked at lowering it and did not.
+                 # Replayed on log 232's own inputs the cap makes no difference
+                 # to the error at all - 6.0 / 3.0 / 2.0 give p50 0.39 / 0.39 /
+                 # 0.38 - so it is not the lever it looks like. And
+                 # tests/test_sent_speed_cap.py refuses anything under the
+                 # 5.04 m/s the aircraft was measured doing on the VPS in log
+                 # 230, which is the right rule: a cap below real motion is a
+                 # lie to the EKF rather than a brake on the runaway. What
+                 # actually moved the error was tau_s.
                  max_sent_mps: float = 6.0,
                  slew_hold_s: float = 2.0,
                  jump_escape_n: int = 5,

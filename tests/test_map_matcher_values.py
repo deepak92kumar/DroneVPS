@@ -14,6 +14,7 @@ import sys
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(HERE, "vps_vio"))
 
+from live_node import ORIGIN_UNKNOWN_SIGMA_M  # noqa: E402
 from map_fuse import MapFuser  # noqa: E402
 from map_fix_worker import MapFixWorker, _GATES  # noqa: E402
 import map_match_xfeat as MX  # noqa: E402
@@ -174,11 +175,30 @@ print("\nthe fix period - 2.0, and 1.0 was flown and reverted on 22 Oct")
 #
 # So an archived value from the old airframe does not override a measurement
 # on this one, however much later the archive is.
-check("MapFixWorker's default is 2.0", W["fix_period_s"].default == 2.0)
+# 23 OCTOBER: back to 1.0, and the paragraph above is why this needed more
+# than an archived value to overturn it. The log 227 evidence was real but
+# CONFOUNDED - that same flight was sending the flight controller 25.47 m/s,
+# so SP going nine times worse could not be attributed to the fix rate.
+#
+# What settles it is log 232 replayed on its own saved frames, with every fix
+# REGENERATED from the position the node actually held at that moment rather
+# than replayed from the recording:
+#
+#     2.0 s    36 fixes   p50 21.47 m   p90 29.20
+#     1.0 s   113 fixes   p50 13.38 m   p90 20.34
+#
+# The count triples rather than doubles, and that is the part worth keeping:
+# the matcher opens its search window on OUR position, so a better position
+# finds more fixes, which makes the position better. The loop runs both ways,
+# and at 2 s it was running the wrong way.
+check("MapFixWorker's default is 1.0", W["fix_period_s"].default == 1.0)
 check("the CLI agrees",
-      'ap.add_argument("--fix-period", type=float, default=2.0,' in live)
-check("and so does VpsNode", "fix_period_s: float = 2.0" in live,
+      'ap.add_argument("--fix-period", type=float, default=1.0,' in live)
+check("and so does VpsNode", "fix_period_s: float = 1.0" in live,
       "three defaults for one number is how 0.5 survived")
+check("and VpsNode actually passes it to the worker",
+      "fix_period_s=float(fix_period_s)" in live,
+      "it never did - the worker's own default won, like window_alt_frac")
 
 # And the other half of the same lever, which must NOT move with it.
 
@@ -186,8 +206,15 @@ check("and so does VpsNode", "fix_period_s: float = 2.0" in live,
 
 print("\nwhat the fuser does with a fix that passes")
 f = MapFuser()
-check("fix_sigma_m 20", abs(f.fix_var ** 0.5 - 20.0) < 1e-6,
-      '9 Oct: "the map\'s median error is 20.0 m against our own 6.6 m"')
+check("fix_sigma_m 8", abs(f.fix_var ** 0.5 - 8.0) < 1e-6,
+      "was 20 - the map's own median error, 9 Oct - which is right while the "
+      "flow is the better source. Above 60 m it is not: swept on log 232's "
+      "818 frames above 60 m at 1 Hz, err p50 13.38 / 12.90 / 11.91 / 13.16 "
+      "for 20 / 12 / 8 / 5, so 8 is a minimum and not an edge")
+check("and it did not drag the declared accuracy down with it",
+      ORIGIN_UNKNOWN_SIGMA_M == 20.0,
+      "one constant used to do both jobs: this is a weight on the filter, "
+      "not a claim that we know where the aircraft is to 8 m")
 check("max_correction_m 0.5", abs(f.max_correction_m - 0.5) < 1e-9,
       '3 Oct: raised to 1.5-3.0 once and "the hold fell from 11-14 s to '
       '4.5-9.0 s while map_move_m sat at exactly 1.50". Reverted the same '
