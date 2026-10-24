@@ -1099,6 +1099,17 @@ CSV_COLUMNS = ["t", "north_m", "east_m", "lon", "lat", "sigma_m",
     # clipped one at the ceiling, so n_step_rej counts the bites but nothing
     # records what was bitten. 22 Oct.
     "step_px", "step_action",
+    # THE PER-FRAME DISPLACEMENT ITSELF, post-gate, and the interval it was
+    # measured over. 24 Oct. flow_vel_frames is a baseline in FRAMES and the
+    # question flight 239 asked - what baseline kills the 2.4 m/s phantom at
+    # 85-110 m without hiding real motion the way log 229's did - can only be
+    # answered by recomputing the velocity at other N from the same steps.
+    # That was attempted offline from this flight's log and could not be done:
+    # differencing the fused north_m/east_m reproduces the node's own
+    # vel_flow at corr 0.374, because the fuser is not a raw integrator, and
+    # the saved frames land every 3-8 frames so there is no consecutive pair
+    # to re-track. With these three a sweep is arithmetic on one CSV.
+    "step_dn", "step_de", "step_dt_s",
     # Derotation: what the FC said the tilt did, and what the
     # camera's own gyro integrated over the same interval.
     # Logged side by side because the gyro's axis mapping and
@@ -1225,6 +1236,9 @@ def csv_row(est, f, v, gN, gE, err):
             "" if est.get("fix_alt_m") is None else f"{est['fix_alt_m']:.1f}",
             "" if est.get("step_px") is None else f"{est['step_px']:.2f}",
             est.get("step_action", ""),
+            "" if est.get("step_dn") is None else f"{est['step_dn']:.4f}",
+            "" if est.get("step_de") is None else f"{est['step_de']:.4f}",
+            "" if est.get("step_dt_s") is None else f"{est['step_dt_s']:.4f}",
             "" if est["fc_d_roll"] is None else f"{est['fc_d_roll']:.4f}",
             "" if est["fc_d_pitch"] is None else f"{est['fc_d_pitch']:.4f}",
             "" if est["gyro_d_roll"] is None else f"{est['gyro_d_roll']:.4f}",
@@ -2028,6 +2042,7 @@ class VpsNode:
         self._vel_cum_n = self._vel_cum_e = 0.0
         self.step_px = None
         self.step_action = "ok"
+        self.step_dn = self.step_de = self.step_dt = None
         # Held long enough for the LONGEST baseline; how far back is actually
         # read is chosen per frame from the height.
         self._vel_hist = collections.deque(
@@ -2387,6 +2402,13 @@ class VpsNode:
             # Asking once fixes both.
             dt_step = (None if self.prev_t is None else f["t"] - self.prev_t)
             dn, de, action = self.gate_step(dn, de, dt_step, f["alt"])
+            # The step AS THE FUSER AND THE VELOCITY RECEIVED IT - after the
+            # gate clipped or refused it, which is what both actually consume.
+            # Recorded here rather than inside gate_step so a refused step is
+            # logged as the zero it becomes, not as what it wanted to be;
+            # step_px above already carries the pre-gate magnitude.
+            self.step_dn, self.step_de = float(dn), float(de)
+            self.step_dt = (None if dt_step is None else float(dt_step))
             if action != "refused":
                 self.fuser.predict(dn, de, dt=dt_step)
                 self.n_flow += 1
@@ -2496,6 +2518,12 @@ class VpsNode:
 
         lon, lat = self.to_lonlat(*self.fuser.pos)
         return dict(step_px=self.step_px, step_action=self.step_action,
+                    # getattr, because the tests build VpsNode through
+                    # __new__ and never run __init__ - the same reason the
+                    # frame-age and veto counters are read this way.
+                    step_dn=getattr(self, "step_dn", None),
+                    step_de=getattr(self, "step_de", None),
+                    step_dt_s=getattr(self, "step_dt", None),
                     fix_lon=fix_lon, fix_lat=fix_lat, fix_score=fix_score,
                     fix_inliers=fix_inl, fix_alt_m=fix_alt,
                     north=float(self.fuser.pos[0]), east=float(self.fuser.pos[1]),

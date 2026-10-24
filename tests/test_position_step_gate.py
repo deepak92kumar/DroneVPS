@@ -186,5 +186,27 @@ check("a refused frame leaves flowed False, so the gap handling runs",
       "the accelerometer carries it and the variance grows DR_TRUST faster")
 check("the count reaches the CSV", '"n_step_rej"' in src)
 
+# Added 24 Oct. flow_vel_frames is a baseline in FRAMES, and flight 239 asked
+# what it should be at 85-110 m, where a standing aircraft was reported moving
+# at 2.4 m/s. That is arithmetic on the per-frame steps - and it could not be
+# done, because the steps were never written down: the fused north_m/east_m
+# differences back to the node's own vel_flow at corr 0.374, and the saved
+# frames land every 3-8 frames so no consecutive pair can be re-tracked.
+check("the step the fuser consumed is recorded, post-gate",
+      src.index("dn, de, action = self.gate_step(")
+      < src.index("self.step_dn, self.step_de = float(dn), float(de)"),
+      "logged after the gate, so a refused step reads as the zero it became")
+check("and the interval it was measured over goes with it",
+      "self.step_dt = (None if dt_step is None else float(dt_step))" in src,
+      "a baseline of N frames spans N intervals; without dt the span is a guess")
+check("all three reach the CSV",
+      all(f'"{c}"' in src for c in ("step_dn", "step_de", "step_dt_s")))
+# Matched on the KEYS, not on the call text. The first version of this pinned
+# "step_dn=self.step_dn" and broke within the hour when the read became a
+# getattr - the tests build VpsNode through __new__, so __init__ never runs.
+# That is the same trap the two comments above this one describe.
+check("and they are carried out of step()",
+      all(f"step_d{k}=" in src for k in ("n", "e")) and "step_dt_s=" in src)
+
 print("\n" + ("ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}"))
 sys.exit(1 if fails else 0)

@@ -380,6 +380,35 @@ class VpsConfig:
     #
     # The machinery stays, so a future attempt needs a flight and not a
     # rewrite: set these to differ and _vel_baseline_frames ramps again.
+    #
+    # 24 OCT, FLIGHT 239, AND IT STAYS FLAT. This is the first sustained
+    # flight above 70 m - 86 m median, 110.9 m max, 795 s - and up there a
+    # standing aircraft (true speed under 0.5 m/s against the raw receiver) is
+    # reported moving at:
+    #
+    #     25-40 m   0.00 m/s median      the deadband absorbs it
+    #     40-55 m   0.89
+    #     70-85 m   2.40           p90 5.56
+    #     85-100 m  2.53           p90 5.89
+    #
+    # against a deadband of 0.35 + 0.010 x altitude, so 1.45 m/s at 110 m - the
+    # phantom clears it and reaches the flight controller. corr(flow, truth) is
+    # 0.19-0.30 up there, so this is not a scale error on a signal that tracks;
+    # the signal barely tracks. EKF SV ran p50 0.73 against 0.040 on the
+    # receiver, 22-67% of samples over FS_EKF_THRESH 1.2, and the aircraft fell
+    # to ALT_HOLD on the EKF velocity failsafe twice, at t 270 and t 361, both
+    # at 110 m.
+    #
+    # A longer baseline is the obvious answer and it is NOT taken, because the
+    # row above says log 229 already flew it: 11.1 m in 24 s at 31.6 m against
+    # 0.9 m in 23.2 s on a flat 40, and the aircraft told it was standing still
+    # does not correct. The sweep that would settle it at 85-110 m - the band
+    # none of 225/226/227/228 reached - CANNOT BE RUN ON WHAT IS LOGGED:
+    # differencing the fused north_m/east_m reproduces the node's own vel_flow
+    # at corr 0.374 (the fuser is not a raw integrator), and frames land every
+    # 3-8 so no consecutive pair survives to re-track. step_dn/step_de/
+    # step_dt_s were added the same day for exactly this, so the NEXT flight's
+    # CSV answers it as arithmetic. Until then, flat.
     flow_vel_frames_high: int = 40
     flow_vel_alt_m: float = 25.0
 

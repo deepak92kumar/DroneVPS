@@ -9,6 +9,37 @@ Threads are enough here, despite the GIL: OpenCV releases it around the heavy
 calls, so matchTemplate genuinely runs on another core. No second process, no
 shared-memory plumbing, and the map stays in one place.
 
+BOTH NUMBERS ABOVE ARE THE NCC MATCHER'S, AND THE MATCHER IS NOW XFEAT.
+Measured 24 Oct on this Orin with the node live, locate() on a real 110 m
+frame against this map, the window radius the code actually picks:
+
+    altitude   radius   map window   locate()
+      42 m     40.0 m    156x156      0.098 s
+      60 m     40.0 m    156x156      0.145 s
+      87 m     52.2 m    204x204      0.270 s
+     110 m     66.0 m    258x258      0.319 s
+
+The radius is clip(window_alt_frac x altitude, 40, radius_m), so the cost
+grows with height and 68 ms is a floor that only holds near the clip. XFeat is
+not matchTemplate either - its keypoint handling, matching and RANSAC are
+Python-level and do NOT release the GIL, so a 0.319 s fix is largely a 0.319 s
+stall of the flow loop.
+
+Flight 239 shows it: loop iterations slower than 60 ms went 3.6% at 37 m to
+47.7% at 110 m, and the node threw away 544 camera frames a minute up there
+against 3 a minute at 37 m. The slow fraction tracks ALTITUDE, not the number
+of fixes - 300-360 s gave 11 fixes at 47.7% slow while 540-600 s gave 24 fixes
+at 11.6% - which is what a per-attempt cost that scales with the window looks
+like, and not what a busy matcher looks like.
+
+The matcher accounts for roughly half of it: 0.319 s every fix_period_s of
+2.0 s is 16% of wall time, about 4 of the 9 frames dropped per second. The
+rest is the base load of two FlowTrackers at 25 fps. A second PROCESS is the
+fix for the matcher's share and is not written yet - the trade against a
+smaller window is unmeasured, because a 40 m radius at 110 m may not contain
+the true position once the drift is 20 m, which is why the radius scales in
+the first place.
+
 The queue holds exactly one job. If a fix is already running, a new request is
 DROPPED rather than queued - a fix computed against a prior that is two seconds
 stale is worse than no fix at all, and the flow keeps the position meanwhile.
