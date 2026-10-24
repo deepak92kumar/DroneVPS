@@ -1643,6 +1643,8 @@ class Notifier:
         self.link = link                    # anything with .mav.statustext_send
         self.period = float(period_s)
         self._depth_seen_t = None
+        self._derot_seen = None
+        self._derot_seen_t = None
         self._depth_high = False
         self.enabled = bool(enabled) and link is not None
         self._next = 0.0
@@ -1664,6 +1666,12 @@ class Notifier:
             return
         self._state[key] = value
         self._send(text, sev)
+
+    # How long the last derotation source seen is held before the radio is
+    # told there is none. Three seconds is long enough that the 3% of frames
+    # which produce no shift never show, and short enough that a source that
+    # really has stopped is reported before the pilot could act on it.
+    DEROT_HELD_S = 3.0
 
     def tick(self, t: float, est: dict, node) -> None:
         v = est["vel"]
@@ -1720,13 +1728,36 @@ class Notifier:
                         f" warm{warm}" if ready
                         else "VPS MAP MODEL NOT LOADED - no map fixes")[:50],
                        self.SEV_INFO if ready else self.SEV_WARN)
-        ds = est.get("derot_src") or "none"
-        self.event("derot", ds,
+        # HELD, not per-frame. THIS LINE HUNG THE PILOT'S RADIO.
+        #
+        # It was keyed on est["derot_src"] directly, and that column is empty
+        # on any frame which produced no shift at all - a vetoed frame, a
+        # stale one, a tracker that failed. So it flipped '' <-> 'gyro' 827
+        # times in the 289 s of flight 00000239, 2.86 times a second, and each
+        # flip was a message. The pilot reported the transmitter hanging
+        # mid-sentence, and that is what did it.
+        #
+        # This is the same fault the depth line had and the same repair: the
+        # question is not "which source ran on THIS frame" but "which source
+        # has been running", so the last source actually seen is held for
+        # DEROT_HELD_S and an empty frame does not change the answer. An
+        # empty frame is not a derotation fault - it means no shift was
+        # produced, which the track and velocity lines already report.
+        ds = (est.get("derot_src") or "").strip()
+        if ds:
+            self._derot_seen = ds
+            self._derot_seen_t = t
+        held = (self._derot_seen
+                if self._derot_seen_t is not None
+                and (t - self._derot_seen_t) < self.DEROT_HELD_S
+                else "none")
+        self.event("derot", held,
                    {"gyro": "VPS DEROT GYRO - camera IMU",
                     "quat": "VPS DEROT QUAT - rotation vector",
                     "fc": "VPS DEROT FC - 4Hz, mostly no rotation",
-                    "none": "VPS DEROT NONE"}.get(ds, f"VPS DEROT {ds}")[:50],
-                   self.SEV_INFO if ds in ("gyro", "quat") else self.SEV_WARN)
+                    "none": "VPS DEROT NONE - no shift for 3s"}.get(
+                       held, f"VPS DEROT {held}")[:50],
+                   self.SEV_INFO if held in ("gyro", "quat") else self.SEV_WARN)
 
         # THE DEPTH LINE WAS THE NOISIEST THING ON THE RADIO. On log 229 it
         # sent 154 of the flight's 363 messages, flipping at a median 0.04 s
