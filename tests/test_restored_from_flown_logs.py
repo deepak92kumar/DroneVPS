@@ -117,13 +117,9 @@ check("the input gate alone would not have done this",
 
 print("\nhow much the filter trusts a map fix")
 f = MapFuser()
-check("fix_sigma_m is 20, not 30 and not the 8 of 23 Oct morning",
-      abs(f.fix_var ** 0.5 - 20.0) < 1e-6,
-      "this line guarded 20 against a 30 that reappeared with the rebuild, "
-      "and on 23 Oct it also had to be guarded against an 8 that came from a "
-      "sweep scored against the map's own fixes. Against the raw receiver "
-      "that 8 was four times worse above 100 m. A number arriving here needs "
-      "to say which truth it was measured against")
+check("fix_sigma_m is 20, not 30", abs(f.fix_var ** 0.5 - 20.0) < 1e-6,
+      '9 Oct: "the map\'s median error is 20.0 m against our own 6.6 m ... '
+      'the code\'s fix_sigma_m = 20 was already right"')
 
 print("\n" + ("ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}"))
 sys.exit(1 if fails else 0)

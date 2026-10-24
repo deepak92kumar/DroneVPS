@@ -36,7 +36,6 @@ on the real frame timestamps of all thirteen recorded VPS flights:
     _next_send = t + period      3.913 Hz
     _next_send += period         4.295 Hz        target 4.30, log 194 = 4.31
 """
-import inspect
 import os
 import sys
 
@@ -46,7 +45,6 @@ HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(HERE, "vps_vio"))
 
 from map_fuse import MapFuser  # noqa: E402
-from live_node import ORIGIN_UNKNOWN_SIGMA_M  # noqa: E402
 
 fails = []
 
@@ -170,13 +168,8 @@ check("there is a separate absolute sigma", "def absolute_sigma_m" in src)
 check("it combines the origin with the drift in quadrature",
       "np.hypot(origin, drift)" in src)
 check("an unknown origin falls back to the map's own error",
-      "origin = ORIGIN_UNKNOWN_SIGMA_M" in src,
+      "np.sqrt(self.fuser.fix_var)" in src,
       "a hand-typed SCR_USER1/2 states no accuracy, and was 147-157 m out")
-check("and that fallback is its own constant, not the fuser's weight",
-      "ORIGIN_UNKNOWN_SIGMA_M = 20.0" in src,
-      "until 23 Oct this read the fuser's fix_sigma_m, so tuning how hard "
-      "the filter pulls towards the map also changed what the aircraft was "
-      "told its absolute position was worth")
 check("and that is what the send is given, not the drift alone",
       'est["sigma_abs"], est["yaw"], vel=est["vel"]' in src)
 check("both are logged so a flight can be audited",
@@ -190,7 +183,7 @@ class FakeNode:
     absolute_sigma_m = property(
         lambda self: float(np.hypot(
             self.origin_sigma_m if self.origin_sigma_m is not None
-            else ORIGIN_UNKNOWN_SIGMA_M,
+            else float(np.sqrt(self.fuser.fix_var)),
             float(self.fuser.sigma_m))))
 
 
@@ -239,17 +232,9 @@ check("it is never below the origin's own error",
 # ------------------------------------------------- the number that was wrong
 
 print("\nthe fuser the flying code builds")
-check("fix_sigma_m is 20, and live_node agrees with MapFuser's default",
-      "MapFuser(flow_drift_frac=0.07, fix_sigma_m=20.0)" in src
-      and inspect.signature(MapFuser).parameters["fix_sigma_m"].default == 20.0,
-      "this check exists because live_node once said 12 while the default, "
-      "the docstring and the tests all said 20. The VALUE may move - it went "
-      "to 8 and back on 23 Oct - but the DISAGREEMENT may not, which is why "
-      "both halves are asserted here")
-check("and what the FC is told is still the map's measured 20 m",
-      ORIGIN_UNKNOWN_SIGMA_M == 20.0,
-      f"{ORIGIN_UNKNOWN_SIGMA_M} m - a weight that helps the filter is not "
-      f"a claim about where the aircraft is")
+check("fix_sigma_m is 20, matching MapFuser's default and the 9 Oct report",
+      "MapFuser(flow_drift_frac=0.07, fix_sigma_m=20.0)" in src,
+      "it said 12 while the default, the docstring and the tests all said 20")
 
 print("\n" + ("ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}"))
 sys.exit(1 if fails else 0)

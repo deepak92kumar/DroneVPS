@@ -136,28 +136,34 @@ class VpsConfig:
                                    # held at 77 m more map is only more chance
                                    # to match wrong. The window was never the
                                    # mistake on its own; the RATIO was.
-    fix_period_s: float = 2.0      # 5 Oct: 0.4 -> 2.0 s. At 0.4 s the map pushed
+    # 1.0 AT THE PILOT'S INSTRUCTION, 23 Oct evening, to be flown tomorrow.
+    # They were told the measurement disagrees and said do it anyway: "error
+    # badhe tab bhi karo".
+    #
+    # WHAT THE MEASUREMENT SAID. Swept on flight 232's own saved frames and
+    # scored against GPS_RAW_INT - the receiver before the EKF, the only truth
+    # here that is independent of what we inject - VPS rows only:
+    #
+    #     2.0 s   all VPS 1.35 m   above 100 m  2.76 m
+    #     1.0 s   all VPS 5.33 m   above 100 m 11.16 m
+    #
+    # on 683 and 684 rows above 100 m. The earlier sweep that FAVOURED 1.0 was
+    # scored against the map's own fixes, which is circular, and that is the one
+    # that got reverted.
+    #
+    # WHY IT IS WORTH FLYING ANYWAY, and this is not nothing: those two numbers
+    # come from two different flights with different profiles, not from one
+    # flight replayed twice. Nothing has flown 1.0 since the matcher stopped
+    # stalling the flow loop at 60 m, since derotation moved to the camera gyro,
+    # or since the second camera doubled the track count. The 0.5 m cap per fix
+    # is unchanged, so 1.0 doubles the correction the map can apply - 0.24 m/s
+    # against 0.12 - and flight 237's first ALT_HOLD was the map losing a race
+    # at exactly that rate: it could pull 0.12 m/s while the error grew 0.14.
+    fix_period_s: float = 1.0      # 5 Oct: 0.4 -> 2.0 s. At 0.4 s the map pushed
                                    # a STATIONARY aircraft at 1.18 m/s above 80 m
                                    # while the drift it exists to catch is
                                    # 0.15-0.37 m/s. At 2 s it pushes 0.26, and the
                                    # worker drops from 75% of a core to 17%.
-                                   #
-                                   # 23 Oct morning: 1.0. 23 Oct evening: back to
-                                   # 2.0. The 1.0 sweep scored the position
-                                   # against the MAP's own fixes - circular, as
-                                   # the pilot said. Against the raw receiver
-                                   # (gps1_*, GPS_RAW_INT), VPS rows only:
-                                   #   2.0 s   all VPS 1.35 m   >100 m  2.76 m
-                                   #   1.0 s   all VPS 5.33 m   >100 m 11.16 m
-                                   # on 683 and 684 rows above 100 m. Pulling
-                                   # harder towards a map whose own error is
-                                   # 6-20 m moved us further from the truth.
-                                   #
-                                   # NOT WIRED. Nothing reads this field; the
-                                   # flying defaults are VpsNode's and the CLI's,
-                                   # and all three say 2.0 with a test holding
-                                   # them together. Three defaults for one number
-                                   # is how 0.5 survived once already.
 
     # --- recorder ---
     image_hz: float = 2.0          # 5 Oct: JPEGs gated separately from CSV rows
@@ -184,7 +190,14 @@ class VpsConfig:
     # 791.72 is what bench_workload.py and the matcher already use - do NOT
     # confuse it with the 1943 px in map_db.py's docstring, which is the RGB
     # sensor and is only an example there.
-    mono_fps: int = 30
+    # 30 -> 25 on 23 Oct, at the pilot's instruction, and it sets BOTH monos.
+    #
+    # With the partner camera streaming as well, 30 fps asked for delivered
+    # 28.5 and 22% of frames arrived late - against 7% with one camera - so
+    # the link was being asked for more than it could hold evenly. The loop
+    # rate was never the symptom; the JITTER was, and a dropped frame costs
+    # flow a whole interval of tracking.
+    mono_fps: int = 25
 
     # Camera IMU report rate, Hz, for all three enabled sensors - they share
     # one packet, so one number sets them together.
@@ -396,6 +409,34 @@ class VpsConfig:
     # measured one for CAM_B (120 px to where the taper ends, plus margin).
     # Cropped, not masked, if it is ever needed again: a masked block is a
     # uniform patch that a correlator would happily match against.
+    # BOTH MONO CAMERAS RUN OPTICAL FLOW, and their estimates are averaged.
+    #
+    # At the pilot's instruction, 23 Oct, after the camera mount was lowered
+    # 2-3 cm and the landing leg left CAM_B's frame - confirmed in the air and
+    # from a ground photograph, where the leg used to sit at x 112-179,
+    # y 728-800 and is now gone.
+    #
+    # WHAT IT BUYS, and it is reliability rather than accuracy. Tracks fall
+    # with height on this camera - measured across flight 00000237, altitude
+    # against track count correlates -0.63, from 279 at 17 m to 215-230 at
+    # 88 m - and that flight's first EKF failsafe came when the count
+    # collapsed 231 -> 80 at 88 m. Two cameras roughly double the features, so
+    # a dropout needs both to fail at once.
+    #
+    # WHAT IT DOES NOT BUY: the dominant flow errors are SHARED between the
+    # two. Both use the same altitude for the pixel-to-metre scale, the same
+    # IMU for derotation and the same yaw, so averaging cannot touch either -
+    # and those are what the measurements say dominate (slope against the
+    # receiver swings 0.51 to 2.68 with per-frame rotation). What averaging
+    # removes is the part that is independent between the sensors, which is
+    # the feature-localisation noise, and two of those average down by
+    # sqrt(2).
+    #
+    # WHAT IT COSTS: CAM_B's frames did not cross XLink before - only the
+    # primary left the device - so this adds a second 1280x800 mono stream at
+    # the mono rate, and a second LK pass on the Jetson, which was already
+    # running at about 56% of six cores.
+    dual_flow: bool = True
     crop_left_px: int = 0
 
     stereo_depth: bool = True

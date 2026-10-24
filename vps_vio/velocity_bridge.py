@@ -147,36 +147,7 @@ class VelocityBridge:
     accel_e below were added for that reason and nothing else.
     """
 
-    # tau_s 0.35 -> 0.15 on 23 Oct. KEPT after re-measurement, but the first
-    # claim for it was wrong and the margin is small.
-    #
-    # The morning's version of this comment said "faster is better at BOTH
-    # heights and MORE so at height". That was scored against gps_north_m,
-    # which is GLOBAL_POSITION_INT - the EKF's own fused position, driven by
-    # our injection while on the VPS. Re-scored against GPS_RAW_INT, and
-    # excluding rows within 2.5 s of an origin change (a handover re-takes the
-    # origin, which steps both north/east series, and differencing across that
-    # step reads as 30-60 m/s - a hexacopter does not do 33 m/s, and that
-    # artifact sat in the p99 column looking like a finding):
-    #
-    #     tau_s    below 60 m  p50 / p90      above 60 m  p50 / p90
-    #      0.35       0.106 / 0.862             0.109 / 3.361
-    #      0.25       0.104 / 0.796             0.111 / 3.188
-    #      0.15       0.104 / 0.756             0.122 / 3.062
-    #      0.08       0.103 / 0.741             0.133 / 2.934
-    #
-    # So p90 improves at both heights and p50 gets slightly WORSE above 60 m.
-    # 0.15 is kept for the p90, not because the morning's reasoning held.
-    #
-    # WHAT THIS CANNOT FIX, and the reason not to keep turning this dial:
-    # above 60 m the velocity error is p90 3.06 m/s against 0.76 below, and
-    # every tau from 0.35 to 0.08 lands within 14% of that. The noise is the
-    # flow's and it scales with height because metres per pixel does. On the
-    # 23 Oct flight ekf_vel_var correlated +0.63 with the SPEED WE SENT and
-    # breached its 1.2 gate on 15.7% of rows where velocity was sent against
-    # 6.4% where the deadband suppressed it. Smoothing is not the lever.
-    # See memory/dronevps-measure-fairly.md.
-    def __init__(self, *, tau_s: float = 0.15, flow_timeout_s: float = 0.6,
+    def __init__(self, *, tau_s: float = 0.35, flow_timeout_s: float = 0.6,
                  deadband_base_mps: float = 0.35,
                  # 0.005 -> 0.010 ON 22 OCT, measured on log 227, which
                  # would not hold in any of four VPS windows.
@@ -217,15 +188,6 @@ class VelocityBridge:
                  deadband_per_m: float = 0.010,
                  max_accel_mps2: float = 8.0,
                  slew_mps2: float = 5.0,
-                 # 6.0, and 23 Oct looked at lowering it and did not.
-                 # Replayed on log 232's own inputs the cap makes no difference
-                 # to the error at all - 6.0 / 3.0 / 2.0 give p50 0.39 / 0.39 /
-                 # 0.38 - so it is not the lever it looks like. And
-                 # tests/test_sent_speed_cap.py refuses anything under the
-                 # 5.04 m/s the aircraft was measured doing on the VPS in log
-                 # 230, which is the right rule: a cap below real motion is a
-                 # lie to the EKF rather than a brake on the runaway. What
-                 # actually moved the error was tau_s.
                  max_sent_mps: float = 6.0,
                  slew_hold_s: float = 2.0,
                  jump_escape_n: int = 5,
@@ -289,6 +251,54 @@ class VelocityBridge:
         self.capped = 0
 
     # -- inputs ----------------------------------------------------------
+    def reset_state(self, why: str = "") -> None:
+        """Throw away everything learned or integrated. Keep the configuration.
+
+        AT THE PILOT'S INSTRUCTION, 23 Oct: "gps se vps par switch ke waqt
+        purana koi bhi data" must not cross the handover - where the GPS is,
+        that is where the VPS starts.
+
+        The handover already did half of this. live_node re-takes the origin
+        from the flight controller's own position and calls
+        MapFuser.reset_displacement(), which zeroes the accumulated
+        displacement AND puts the variance back to init_sigma_m. Measured over
+        ten switches on flight 00000233, displacement went from as much as
+        74.5 m down to 0.4-2.0 m every time. POSITION was never the thing
+        being carried.
+
+        This bridge was. Nothing has ever reset it - there was no method to
+        call - so the integrated velocity, the learned accelerometer bias, the
+        last flow and accel samples, the slew reference and every timer ran
+        continuously from node start, through however long the aircraft sat on
+        GPS, and straight into the first GPS_INPUT packet after the switch.
+
+        WHAT IT COSTS, honestly: bias_n/bias_e are relearned from zero over
+        bias_tau_s, which is 20 s. The bias was measured at 0.09-0.31 m/s^2 on
+        the three 23 Oct flights and it only has to be right across the ~33 ms
+        between flow frames, so the arithmetic says this is small - but it IS
+        a real cost and it is the reason this is a deliberate instruction
+        rather than an obvious cleanup.
+
+        The cumulative counters are NOT reset. They are what a flight is
+        audited with afterwards, and zeroing them mid-flight would hide the
+        first half of it.
+        """
+        self.vn = self.ve = 0.0
+        self.bias_n = self.bias_e = 0.0
+        self._vn_flow = self._ve_flow = None
+        self._an = self._ae = 0.0
+        self._sent_n = self._sent_e = 0.0
+        self._t_sent = None
+        self._t_flow = None
+        self._t_accel = None
+        self._slew_since = -1e9
+        self._slow_since = None
+        self._jump_run = 0
+        self._started = False
+        self._last_alt_m = 0.0
+        self.reset_why = str(why)
+        self.n_resets = getattr(self, "n_resets", 0) + 1
+
     def push_accel(self, t: float, an: float, ae: float) -> None:
         """Horizontal acceleration in NED, m/s^2, gravity already removed.
 

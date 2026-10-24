@@ -223,5 +223,54 @@ check("never read at all has no age", w2.age_s(5.0) is None and not w2.stale(5.0
       "unknown is a different state from stale, and must not read as stale")
 
 
+
+# ------------------------------------------------- switch means switch
+
+print("\nthe pilot's switch is never refused")
+
+# THE PILOT'S RULE, 23 October: "agar aisa ho tho alt hold, gps kabhi nahi -
+# samjo gps physically nikal gaya hai, jab tak switch na ho tab tak no gps."
+#
+# The script used to answer a VPS request with "VPS REFUSED: VPS node is not
+# running" and leave the aircraft on the receiver. On flight 00000234 that
+# fired over and over while the node crash-looped, and the aircraft stayed on
+# GPS1 through all of it.
+#
+# If the VPS is asked for and the VPS is dead, the aircraft gets no position
+# and the EKF drops it into ALT_HOLD. That is the right outcome: quietly
+# flying a receiver nobody asked for is the system choosing GNSS on an
+# aircraft built to fly without it, and under spoofing the receiver is the
+# attack rather than the refuge.
+
+_sw_src = open(os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), "vps_vio", "gps_rc_switch.py")).read()
+_code = [ln for ln in _sw_src.splitlines() if not ln.lstrip().startswith("#")]
+
+check("no path refuses the switch and skips the write",
+      not any("REFUSED" in ln and "say" in ln for ln in _code),
+      "the refusal is gone; the comment above it may still quote the old text")
+check("and the health check no longer ends in 'continue'",
+      not any("self.refusals += 1" in _code[i] and
+              any("continue" in _code[j] for j in range(i + 1, min(i + 4, len(_code))))
+              for i in range(len(_code))),
+      "vps_healthy() is kept and still reported - it no longer decides")
+check("a dead node is SAID, loudly, and the switch happens anyway",
+      any("VPS DEAD" in ln and "switching anyway" in ln for ln in _code),
+      "the pilot has to know the VPS is dead; they do not have to be overruled")
+check("vps_healthy itself is still there to report with",
+      "def vps_healthy" in _sw_src)
+
+# And nothing anywhere may put the aircraft on GPS by itself.
+check("the script never commands GPS1 on its own",
+      not any(("set_primary(0)" in ln or "want = 0" in ln) for ln in _code),
+      "GPS_PRIMARY only ever follows the RC channel")
+
+_ln_src = open(os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), "vps_vio", "live_node.py")).read()
+check("and the node only stops injecting when the pilot asked for GPS",
+      "return self.value != 0" in _ln_src,
+      "GPS_PRIMARY = 0 is the pilot's switch and the only thing that silences "
+      "the injection")
+
 print(f"\n{'ALL PASS' if not fails else str(len(fails)) + ' FAILED: ' + ', '.join(fails)}")
 sys.exit(1 if fails else 0)

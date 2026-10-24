@@ -131,7 +131,7 @@ class MapFixWorker:
     def __init__(self, cache, *, focal_px: float, matcher: str = "xfeat",
                  radius_m: float = 150.0, window_alt_frac: float = 0.60,
                  query_shape: str = "full",
-                 min_alt_m: float = 60.0, fix_period_s: float = 2.0,
+                 min_alt_m: float = 60.0, fix_period_s: float = 1.0,
                  min_score: float | None = None,
                  min_margin: float | None = None,
                  principal_xy=None):
@@ -178,8 +178,59 @@ class MapFixWorker:
         self._last_submit = 0.0
         self.submitted = self.dropped = self.completed = 0
         self.skipped_low = self.skipped_period = 0
+        # Runs made below min_alt_m whose RESULT is thrown away. They exist to
+        # keep the path warm and to prove in the air, before 60 m, that the
+        # matcher is alive. See submit().
+        self.warm_runs = 0
+        # Has the model finished loading, and how long it took. The pilot sees
+        # this on the radio before arming.
+        self.model_ready = False
+        self.model_load_s = 0.0
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
+
+    def _warm(self) -> None:
+        """Build the XFeat model NOW, in this thread, before any fix is asked for.
+
+        THIS IS THE 60 METRE STALL. map_match_xfeat._load() is deliberately
+        lazy - so that an aircraft without torch installed loses the map path
+        instead of the whole node - and the first call to it therefore landed
+        on the first frame above min_alt_m. Measured on this machine the load
+        is 2.35 s warm and 4.95 s cold, and `import torch` holds the GIL for
+        most of it, so this thread being separate bought nothing.
+
+        It showed up in every flight, identically, and nobody had placed it:
+
+            flight 232   56 fixes   one loop gap, 2.67 s, at t 218.0
+            flight 233   93 fixes   one loop gap, 2.65 s, at t 257.2
+            flight 236    1 fix     one loop gap, 2.62 s, at t 321.0
+
+        and in all three the aircraft first crossed 60 m within 0.1 s of that
+        gap. 56 and 93 fixes with no further stalls is also the proof that the
+        matching itself is fine - it is only the load.
+
+        On flight 236 the 2.62 s cost 2.6 s of optical flow, the tracker came
+        back with 135 features instead of 205, the accumulated position jump
+        read as 4.25 m/s of motion, and XKF4.SV went 0.16 to 2.88 against a
+        1.2 gate. That was the ALT_HOLD.
+
+        Failure here is not fatal, for the same reason the lazy load existed.
+        """
+        import time as _t
+        t0 = _t.monotonic()
+        try:
+            from map_match_xfeat import _load
+            _load()
+            self.model_ready = True
+        except Exception as exc:
+            self.model_load_s = _t.monotonic() - t0
+            print(f"MAP matcher model did NOT load ({exc}); the map path is "
+                  f"off and the rest of the node is unaffected", flush=True)
+            return
+        self.model_load_s = _t.monotonic() - t0
+        print(f"MAP matcher model ready in {self.model_load_s:.2f} s, on the "
+              f"ground - this is the 2.6 s that used to be spent crossing 60 m",
+              flush=True)
 
     def submit(self, img: np.ndarray, *, prior_lon: float, prior_lat: float,
                altitude_m: float, yaw_deg: float) -> bool:
@@ -193,9 +244,26 @@ class MapFixWorker:
         to 60 - so whatever closes the descent has to come from elsewhere.
         """
         now = time.monotonic()
-        if altitude_m < self.min_alt_m:
+        # BELOW min_alt_m THE MATCH STILL RUNS AND THE RESULT IS THROWN AWAY,
+        # at the pilot's instruction, 23 Oct.
+        #
+        # It used to return here without running. That is still what happens
+        # to the ANSWER - nothing below min_alt_m reaches the fuser, which is
+        # unchanged - but the work now happens anyway, for one reason: a
+        # matcher that has never run is a matcher nobody can see. Until 60 m
+        # there was no way to tell from the air whether it was alive, and on
+        # flight 236 the first thing it ever did was stall the flow loop.
+        #
+        # The cost is small and measured on this machine: one match is 0 ms at
+        # 20 m (the window is 24 px, too small to attempt), 81 ms at 40 m, and
+        # 48 ms at 60 m. At a 2 s period that is about 4% of one core.
+        #
+        # The model load is NOT why this is here - _warm() handles that at
+        # startup and does not depend on altitude or on the map covering the
+        # take-off point.
+        discard = altitude_m < self.min_alt_m
+        if discard:
             self.skipped_low += 1
-            return False
         if now - self._last_submit < self.fix_period_s:
             self.skipped_period += 1
             return False
@@ -203,7 +271,8 @@ class MapFixWorker:
             if self._job is not None:
                 self.dropped += 1
                 return False
-            self._job = (img, prior_lon, prior_lat, altitude_m, yaw_deg, now)
+            self._job = (img, prior_lon, prior_lat, altitude_m, yaw_deg, now,
+                         discard)
             self.submitted += 1
             self._last_submit = now
         self._wake.set()
@@ -232,6 +301,7 @@ class MapFixWorker:
         return float(np.clip(self.window_alt_frac * altitude_m, 40.0, self.radius_m))
 
     def _loop(self):
+        self._warm()
         while self._run:
             self._wake.wait(0.2)
             self._wake.clear()
@@ -239,7 +309,7 @@ class MapFixWorker:
                 job = self._job
             if job is None:
                 continue
-            img, plon, plat, alt, yaw, t0 = job
+            img, plon, plat, alt, yaw, t0, discard = job
             res = None
             try:
                 if self.cache.covers(plon, plat):
@@ -264,9 +334,14 @@ class MapFixWorker:
                                 getattr(res, "reason", ""),
                                 float(alt))
             with self._lock:
-                self._result = out
+                if discard:
+                    # Ran to keep the path warm and visible. The answer does
+                    # not go to the fuser - nothing below min_alt_m ever has.
+                    self.warm_runs += 1
+                else:
+                    self._result = out
+                    self.completed += 1
                 self._job = None
-                self.completed += 1
 
     def stop(self):
         self._run = False

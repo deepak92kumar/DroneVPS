@@ -112,7 +112,8 @@ class LiveSource:
 
     def __init__(self, fc_port="/dev/ttyTHS1", fc_baud=921600, *,
                  fps: int | None = None, stereo_depth: bool | None = None,
-                 crop_left: int | None = None, imu_rate: int | None = None):
+                 crop_left: int | None = None, imu_rate: int | None = None,
+                 dual_flow: bool | None = None):
         import depthai as dai
         from record_flight import Telemetry
         from config import VpsConfig
@@ -124,6 +125,12 @@ class LiveSource:
         cfg = VpsConfig()
         fps = cfg.mono_fps if fps is None else int(fps)
         stereo_depth = cfg.stereo_depth if stereo_depth is None else bool(stereo_depth)
+        # The partner camera has to be OPEN for its frames to be read, and it
+        # is opened for stereo. Asking for dual flow without it would be a
+        # silent no-op, so it says so instead.
+        dual_flow = (getattr(cfg, "dual_flow", False) if dual_flow is None
+                     else bool(dual_flow))
+        self.dual_flow = bool(dual_flow)
         imu_rate = cfg.imu_rate if imu_rate is None else int(imu_rate)
         self.imu_rate = imu_rate
         # 921600, not 115200. TELEM2 flies at 921600 - SERIAL2_BAUD reads 921
@@ -148,7 +155,12 @@ class LiveSource:
         # never streamed, encoded or powered for our sake.
         self._ir_off = True
 
-        if stereo_depth:
+        # The partner camera is opened for EITHER job. It used to be opened
+        # only for stereo, which made dual flow depend on depth - and depth
+        # is idle above 30 m (the 7.5 cm baseline gives under 0.3 px of
+        # disparity there) while flow is wanted most at 60-110 m. Coupling
+        # them would have meant paying for depth to get flow.
+        if stereo_depth or dual_flow:
             sockets.append(("mono_partner", _socket(STEREO_PARTNER_NAME)))
         for name, sock in sockets:
             m = p.create(dai.node.MonoCamera)
@@ -171,7 +183,13 @@ class LiveSource:
             m.setFps(fps)
             m.initialControl.setAutoExposureLimit(8000)
             mono[name] = m
-            if name == "mono":          # only the left frame leaves the device
+            # The primary always leaves the device. The partner leaves it too
+            # when dual_flow is on - it did not before, and that is why only
+            # one camera has ever run optical flow: CAM_B's frames went into
+            # StereoDepth on the Myriad and never crossed XLink. See
+            # VpsConfig.dual_flow for what the second stream is for and what
+            # it costs.
+            if name == "mono" or (name == "mono_partner" and dual_flow):
                 xo = p.create(dai.node.XLinkOut)
                 xo.setStreamName(name)
                 m.out.link(xo.input)
@@ -369,8 +387,50 @@ class LiveSource:
                   f"run on raw pixels ***")
         print(f"K: fx {K[0][0]:.2f} fy {K[1][1]:.2f} cx {K[0][2]:.2f} cy {K[1][2]:.2f}"
               + (f", D[{len(self.D)}] k1 {self.D[0]:.2f}" if self.D is not None else ""))
+        # THE PARTNER'S OWN K AND D, per socket, never the primary's.
+        #
+        # The two cameras genuinely differ on this device - CAM_B reads
+        # cx 624.89 / cy 391.80 against CAM_C's 644.13 / 404.16, and k1
+        # 24.09 against 26.05 - and the whole point of a second flow is that
+        # it is an INDEPENDENT measurement. Feeding it the primary's
+        # intrinsics would put the primary's own distortion error into both,
+        # which is exactly the error averaging is supposed to cancel.
+        self.K_partner = self.D_partner = None
+        if self.dual_flow:
+            try:
+                Kp = np.array(cal.getCameraIntrinsics(
+                    _socket(STEREO_PARTNER_NAME), 1280, 800))
+                try:
+                    Dp = np.array(list(cal.getDistortionCoefficients(
+                        _socket(STEREO_PARTNER_NAME))), float)
+                except Exception:
+                    Dp = None
+                self.K_partner, self.D_partner = Kp, Dp
+                print(f"K {STEREO_PARTNER_NAME}: fx {Kp[0][0]:.2f} fy {Kp[1][1]:.2f} "
+                      f"cx {Kp[0][2]:.2f} cy {Kp[1][2]:.2f}"
+                      + (f", D[{len(Dp)}] k1 {Dp[0]:.2f}" if Dp is not None else ""))
+            except Exception as e:
+                # No intrinsics means no second flow. Running it on the
+                # primary's K would be worse than not running it.
+                print(f"*** could not read {STEREO_PARTNER_NAME} intrinsics "
+                      f"({e}) - dual flow is OFF ***")
+                self.dual_flow = False
         self.dev.startPipeline(p)
         self.q = self.dev.getOutputQueue("mono", 4, False)
+        # The partner's frames, when dual flow is on. Depth 2 and blocking
+        # False, like the depth queue: if the partner ever falls behind, the
+        # loop must run on the primary alone rather than wait for it. One
+        # camera late is a weaker estimate; one camera blocking the loop is
+        # the 2.6 s stall all over again.
+        self.q_partner = (self.dev.getOutputQueue("mono_partner", 4, False)
+                          if self.dual_flow else None)
+        self.fps = int(fps)
+        # How many frames arrived with a usable partner, and how many partner
+        # frames were thrown away for being too far from the primary in time.
+        # Both are reported, because "dual flow is on" and "dual flow is
+        # working" are different claims.
+        self._partner_n = self._partner_skew = 0
+        self._partner_last = None
         # Non-blocking and shallow on purpose: a depth frame that is late is
         # dropped rather than delaying the mono frame the flow loop runs on.
         self.q_depth = (self.dev.getOutputQueue("depth", 2, False)
@@ -532,9 +592,63 @@ class LiveSource:
             d = self.q_depth.tryGet()
             if d is not None:
                 depth = self._crop(d.getFrame())   # uint16 mm, aligned to CAM_B
+        # The partner's frame, matched to this one by DEVICE timestamp.
+        #
+        # The two monos are hardware-triggered together on this board, so a
+        # matching pair differs by microseconds. tryGet, never get: a partner
+        # that is late must not hold the loop, and a pair more than half a
+        # frame apart is not a pair - averaging two different instants would
+        # put the aircraft's own motion into the difference, which is the
+        # opposite of what the second camera is for.
+        img_partner = None
+        if self.q_partner is not None:
+            try:
+                t_pri = fr.getTimestampDevice().total_seconds()
+                # Drain whatever has arrived and KEEP THE LAST ONE, rather
+                # than requiring a partner to be sitting in the queue at the
+                # exact moment the primary is read.
+                #
+                # The first version required that, and it halved the pairing:
+                # 35.6% of frames got both, in bursts of two to seven. The
+                # two streams arrive over one XLink at 30 Hz each and the
+                # loop reads them in series, so whether a partner has landed
+                # yet is a question about phase, not about the camera. Held
+                # across iterations the phase stops mattering and the
+                # timestamp test below still throws away anything that is
+                # genuinely a different instant.
+                best, best_dt = self._partner_last, None
+                if best is not None:
+                    best_dt = abs(best.getTimestampDevice().total_seconds() - t_pri)
+                while True:
+                    pf = self.q_partner.tryGet()
+                    if pf is None:
+                        break
+                    dt = abs(pf.getTimestampDevice().total_seconds() - t_pri)
+                    if best_dt is None or dt < best_dt:
+                        best, best_dt = pf, dt
+                # KEEP THE CLOSEST, not the newest.
+                #
+                # Keeping the newest took pairing from 36% to 41% and no
+                # further, and the reason is that this loop does real work
+                # between reads - flow, the IMU drain, the map submit - so by
+                # the time it drains, a partner NEWER than the primary it just
+                # read has usually landed, and a frame 33 ms ahead fails the
+                # half-frame test exactly as a frame 33 ms behind would. In a
+                # bare loop with no work the same code pairs 86% of frames,
+                # which is what said the bandwidth was never the problem.
+                self._partner_last = best
+                if best is not None and best_dt is not None:
+                    if best_dt <= 0.5 / max(self.fps, 1):
+                        img_partner = self._crop(best.getCvFrame())
+                        self._partner_n += 1
+                    else:
+                        self._partner_skew += 1
+            except Exception:
+                img_partner = None
         s = self.tel.snapshot()
         if s.get("alt_rel") is None or s.get("yaw") is None:
-            return dict(img=self._crop(fr.getCvFrame()), alt=None, yaw=None, roll=None,
+            return dict(img=self._crop(fr.getCvFrame()), img_partner=img_partner,
+                        alt=None, yaw=None, roll=None,
                         pitch=None, gps=None, depth=depth, rngfnd=s.get("rngfnd"),
                         gyro_d_roll=d_roll, gyro_d_pitch=d_pitch,
                         gyro_n=self._gyro_n,
@@ -545,7 +659,8 @@ class LiveSource:
         gps = None
         if s.get("lat") not in (None, 0.0):
             gps = (s["lon"], s["lat"])
-        return dict(img=self._crop(fr.getCvFrame()), alt=s["alt_rel"], yaw=s["yaw"],
+        return dict(img=self._crop(fr.getCvFrame()), img_partner=img_partner,
+                    alt=s["alt_rel"], yaw=s["yaw"],
                     alt_amsl=s.get("alt_amsl"), rngfnd=s.get("rngfnd"),
                     gps1_alt=s.get("gps1_alt"), gps1_fix=s.get("fix"),
                     gps1_hacc=s.get("gps1_hacc"),
@@ -964,6 +1079,10 @@ CSV_COLUMNS = ["t", "north_m", "east_m", "lon", "lat", "sigma_m",
     # after the 32nd. test_csv_columns.py now pins the two
     # together so the next addition cannot do it again.
     "accel_n", "depth_med_m", "depth_dropped",
+    # The two cameras' own disagreement, pixels, and whether both ran on this
+    # frame. Two independent looks at the same ground is the first thing this
+    # project has had that BOUNDS the flow's noise instead of inferring it.
+    "flow_disagree_px", "flow_dual",
     "n_dr", "src", "rngfnd_m", "alt_amsl_m",
     # The saved image for THIS row, or empty on the rows where no
     # frame was saved (most of them - the gate saves a couple a
@@ -1073,7 +1192,11 @@ def csv_row(est, f, v, gN, gE, err):
             "" if est.get("derot_dis_pitch") is None else f"{est['derot_dis_pitch']:.4f}",
             est["accel_n"],
             "" if est["depth_med_m"] is None else f"{est['depth_med_m']:.2f}",
-            est["depth_dropped"], est["n_dr"],
+            est["depth_dropped"],
+            "" if est.get("flow_disagree_px") is None
+            else f"{est['flow_disagree_px']:.2f}",
+            "1" if est.get("flow_dual") else "0",
+            est["n_dr"],
             est.get("src") or "",
             "" if f.get("rngfnd") is None else f"{f['rngfnd']:.2f}",
             "" if f.get("alt_amsl") is None else f"{f['alt_amsl']:.2f}",
@@ -1163,10 +1286,6 @@ class SourceWatcher:
     sending, and says out loud that it does not know.
     """
 
-    # How old a GPS_PRIMARY reading may be before the pilot is told it is
-    # old. The parameter is re-requested every period_s (0.5 s), so this is
-    # six missed answers. It does NOT change which source we use - see
-    # stale() for why that stays the pilot's decision and not ours.
     STALE_AFTER_S = 3.0
 
     def __init__(self, link, period_s: float = 0.5):
@@ -1522,6 +1641,44 @@ class Notifier:
                    "VPS ACCEL OK" if a_n > 0
                    else "VPS ACCEL SILENT - FLOW ONLY, NO VIO",
                    self.SEV_INFO if a_n > 0 else self.SEV_CRIT)
+        # WHICH SOURCE IS ACTUALLY DEROTATING THE FLOW, said on the radio.
+        #
+        # "VPS GYRO OK" above only means the camera IMU is producing data. It
+        # says nothing about whether that data is used, and on flight 00000235
+        # it was not: derot_src was 'fc' for all 15019 frames while the FC's
+        # own per-frame delta measured 0.000 - no derotation at all - and
+        # nothing on the radio distinguished that from the gyro working.
+        #
+        # The pilot is testing the gyro in flight, so the thing being tested
+        # has to be visible while flying rather than only in the log
+        # afterwards. Keyed on the source name, so it speaks when TiltValidator
+        # adopts the gyro and again if agreement is lost and it drops back.
+        # IS THE MATCHER WARM, said before arming.
+        #
+        # The model used to load on the first frame above 60 m and cost the
+        # flow loop 2.6 s there - every flight, identically. It is built at
+        # worker start now, and this is how the pilot knows it finished
+        # instead of finding out at sixty metres.
+        # hasattr, not getattr-with-a-default: a worker that does not carry
+        # model_ready at all is one we know nothing about, and "we do not
+        # know" must not be announced as "it failed". The fake nodes the
+        # tests build are exactly that case.
+        mw = getattr(node, "worker", None)
+        if mw is not None and hasattr(mw, "model_ready"):
+            ready = bool(mw.model_ready)
+            warm = int(getattr(mw, "warm_runs", 0))
+            self.event("mapwarm", ready,
+                       (f"VPS MAP READY {getattr(mw, 'model_load_s', 0.0):.1f}s"
+                        f" warm{warm}" if ready
+                        else "VPS MAP MODEL NOT LOADED - no map fixes")[:50],
+                       self.SEV_INFO if ready else self.SEV_WARN)
+        ds = est.get("derot_src") or "none"
+        self.event("derot", ds,
+                   {"gyro": "VPS DEROT GYRO - camera IMU",
+                    "quat": "VPS DEROT QUAT - rotation vector",
+                    "fc": "VPS DEROT FC - 4Hz, mostly no rotation",
+                    "none": "VPS DEROT NONE"}.get(ds, f"VPS DEROT {ds}")[:50],
+                   self.SEV_INFO if ds in ("gyro", "quat") else self.SEV_WARN)
 
         # THE DEPTH LINE WAS THE NOISIEST THING ON THE RADIO. On log 229 it
         # sent 154 of the flight's 363 messages, flipping at a median 0.04 s
@@ -1599,23 +1756,6 @@ def _vps_config():
         return _Empty()
 
 
-# WHAT TO DECLARE WHEN THE ORIGIN'S ACCURACY IS UNKNOWN.
-#
-# Until 23 Oct this was taken from MapFuser's fix_sigma_m, and that was one
-# number doing two unrelated jobs. fix_sigma_m is how much the FUSER should
-# trust a map fix against the flow, and log 232 says 8 m - the fixes really
-# are that good. This is the floor on what we tell the flight controller our
-# ABSOLUTE position is worth when nothing has measured the origin, and 8 m
-# there would be a claim nothing supports: a hand-typed SCR_USER1/2 was
-# 147-157 m out on three flights.
-#
-# They moved together by accident. Lowering the first would have lowered the
-# second, and the flight controller would have been told 8 m while the origin
-# could be a hundred. Log 00000194, which flew, declared 21.36 m p50 - the
-# same order as this floor.
-ORIGIN_UNKNOWN_SIGMA_M = 20.0
-
-
 class VpsNode:
     # How much faster the estimate doubts itself while dead reckoning. 3x is a
     # starting value, not a measured one: it wants a sweep against a recording
@@ -1664,9 +1804,9 @@ class VpsNode:
     STEP_ESCAPE_N = 5
 
     def __init__(self, cache: MapCache, focal_px: float, *,
-                 fix_period_s: float = 2.0, radius_m: float = 150.0,
+                 fix_period_s: float = 1.0, radius_m: float = 150.0,
                  max_corners: int = 300, K=None, D=None, focal_y_px=None,
-                 derotate: str = "fc"):
+                 derotate: str = "auto"):
         self.cache = cache
         self.focal = float(focal_px)
         # "auto" or "fc". There is deliberately NO option to force a source
@@ -1707,20 +1847,24 @@ class VpsNode:
         # and correct, NOT because it is a fix for anything.
         self.focal_y = float(focal_px if focal_y_px is None else focal_y_px)
         self.tracker = FlowTracker(max_corners=max_corners, K=K, D=D)
-        # fix_sigma_m 20. Lowered to 8 on the morning of 23 Oct and put
-        # back the same evening, because the sweep behind the 8 scored the
-        # position against the MAP's own fixes. The only independent truth is
-        # gps1_* (GPS_RAW_INT); gps_* is GLOBAL_POSITION_INT, which on the
-        # VPS is driven by our own injection. Against gps1, VPS rows only:
+        # The partner camera's own tracker, with ITS OWN intrinsics. See
+        # VpsConfig.dual_flow. It is built only when the reader actually has
+        # the partner open and calibrated - cam.dual_flow is already False if
+        # either failed, so this follows it rather than the config.
+        self.tracker_b = None
+        self.n_dual = self.n_single = 0
+        self.flow_disagree_px = None
+        # fix_sigma_m 20, not 12. This line said 12 while MapFuser's own default,
+        # its docstring and tests/test_restored_from_flown_logs.py all said 20 -
+        # so the flying code was quietly using a number the evidence does not
+        # support. The 9 Oct report settled it with the fix's own lat/lon logged
+        # for the first time: "the map's median error is 20.0 m against our own
+        # 6.6 m ... the code's fix_sigma_m = 20 was already right."
         #
-        #                      2 s / sigma 20     1 s / sigma 8
-        #     all VPS rows        1.35 m             5.33 m
-        #     above 100 m         2.76 m            11.16 m
-        #
-        # MapFuser's own comment carries the full table and the reasoning.
-        # This line has twice been the place where a number nobody could see
-        # disagreed with every other copy of it, so it is written out rather
-        # than defaulted, and three tests pin it.
+        # It made no difference to the 20 Oct flights because they took no fixes
+        # at all (replayed: sigma p50 11.15 m at 12, 11.00 m at 20), but it
+        # decides how far each fix moves the aircraft the moment fixes return,
+        # and 12 trusts the map almost three times as much as it has earned.
         self.fuser = MapFuser(flow_drift_frac=0.07, fix_sigma_m=20.0)
         # K's cx/cy go to the worker, so a map fix means the point under the
         # camera rather than the point under the middle of the image. The two
@@ -1738,6 +1882,10 @@ class VpsNode:
             cache, focal_px=focal_px, radius_m=radius_m,
             window_alt_frac=getattr(_cfg, "map_window_alt_frac", 0.90),
             query_shape=getattr(_cfg, "map_query_shape", "full"),
+            # PASSED, not defaulted. It was not before, so the worker's own
+            # default won whatever the config and the CLI said - the same
+            # fault that left map_window_alt_frac and map_query_shape dead.
+            # All three defaults read 1.0 now and a test holds them together.
             fix_period_s=float(fix_period_s),
             principal_xy=(None if K is None
                           else (float(np.asarray(K).reshape(3, 3)[0, 2]),
@@ -1858,7 +2006,7 @@ class VpsNode:
         drift = float(self.fuser.sigma_m)
         origin = self.origin_sigma_m
         if origin is None:
-            origin = ORIGIN_UNKNOWN_SIGMA_M
+            origin = float(np.sqrt(self.fuser.fix_var))
         return float(np.hypot(origin, drift))
 
     def gate_step(self, dn: float, de: float, dt: float | None,
@@ -1977,6 +2125,45 @@ class VpsNode:
         # to keep the flow on ONE surface - see FlowTracker._depth_gate - and
         # not as a height, which 9 Oct already tried and reverted.
         d, ntrk = self.tracker.step(f["img"], depth=f.get("depth"))
+        # THE SECOND CAMERA. Averaged into the first when both produced a
+        # shift on this frame; ignored entirely when it did not, so a partner
+        # that drops out costs nothing but the averaging.
+        #
+        # Weighted by TRACK COUNT, not a flat mean. Two cameras on the same
+        # ground rarely hold the same number of features - one catches glare,
+        # one catches shadow - and the estimate with twice the tracks is worth
+        # more than the one with half. With equal counts this is exactly the
+        # average the pilot asked for.
+        #
+        # The disagreement between them is carried out on every frame. It is
+        # the one number here that could not be measured before: two
+        # independent looks at the same ground bound the flow's own noise,
+        # and until now there was nothing to compare against.
+        tracker_b = getattr(self, "tracker_b", None)
+        if tracker_b is not None and f.get("img_partner") is not None:
+            db, ntrk_b = tracker_b.step(f["img_partner"],
+                                        depth=f.get("depth"))
+            if d is not None and db is not None and (ntrk + ntrk_b) > 0:
+                self.flow_disagree_px = float(np.hypot(*(np.asarray(db, float)
+                                                         - np.asarray(d, float))))
+                w = float(ntrk) / float(ntrk + ntrk_b)
+                d = np.asarray(d, float) * w + np.asarray(db, float) * (1.0 - w)
+                ntrk = int(ntrk + ntrk_b)
+                self.n_dual = getattr(self, "n_dual", 0) + 1
+            elif d is None and db is not None:
+                # The primary failed this frame and the partner did not. This
+                # is the whole point of the second camera: flight 00000237's
+                # first failsafe was the primary's track count collapsing
+                # 231 -> 80 while nothing else was looking.
+                d, ntrk = db, ntrk_b
+                self.flow_disagree_px = None
+                self.n_dual = getattr(self, "n_dual", 0) + 1
+            else:
+                self.flow_disagree_px = None
+                self.n_single = getattr(self, "n_single", 0) + 1
+        else:
+            self.flow_disagree_px = None
+            self.n_single = getattr(self, "n_single", 0) + 1
         flowed = False
         if d is not None and self.prev_att is not None:
             # DEROTATION. The camera's own gyro by default, the FC's
@@ -2029,17 +2216,41 @@ class VpsNode:
             if dt_v is not None and 0.0 < dt_v < 0.5:
                 self.val_gyro.update(gd_r, gd_p, fc_r, fc_p, dt_v)
                 self.val_quat.update(qd_r, qd_p, fc_r, fc_p, dt_v)
-            if (self.derotate != "fc" and self.val_gyro.ok
+            # THE GYRO IS THE PRIMARY SOURCE WHENEVER IT HAS DATA, 23 Oct, at
+            # the pilot's instruction. It used to also require
+            # self.val_gyro.ok, and that gate could never be satisfied when it
+            # mattered: TiltValidator needs fifteen 0.4 s windows containing
+            # real rotation before it adopts, so on the ground it never adopts
+            # at all - measured, vps_00130, 1139 of 1142 frames on 'fc' sitting
+            # still - and in the air the first forty-odd seconds of every
+            # flight ran with no usable derotation, because the FC path
+            # delivers 0.000 deg per frame on 88% of frames and measured WORSE
+            # than no derotation at all.
+            #
+            # So the order is now: the camera gyro if it reported, else
+            # GAME_ROTATION_VECTOR, else the FC. The validator still runs and
+            # still reports - it is the thing that says whether the gyro agrees
+            # with the aircraft - but it no longer withholds the only source
+            # that sees every frame.
+            #
+            # What this re-exposes, and it is the known risk: logs 00000223 and
+            # 00000224 both ran away on gyro derotation, 160 and 176 degrees
+            # from the receiver's own velocity. The sign is not the difference -
+            # 224 adopted -1/-1, which is these constants exactly. The pilot is
+            # flying it to find out, and VPS DEROT GYRO on the radio says when
+            # it is live.
+            if (self.derotate != "fc"
                     and gd_r is not None and gd_p is not None):
-                d = d - gyro_shift_px(gd_r, gd_p,
-                                      self.val_gyro.sign_roll,
-                                      self.val_gyro.sign_pitch)
+                # No sign from the validator - see gyro_shift_px. It still
+                # decides WHETHER the gyro may be used, above; it no longer
+                # decides which way the shift points, because it picks that
+                # by matching rotation and the thing that matters is
+                # translation.
+                d = d - gyro_shift_px(gd_r, gd_p)
                 self.n_derot_gyro += 1
             elif (self.derotate != "fc" and self.val_quat.ok
                   and qd_r is not None and qd_p is not None):
-                d = d - gyro_shift_px(qd_r, qd_p,
-                                      self.val_quat.sign_roll,
-                                      self.val_quat.sign_pitch)
+                d = d - gyro_shift_px(qd_r, qd_p)
                 self.n_derot_quat += 1
             else:
                 d = d - attitude_shift_px(self.prev_att, att)
@@ -2190,6 +2401,9 @@ class VpsNode:
                     quat_d_roll=f.get("quat_d_roll"),
                     quat_d_pitch=f.get("quat_d_pitch"),
                     quat_n=f.get("quat_n"),
+                    flow_disagree_px=getattr(self, "flow_disagree_px", None),
+                    flow_dual=(tracker_b is not None
+                               and f.get("img_partner") is not None),
                     derot_src=("gyro" if self.n_derot_gyro > _dg
                                else "quat" if self.n_derot_quat > _dq
                                else "fc" if self.n_derot_fc > _df else ""),
@@ -2242,22 +2456,19 @@ def main():
                     help="camera IMU report rate in Hz for all three sensors "
                          "(default from VpsConfig.imu_rate, 100). They share "
                          "one packet, so this sets them together.")
-    ap.add_argument("--fix-period", type=float, default=2.0,
-                    help="seconds between map fixes. Went to 1.0 on the "
-                         "morning of 23 Oct and back to 2.0 the same evening. "
-                         "The 1.0 sweep scored the position against the map's "
-                         "own fixes, which is circular; against the raw "
-                         "receiver (gps1_*) 2.0 s gave 1.35 m p50 over all VPS "
-                         "rows and 2.76 m above 100 m, while 1.0 s gave 5.33 "
-                         "and 11.16 on a comparable sample. More fixes pulled "
-                         "harder towards a map whose own error is 6-20 m moved "
-                         "the aircraft further from the truth, not closer. "
-                         "Log 227's earlier revert was real but confounded - "
-                         "that flight was also sending 25.47 m/s - so this is "
-                         "the first clean measurement either way. What DID "
-                         "survive from the morning is the plumbing: VpsNode "
-                         "now actually passes this to MapFixWorker, which it "
-                         "never did.")
+    ap.add_argument("--fix-period", type=float, default=1.0,
+                    help="seconds between map fixes. 1.0 was tried on 22 Oct "
+                         "because the pilot's archived 11 Oct reports record "
+                         "'0.500 m per fix at 1 fix/s' - later evidence than "
+                         "the 5 Oct value of 2.0. Flown as log 227 and "
+                         "reverted the same day: at 82-83 m, XKF4.SP max went "
+                         "0.13 (log 226, 2.0 s) to 1.17 (log 227, 1.0 s), "
+                         "nine times worse against a 1.2 gate. A map fix "
+                         "moves the POSITION by up to max_correction_m and "
+                         "the velocity not at all, so at 1 Hz the EKF is told "
+                         "the aircraft jumped without moving. 5 Oct's caution "
+                         "- 1.18 m/s of push on a stationary aircraft - was "
+                         "the same fault seen from the outside.")
     ap.add_argument("--radius", type=float, default=150.0)
     ap.add_argument("--corners", type=int, default=300)
     ap.add_argument("--origin", help="lon,lat - GPS-denied start")
@@ -2301,7 +2512,35 @@ def main():
     # only thing that matters here. "auto" stays reachable for offline work; it
     # must be scored on the direction of the resulting velocity before it is
     # ever the default again.
-    ap.add_argument("--derotate", choices=("auto", "fc"), default="fc",
+    # 23 OCT: DEFAULT BACK TO "auto", AT THE PILOT'S INSTRUCTION, TO BE
+    # TESTED IN FLIGHT. The paragraph above stands and is why this was "fc";
+    # it is not deleted because the runaway it describes was real. What is
+    # new is that pinning it to "fc" turns out to mean NO DEROTATION AT ALL:
+    # on flight 00000235 derot_src was 'fc' for all 15019 frames and the
+    # FC's own per-frame delta measured 0.000, while the camera gyro saw
+    # 0.065 deg of roll and 0.120 of pitch per frame. flow_odom's own
+    # comment says the same thing - the FC arrives at 4 Hz against a 30 Hz
+    # loop, so 88% of frames get no rotation - and that FC derotation
+    # measured WORSE than none.
+    #
+    # The pilot's own record: the gyro carried 97% of frames before, and
+    # 100% with the accelerometer alongside it.
+    #
+    # MY OFFLINE SCORE SAID THE OPPOSITE AND I DO NOT TRUST IT. Replaying
+    # 00000235 with the gyro subtracted in all four sign combinations put
+    # the velocity direction 46-77 degrees from the receiver against 14
+    # degrees for no derotation. But that replay removed the rotation from
+    # the flow's NORTH/EAST velocity rather than from the PIXEL shift
+    # before shift_to_ne, and it used the CSV row interval as dt instead of
+    # the flow frame interval. Either is enough to invalidate it. It is
+    # recorded so nobody repeats it in that form, not as evidence.
+    #
+    # What a flight should show: node.val_gyro.describe() at exit, the
+    # derot_src column per row, and the "% gyro" line. If the gyro is
+    # adopted and the aircraft still runs, that is the 21 Oct result again
+    # and the geometry - camera-to-body axes, unverified since the camera
+    # was remounted - is the thing to fix next.
+    ap.add_argument("--derotate", choices=("auto", "fc"), default="auto",
                     help="where the tilt to remove from the flow comes from. "
                          "'auto' uses the camera gyro, or GAME_ROTATION_VECTOR, "
                          "ONLY once that source has been verified against the "
@@ -2464,6 +2703,21 @@ def main():
                    fix_period_s=a.fix_period,
                    radius_m=a.radius, max_corners=a.corners,
                    derotate=a.derotate)
+
+    # THE PARTNER'S TRACKER, built here because only the reader knows whether
+    # the partner is actually open and calibrated. src.dual_flow is already
+    # False if the stream could not be opened or its intrinsics could not be
+    # read, so this follows the reader rather than the config - a second flow
+    # that silently ran on the primary's K would be worse than none.
+    if getattr(src, "dual_flow", False) and getattr(src, "K_partner", None) is not None:
+        node.tracker_b = FlowTracker(max_corners=a.corners,
+                                     K=src.K_partner, D=src.D_partner)
+        print(f"DUAL FLOW ON: {STEREO_PARTNER_NAME} has its own tracker and its "
+              f"own intrinsics. Shifts are averaged weighted by track count, "
+              f"and their disagreement is written to every row.", flush=True)
+    else:
+        print("dual flow OFF - flow runs on the primary camera alone",
+              flush=True)
 
     wr = None
     fwriter = None
@@ -2661,21 +2915,6 @@ def main():
                 else "GPS1 ON - VPS data blocked" if watcher.value == 0
                 else "SOURCE UNKNOWN - cannot read GPS_PRIMARY",
                 Notifier.SEV_INFO if watcher.value == 1 else Notifier.SEV_CRIT)
-            # And whether that reading is still LIVE. The source line above
-            # says what we believe; this says whether anyone has confirmed it
-            # lately. 23 Oct: the aircraft landed on the VPS while the
-            # transmitter asked for the receiver, because the switch script's
-            # belief was wrong and nothing compared the two. The node cannot
-            # see the script, so it reports the one thing it does know - how
-            # old its own answer is. Keyed on the boolean, so it speaks once
-            # on the way out and once on the way back, not every frame.
-            _src_stale = watcher.stale(est["t"])
-            _src_age = watcher.age_s(est["t"])
-            notifier.event(
-                "source_age", _src_stale,
-                (f"GPS_PRIMARY STALE {_src_age:.0f}s - source unconfirmed"[:50]
-                 if _src_stale else "GPS_PRIMARY live"),
-                Notifier.SEV_WARN if _src_stale else Notifier.SEV_INFO)
 
             # The lidar's ZERO, announced on the radio while still on the
             # ground. ArduPilot will not declare the aircraft landed unless
@@ -2736,6 +2975,11 @@ def main():
                         (new_o[0] - node.origin[0]) * node.mlon))
                     node.set_origin(*new_o, sigma_m=new_sigma)
                     node.fuser.reset_displacement()
+                    # Same reason as the handover below: the origin moved, so
+                    # anything measured from the old one is meaningless, and
+                    # that includes the velocity the bridge had integrated
+                    # while the aircraft sat on the ground before arming.
+                    node.vel.reset_state("origin re-taken at arm")
                     print(f"ARM: origin re-taken from {why_o}: "
                           f"{new_o[1]:.6f}, {new_o[0]:.6f} "
                           f"(moved {moved:.0f} m, origin known to "
@@ -2798,6 +3042,21 @@ def main():
                     carried = float(np.hypot(*node.fuser.pos))
                     node.set_origin(*f["gps"], sigma_m=f.get("gps1_hacc"))
                     node.fuser.reset_displacement()
+                    # AND THE VELOCITY, at the pilot's instruction, 23 Oct:
+                    # nothing from before the switch crosses it. Where the GPS
+                    # is, that is where the VPS starts.
+                    #
+                    # reset_displacement above has always zeroed the POSITION
+                    # and the variance - measured over ten switches on flight
+                    # 00000233, displacement went from up to 74.5 m down to
+                    # 0.4-2.0 m every time. The bridge was the half nobody
+                    # reset, because it had no reset to call: the integrated
+                    # velocity, the learned bias, the last flow and accel
+                    # samples, the slew reference and every timer ran
+                    # continuously from node start, through however long the
+                    # aircraft sat on GPS, and straight into the first
+                    # GPS_INPUT packet after the switch.
+                    node.vel.reset_state("handover to VPS")
                     print(f"HANDOVER to VPS in flight: origin re-taken from the "
                           f"FC's own position {f['gps'][1]:.6f}, {f['gps'][0]:.6f} "
                           f"(origin moved {moved:.1f} m, {carried:.1f} m of VIO "

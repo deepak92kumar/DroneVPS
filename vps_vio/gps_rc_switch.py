@@ -354,18 +354,31 @@ class RcGpsSwitch:
             # let the pilot switch back to the receiver, so there was no way
             # out from the transmitter. The switch is the pilot's control and
             # it answers while flying.
-            if want == 1 and self.require_fix:
-                # Either proof will do. A GPS2 fix means the node is already
-                # injecting and the aircraft can see it. The liveness file
-                # means the node is alive and tracking even though it is
-                # deliberately silent toward the FC while we sit on the
-                # receiver. Requiring the FIRST alone is the deadlock.
+            # THE REFUSAL THAT USED TO BE HERE IS GONE, 23 Oct, at the
+            # pilot's instruction. SWITCH MEANS SWITCH.
+            #
+            # It read: if the pilot asks for the VPS and vps_healthy() says
+            # the node is dead, say "VPS REFUSED" and stay on the receiver.
+            # On flight 00000234 that fired over and over while the node
+            # crash-looped, and the aircraft stayed on GPS1 through all of it.
+            #
+            # The pilot's rule, in their words: "agar aisa ho tho alt hold,
+            # gps kabhi nahi - samjo gps physically nikal gaya hai, jab tak
+            # switch na ho tab tak no gps." If the VPS is asked for and the
+            # VPS is dead, the aircraft gets no position and the EKF drops it
+            # into ALT_HOLD. That is the correct outcome and it is the pilot's
+            # to choose. Quietly leaving it on a receiver it was not asked to
+            # fly is not a safe default - it is the system deciding to use
+            # GNSS on an aircraft that exists to fly without it, and under
+            # spoofing the receiver is the attack, not the refuge.
+            #
+            # vps_healthy() is KEPT and still reported, because knowing the
+            # node is dead is worth saying. It no longer decides.
+            if want == 1:
                 ok, why = self.vps_healthy()
                 if not ok and self.gps2_fix < 3:
-                    self.say(f"VPS REFUSED: {why}"[:50])
+                    self.say(f"VPS DEAD: {why} - switching anyway"[:50])
                     self.refusals += 1
-                    self.stable = 0
-                    continue
 
             if not already:
                 self.switches += 1

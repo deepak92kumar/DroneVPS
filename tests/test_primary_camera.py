@@ -68,9 +68,20 @@ for fn in PER_SOCKET:
     calls = re.findall(re.escape(fn) + r"\(\s*([^,)]+)", src)
     for a in calls:
         print(f"        {fn:28s} <- {a.strip()}")
-    check(f"{fn} is given the primary", bool(calls) and all(
-        "PRIMARY_SOCKET_NAME" in a for a in calls),
-        ", ".join(a.strip() for a in calls) or "no call found")
+    # 23 Oct: a per-socket call may now name EITHER socket, because the
+    # partner camera got its own tracker and must be given its OWN
+    # intrinsics and distortion - CAM_B reads cx 624.89 / k1 24.09 against
+    # CAM_C's 644.13 / 26.05, and feeding the primary's to both would put
+    # the primary's distortion error into the very average that exists to
+    # cancel it. What must never happen is a call with a HARD-CODED socket,
+    # which is what this file was written to catch.
+    named = [a for a in calls
+             if "PRIMARY_SOCKET_NAME" in a or "STEREO_PARTNER_NAME" in a]
+    check(f"{fn} is given a socket by NAME, never hard-coded",
+          bool(calls) and len(named) == len(calls),
+          ", ".join(a.strip() for a in calls) or "no call found")
+    check(f"{fn} is given the primary at least once",
+          any("PRIMARY_SOCKET_NAME" in a for a in calls))
 
 # Stereo's eyes are keyed to the socket NAME, not to the primary/partner role.
 left = re.search(r'by_socket\[\s*"(\w+)"\s*\]\.out\.link\(\s*st\.left\s*\)', src)

@@ -106,32 +106,12 @@ class MapFuser:
                  # so what is declared here is knowingly optimistic. That is
                  # recorded rather than hidden.
                  flow_noise_rate_m_per_sqrt_s: float = 0.25,
-                 # 23 OCT, EVENING: BACK TO 20, AND THE MORNING'S 8 WAS MEASURED AGAINST
-                 # THE WRONG TRUTH.
-                 #
-                 # The sweep that produced 8 scored the position against the MAP FIXES'
-                 # own lat/lon. The pilot said that was marking our own homework and was
-                 # right. The only independent truth is GPS_RAW_INT, the receiver before
-                 # the EKF touches it, which the recorder carries as gps1_north_m /
-                 # gps1_east_m. The column used instead - gps_north_m - is
-                 # GLOBAL_POSITION_INT, the EKF's own fused position, and while the
-                 # aircraft is on the VPS that is driven by what WE inject. The two agree
-                 # to 0.10 m on GPS1 and differ by 5.59 m p50 on the VPS, which is exactly
-                 # the window the conclusion was drawn from.
-                 #
-                 # Scored against gps1, VPS rows only (the error north_m - gps1_north_m is
-                 # origin-invariant, so a handover re-taking the origin does not disturb
-                 # it and nothing needs masking):
-                 #
-                 #                       2 s / sigma 20      1 s / sigma 8
-                 #     all VPS rows         1.35 m              5.33 m
-                 #     above 100 m          2.76 m             11.16 m
-                 #     declared vs real     0.92x               3.72x
-                 #
-                 # 683 and 684 rows above 100 m, so the samples are comparable. Tuning
-                 # the filter to agree with the map moved it four times further from the
-                 # receiver. More fixes, pulled harder, towards a map whose own error is
-                 # 6-20 m: that is what the numbers above are.
+                 # 20, not 30. The 9 Oct report settled it with the fix's own
+                 # lat/lon logged for the first time: "the map's median error
+                 # is 20.0 m against our own 6.6 m ... The code's
+                 # fix_sigma_m = 20 was already right." 30 came back with the
+                 # rebuild and makes the filter trust every fix less than the
+                 # measurement says it should.
                  fix_sigma_m: float = 20.0,
                  gate_sigmas: float = 3.0,
                  max_sigma_m: float = 400.0,
@@ -179,21 +159,12 @@ class MapFuser:
                  max_correction_m: float = 0.5):
         """Defaults are swept on the 27 Sep flight, not assumed.
 
-        fix_sigma_m is a WEIGHT, not a statement of how good a fix is. It
-        says how hard the filter pulls towards the map against the flow, and
-        it is the map's own median error - 20 m - because over a few hundred
-        metres the flow is the better of the two sources and the growing
-        variance hands authority to the map on a long mission by itself.
-
-        It was lowered to 8 on the morning of 23 Oct and put back the same
-        evening. Both the lowering and the reversal were measured; the
-        difference was WHAT THEY WERE MEASURED AGAINST, and the comment above
-        has the numbers. Anything that proposes moving this again should say
-        which truth it used first.
-
-        What the flight controller is told about absolute position is a
-        separate number - live_node.ORIGIN_UNKNOWN_SIGMA_M - and that split
-        is kept. It was never the problem; one constant doing two jobs was."""
+        fix_sigma_m is deliberately larger than the fixes actually are (they
+        come in at a median 11.4 m): over a few hundred metres the flow is the
+        better of the two sources, so the filter should lean on it and let the
+        map correct slowly. On a long mission, where flow drift grows past the
+        map's error, the same setting hands authority to the map on its own -
+        that is what the growing variance is for."""
         # The most one map fix may move the estimate, metres. At the pilot's
         # instruction, 20 Oct. The Kalman gain already shrinks a correction,
         # but it shrinks it in PROPORTION - a fix 40 m out still moves the

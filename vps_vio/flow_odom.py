@@ -197,12 +197,37 @@ def gyro_shift_px(d_roll_deg: float, d_pitch_deg: float,
     is bounded, buys nothing - it is logged beside this for comparison and not
     used.
     """
-    # The MAGNITUDE is the 3 Oct report's; the SIGN is whatever TiltValidator
-    # measured at run time. Hard-coding the sign is the mistake that ran the
-    # aircraft away on 21 Oct, so the constants carry magnitude only and the
-    # caller supplies what it has verified.
-    return np.array([abs(GYRO_PX_PER_DEG_ROLL_X) * float(sign_roll) * float(d_roll_deg),
-                     abs(GYRO_PX_PER_DEG_PITCH_Y) * float(sign_pitch) * float(d_pitch_deg)])
+    # MAGNITUDE AND SIGN BOTH COME FROM THE CONSTANTS NOW, 23 Oct, at the
+    # pilot's instruction. sign_roll / sign_pitch stay as multipliers so a
+    # caller can still invert, but the default is "as measured".
+    #
+    # It used to be abs(constant) * sign, with the sign supplied by
+    # TiltValidator at run time. That is being undone for two reasons.
+    #
+    # FIRST, IT CHANGES NOTHING in the case that matters, and that is worth
+    # knowing: abs(-14.80) * -1 is -14.80, and log 00000224 adopted the gyro
+    # with sign -1 on both axes. So the flight that came out 176 degrees from
+    # truth was already using exactly these numbers. Whatever ran the aircraft
+    # away, it was not this.
+    #
+    # SECOND, AND THE REASON TO DO IT ANYWAY: TiltValidator picks its sign by
+    # matching the gyro's ROTATION against the FC's, and this file already
+    # records that this is the wrong criterion - "Validating that a source
+    # measures the same ROTATION does not establish that derotating with it
+    # gives the right TRANSLATION, which is the only thing that matters."
+    # Leaving the sign to be re-derived in flight from a criterion we have
+    # written down as wrong means the shift can silently invert between
+    # flights. The constants' sign is measured and it is in the file where it
+    # can be read: r = -0.994 to -0.998 and scale -0.983 to -1.008 on both
+    # axes across three flights, 20-21 Oct. The camera gyro tracks the
+    # aircraft to one or two percent and points the other way, and that is
+    # what the minus signs are.
+    #
+    # TiltValidator still GATES the gyro - whether it may be used at all -
+    # which is a question about the sensor being alive and sane, and it
+    # answers that well.
+    return np.array([GYRO_PX_PER_DEG_ROLL_X * float(sign_roll) * float(d_roll_deg),
+                     GYRO_PX_PER_DEG_PITCH_Y * float(sign_pitch) * float(d_pitch_deg)])
 
 
 def attitude_shift_px(att_prev, att_cur) -> np.ndarray:

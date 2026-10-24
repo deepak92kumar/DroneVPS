@@ -81,25 +81,43 @@ check("roll sits about 7% above theory, as the report says",
 # attitude and applied by the caller - see tests/test_tilt_validator.py, which
 # covers adoption, refusal, the learned sign and dropping a source that goes
 # bad. What this file still pins is the MAGNITUDE and the fallback order.
-print("\nthe magnitude is the report's, and the sign is somebody else's job")
-check("gyro_shift_px takes the sign as an argument",
-      "sign_roll: float = 1.0" in
-      open(os.path.join(HERE, "vps_vio", "flow_odom.py")).read(),
-      "hard-coding it is what ran the aircraft away on 21 Oct")
-check("the constants carry magnitude only",
-      "abs(GYRO_PX_PER_DEG_ROLL_X)" in
-      open(os.path.join(HERE, "vps_vio", "flow_odom.py")).read())
+# 23 OCT: THE SIGN COMES FROM THE CONSTANTS AGAIN, at the pilot's instruction.
+#
+# It was abs(constant) * sign with the sign measured in flight by
+# TiltValidator. Two things settle the change. It is a NO-OP in the case that
+# matters - abs(-14.80) * -1 is -14.80, and log 00000224 adopted sign -1 on
+# both axes, so the flight that came out 176 degrees from truth was already
+# using exactly these numbers. And TiltValidator picks its sign by matching
+# ROTATION, which this file already records as the wrong criterion, so leaving
+# it there means the shift can silently invert between flights.
+#
+# TiltValidator still gates WHETHER the gyro is used. It no longer decides
+# which way the shift points.
+print("\nthe magnitude AND the sign are the report's")
+_fo = open(os.path.join(HERE, "vps_vio", "flow_odom.py")).read()
+check("the sign is still a multiplier a caller may invert",
+      "sign_roll: float = 1.0" in _fo)
+check("but the constants carry their own sign now",
+      "abs(GYRO_PX_PER_DEG_ROLL_X)" not in _fo
+      and "GYRO_PX_PER_DEG_ROLL_X * float(sign_roll)" in _fo,
+      "measured r = -0.994 to -0.998 over three flights: the camera gyro "
+      "tracks the aircraft to one or two percent and points the other way")
+bad = []
 for deg in (0.1, 0.5, 1.0, 5.0):
-    r = gyro_shift_px(deg, 0.0, +1.0, +1.0)
-    p_ = gyro_shift_px(0.0, deg, +1.0, +1.0)
-    if abs(r[0] - 14.80 * deg) > 1e-9 or r[1] != 0.0:
-        check(f"roll {deg} deg", False, str(r))
-    if abs(p_[1] - 13.82 * deg) > 1e-9 or p_[0] != 0.0:
-        check(f"pitch {deg} deg", False, str(p_))
-check("roll scales at 14.80 px/deg and pitch at 13.82, axes independent", True,
-      "0.1 to 5 deg")
+    r = gyro_shift_px(deg, 0.0)
+    p_ = gyro_shift_px(0.0, deg)
+    if abs(r[0] + 14.80 * deg) > 1e-9 or r[1] != 0.0:
+        bad.append(f"roll {deg}: {r}")
+    if abs(p_[1] + 13.82 * deg) > 1e-9 or p_[0] != 0.0:
+        bad.append(f"pitch {deg}: {p_}")
+check("roll scales at -14.80 px/deg and pitch at -13.82, axes independent",
+      not bad, "; ".join(bad) if bad else "0.1 to 5 deg, sign included")
+check("a caller can still invert it",
+      abs(gyro_shift_px(1.0, 0.0, -1.0, -1.0)[0] - 14.80) < 1e-9,
+      "sign_roll -1 gives +14.80, which is what the old abs() form produced "
+      "with sign +1")
 check("zero rotation is zero shift",
-      tuple(gyro_shift_px(0.0, 0.0, 1.0, 1.0)) == (0.0, 0.0))
+      tuple(gyro_shift_px(0.0, 0.0)) == (0.0, 0.0))
 
 print("\nthe 30 Sep case the FC path cannot avoid")
 stale = attitude_shift_px((0.0, 0.0, 0.0), (4.67, 11.82, 0.0))
@@ -138,29 +156,49 @@ print("\nthe wiring")
 # error grew 1.1 -> 22.3 m in ten seconds. Validating that a source measures
 # the same ROTATION does not establish that derotating with it gives the right
 # TRANSLATION, which is the only thing that matters.
-check("the default is the FC path", 'derotate: str = "fc"' in src,
-      "auto is offline-only until it is scored on translation direction")
+# 23 OCT: THE DEFAULT IS "auto" AGAIN, AT THE PILOT'S INSTRUCTION, AND THIS
+# CHECK NOW PINS THAT INSTEAD. Everything above stays, because it is what the
+# two runaways measured and it has not been disproved.
+#
+# What changed is the other side of the comparison. Pinning this to "fc" was
+# understood as "derotate with the FC"; flight 00000235 shows it means NO
+# DEROTATION AT ALL. derot_src was 'fc' on all 15019 frames and the FC's own
+# per-frame delta measured 0.000, while the camera gyro saw 0.065 deg of roll
+# and 0.120 of pitch per frame. flow_odom's own comment says the FC arrives at
+# 4 Hz against a 30 Hz loop so 88% of frames get no rotation, and that FC
+# derotation measured WORSE than none.
+#
+# So the real choice is between no derotation and a gyro path that pointed the
+# velocity 160 and 176 degrees from truth on two flights. The pilot has chosen
+# to fly the gyro and judge it in the air. The 180-degree signature is the
+# thing to look at: that is a SIGN, not noise, and TiltValidator picks its sign
+# by matching ROTATION against the FC, which the comment above already says is
+# the wrong criterion - translation direction is.
+check("the default is the gyro path, at the pilot's instruction",
+      'derotate: str = "auto"' in src,
+      "flown twice and ran away both times; kept here so the next reader "
+      "sees that this is a deliberate flight test, not an oversight")
 check("and there is no way to force an unverified source",
       'choices=("auto", "fc")' in src,
       "forcing the gyro on a static measurement is what ran it away")
 check("the gyro path is taken only when it has been verified",
       'self.val_gyro.ok' in src and 'gd_r is not None and gd_p is not None' in src)
 check("the FC is LAST, below the fused orientation",
-      src.index("d = d - gyro_shift_px(gd_r, gd_p,")
-      < src.index("d = d - gyro_shift_px(qd_r, qd_p,")
+      src.index("d = d - gyro_shift_px(gd_r, gd_p)")
+      < src.index("d = d - gyro_shift_px(qd_r, qd_p)")
       < src.index("d = d - attitude_shift_px(self.prev_att, att)"),
       "gyro, then GAME_ROTATION_VECTOR, then the FC - which measured worse "
       "than no derotation at all, so it must not be the first fallback")
 check("the fused orientation goes through the same function",
-      "gyro_shift_px(qd_r, qd_p," in src,
-      "same quantity, same camera frame, same degrees as the gyro integral - "
-      "and its own measured sign")
+      "gyro_shift_px(qd_r, qd_p)" in src,
+      "same quantity, same camera frame, same degrees as the gyro integral, "
+      "and now the same constants' sign")
 check("which source ran is written on every row", '"derot_src"' in src)
 check("and the two independent sources' disagreement with it",
       '"derot_dis_roll"' in src,
       "this is what says whether GRV belongs above or below the FC")
 check("both are SUBTRACTED, so there is one place to get it wrong",
-      "d = d - gyro_shift_px(gd_r, gd_p," in src)
+      "d = d - gyro_shift_px(gd_r, gd_p)" in src)
 check("which source ran is counted",
       "self.n_derot_gyro += 1" in src and "self.n_derot_fc += 1" in src)
 check("and reported at the end of a run",

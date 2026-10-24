@@ -141,8 +141,13 @@ check("the same rotation moves opposite ways under opposite signs",
 check("the magnitude is the report's 14.80 either way",
       abs(abs(a[0]) - 14.80) < 1e-9 and abs(abs(b[0]) - 14.80) < 1e-9,
       "3 Oct, 15 flights, 39723 samples")
+# The constants carry their own sign from 23 Oct, so "+1" now means "as
+# measured" (negative) rather than "positive". The property being pinned is
+# unchanged: the two axes do not contaminate each other.
 check("pitch is independent of roll's sign",
-      gyro_shift_px(0.0, 1.0, -1.0, +1.0)[1] > 0)
+      abs(gyro_shift_px(0.0, 1.0, -1.0, +1.0)[1]
+          - gyro_shift_px(0.0, 1.0, +1.0, +1.0)[1]) < 1e-9,
+      "flipping roll's sign must not move pitch")
 
 # ------------------------------------------------- the wiring
 
@@ -151,9 +156,24 @@ src = open(os.path.join(HERE, "vps_vio", "live_node.py")).read()
 check("both candidates are judged against the FC",
       "self.val_gyro.update(gd_r, gd_p, fc_r, fc_p, dt_v)" in src
       and "self.val_quat.update(qd_r, qd_p, fc_r, fc_p, dt_v)" in src)
-check("the gyro is used only once verified",
-      "self.val_gyro.ok" in src and "gyro_shift_px(gd_r, gd_p," in src)
-check("GAME_ROTATION_VECTOR likewise", "self.val_quat.ok" in src)
+# 23 OCT, AT THE PILOT'S INSTRUCTION: the validator no longer withholds the
+# gyro. It could never adopt when it mattered - it needs fifteen 0.4 s windows
+# with real rotation in them, so on the ground it never adopts at all
+# (measured: vps_00130, 1139 of 1142 frames on 'fc' sitting still) and the
+# first forty seconds of every flight ran on the FC path, which delivers
+# 0.000 deg on 88% of frames and measured worse than no derotation.
+#
+# It still RUNS and still reports, which is what the next two checks pin. What
+# it no longer does is gate.
+check("the validator still judges the gyro against the FC",
+      "self.val_gyro.update(gd_r, gd_p, fc_r, fc_p, dt_v)" in src)
+check("but it no longer gates the gyro",
+      "self.val_gyro.ok\n" not in src.replace("self.val_gyro.ok ", "self.val_gyro.ok\n")
+      or "and gd_r is not None and gd_p is not None):" in src,
+      "the gyro is used whenever it reported; the FC is the fallback for when "
+      "it did not")
+check("GAME_ROTATION_VECTOR sits between them",
+      "gyro_shift_px(qd_r, qd_p)" in src)
 check("the FC is the fallback", "d = d - attitude_shift_px(self.prev_att, att)" in src)
 check("there is NO way to force an unverified source",
       'choices=("auto", "fc")' in src,

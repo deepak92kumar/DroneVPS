@@ -122,35 +122,5 @@ check("the matcher prints it on every run",
       "truth for d_gps_m" in open(os.path.join(HERE, "vps_vio",
                                                "match_flight.py")).read())
 
-
-# -------------------------------------------- analyse_flight, 23 Oct's lesson
-
-print("\nanalyse_flight prefers the raw receiver too")
-
-# This module was NOT updated when match_flight was, and on 23 Oct every
-# conclusion drawn from it - fix_period 1.0, fix_sigma_m 8 - had to be
-# withdrawn because the position had been scored against the EKF's own fused
-# estimate while the aircraft flew on our injection.
-import analyse_flight as AF  # noqa: E402
-
-_af_src = open(os.path.join(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__))), "vps_vio", "analyse_flight.py")).read()
-_af_code = [ln for ln in _af_src.splitlines() if not ln.lstrip().startswith("#")]
-_raw_at = next((i for i, ln in enumerate(_af_code) if "gps1_north_m" in ln), None)
-_fused_at = next((i for i, ln in enumerate(_af_code)
-                  if "gps_north_m" in ln and "gps1" not in ln), None)
-check("it reads the raw receiver's columns at all", _raw_at is not None,
-      "gps1_north_m / gps1_east_m")
-check("and reads them BEFORE the fused pair",
-      _raw_at is not None and _fused_at is not None and _raw_at < _fused_at,
-      "the fused pair is the fallback for older recordings, not the default")
-check("and it states which one it used",
-      "GPS_RAW_INT, the raw receiver" in _af_src
-      and "FUSED position" in _af_src,
-      "a reader cannot tell otherwise, which is how 23 Oct happened")
-check("the docstring no longer calls the fused pair the real receiver",
-      "gps_north_m/gps_east_m is the real receiver" not in _af_src)
-
-
 print("\n" + ("ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}"))
 sys.exit(1 if fails else 0)

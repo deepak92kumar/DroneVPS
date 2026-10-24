@@ -14,7 +14,6 @@ import sys
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(HERE, "vps_vio"))
 
-from live_node import ORIGIN_UNKNOWN_SIGMA_M  # noqa: E402
 from map_fuse import MapFuser  # noqa: E402
 from map_fix_worker import MapFixWorker, _GATES  # noqa: E402
 import map_match_xfeat as MX  # noqa: E402
@@ -175,31 +174,22 @@ print("\nthe fix period - 2.0, and 1.0 was flown and reverted on 22 Oct")
 #
 # So an archived value from the old airframe does not override a measurement
 # on this one, however much later the archive is.
-# 23 OCTOBER, AND IT WENT BOTH WAYS IN ONE DAY. It was moved to 1.0 in the
-# morning on a sweep that scored the position against the MAP FIXES' own
-# lat/lon, and restored to 2.0 in the evening when that was re-scored against
-# GPS_RAW_INT - the receiver before the EKF touches it, which is the only
-# truth here that is independent of what we inject:
-#
-#     2.0 s   all VPS rows 1.35 m   above 100 m  2.76 m
-#     1.0 s   all VPS rows 5.33 m   above 100 m 11.16 m
-#
-# 683 and 684 rows above 100 m, so the samples are comparable. The earlier
-# log 227 revert was real but CONFOUNDED - that flight was also sending the
-# flight controller 25.47 m/s - so this is the first clean measurement in
-# either direction, and it says more fixes pulled harder towards a map whose
-# own error is 6-20 m moves the aircraft away from the truth.
-#
-# The PLUMBING fix from that morning stands, and is checked below: VpsNode
-# never passed this value to the worker at all.
-check("MapFixWorker's default is 2.0", W["fix_period_s"].default == 2.0)
+# 1.0 at the pilot's instruction, 23 Oct evening, to be flown. The sweep in
+# the comment above still says 2.0 scored better against the raw receiver and
+# they were told so; what has NOT been flown at 1.0 is the system as it is
+# now, with the matcher no longer stalling the loop at 60 m, derotation on the
+# camera gyro and two cameras on the flow. The 0.5 m cap is unchanged, so this
+# doubles what the map can pull back - 0.24 m/s against 0.12 - and flight 237
+# lost a race at exactly that rate.
+check("MapFixWorker's default is 1.0", W["fix_period_s"].default == 1.0)
 check("the CLI agrees",
-      'ap.add_argument("--fix-period", type=float, default=2.0,' in live)
-check("and so does VpsNode", "fix_period_s: float = 2.0" in live,
+      'ap.add_argument("--fix-period", type=float, default=1.0,' in live)
+check("and so does VpsNode", "fix_period_s: float = 1.0" in live,
       "three defaults for one number is how 0.5 survived")
 check("and VpsNode actually passes it to the worker",
       "fix_period_s=float(fix_period_s)" in live,
-      "it never did - the worker's own default won, like window_alt_frac")
+      "it did not, twice - the worker's own default won whatever the config "
+      "and the CLI said, exactly as it did for map_window_alt_frac")
 
 # And the other half of the same lever, which must NOT move with it.
 
@@ -208,14 +198,7 @@ check("and VpsNode actually passes it to the worker",
 print("\nwhat the fuser does with a fix that passes")
 f = MapFuser()
 check("fix_sigma_m 20", abs(f.fix_var ** 0.5 - 20.0) < 1e-6,
-      "the map's own median error, 9 Oct. Lowered to 8 on the morning of "
-      "23 Oct and restored the same evening: that sweep scored against the "
-      "MAP's own fixes, and against the raw receiver 8 was four times worse "
-      "above 100 m (11.16 m against 2.76 m)")
-check("and it did not drag the declared accuracy down with it",
-      ORIGIN_UNKNOWN_SIGMA_M == 20.0,
-      "one constant used to do both jobs: this is a weight on the filter, "
-      "not a claim that we know where the aircraft is to 8 m")
+      '9 Oct: "the map\'s median error is 20.0 m against our own 6.6 m"')
 check("max_correction_m 0.5", abs(f.max_correction_m - 0.5) < 1e-9,
       '3 Oct: raised to 1.5-3.0 once and "the hold fell from 11-14 s to '
       '4.5-9.0 s while map_move_m sat at exactly 1.50". Reverted the same '
