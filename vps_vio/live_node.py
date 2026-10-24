@@ -472,6 +472,26 @@ class LiveSource:
         # skipped by the newest-frame logic and 9.7% of loop iterations ran
         # past 60 ms, while the pixel shift always spans frame to frame.
         #
+        # THAT REASONING WAS WRONG AND FLIGHT 242 DISPROVED IT THE SAME DAY.
+        # gyro_drain_* was logged beside gyro_d_* exactly so one flight could
+        # say, and on all 6400 VPS frames the two are BIT-IDENTICAL - max
+        # absolute difference 0.000000 deg. The drain window already WAS the
+        # frame window: the loop blocks on q.get() for a frame and only then
+        # drains q_imu, and the IMU queue sits behind the frame, so every
+        # sample drained already fell inside (prev_frame_ts, frame_ts]. The
+        # frame skips do not break that either - a skipped frame moves both
+        # ends by the same amount.
+        #
+        # So this code is a no-op on this hardware's timing. It is kept
+        # because it is the correct thing to integrate over and it stops
+        # depending on the queue staying behind, but it buys nothing today
+        # and the residual is NOT a window offset. What flight 242 measured
+        # instead: a = 0.243 all rows, 0.317 at 35-45 m, 0.162 above 70 m,
+        # against flight 240's 0.157 / 0.164 / 0.153 - so the rotation-
+        # proportional part is not even stable between flights, while the
+        # constant part b holds at 1.44-1.56 px across both. Whatever makes
+        # the phantom, it is still unexplained.
+        #
         # Samples are kept with their own device timestamps and weighted by
         # how much of each sample's interval falls inside the frame window,
         # so a sample straddling the boundary contributes its overlap rather
