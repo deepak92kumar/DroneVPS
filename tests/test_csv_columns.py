@@ -136,7 +136,7 @@ check("widths match", len(row) == len(CSV_COLUMNS),
 # because seven columns were once added to the ROW and not to the header, and
 # 1162 rows were written with everything past the 32nd attributed to the wrong
 # name. Adding a column here is meant to be a decision, not an accident.
-check("and there are the columns we expect", len(CSV_COLUMNS) == 76,
+check("and there are the columns we expect", len(CSV_COLUMNS) == 77,
       str(len(CSV_COLUMNS)))
 i = CSV_COLUMNS.index("fc_d_roll")
 check("the three derotation opinions sit together",

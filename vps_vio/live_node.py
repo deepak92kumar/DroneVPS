@@ -1178,6 +1178,12 @@ CSV_COLUMNS = ["t", "north_m", "east_m", "lon", "lat", "sigma_m",
     # configuration carried an 8.61 m east bias this code never had. Now the
     # fix's own position is in the log and the dependence is ours to measure.
     "fix_lon", "fix_lat", "fix_score", "fix_inliers", "fix_alt_m",
+    # How stale the fix was when it arrived - the matcher's own round trip.
+    # Until 24 Oct the correction was measured against the CURRENT position
+    # rather than the prior the matcher saw, so this interval was folded into
+    # every correction. It is logged now so the size of what was being folded
+    # in is visible rather than inferred. 24 Oct.
+    "fix_age_s",
     # THE STEP GATE'S INPUT. A refused step enters the position as zero and a
     # clipped one at the ceiling, so n_step_rej counts the bites but nothing
     # records what was bitten. 22 Oct.
@@ -1324,6 +1330,7 @@ def csv_row(est, f, v, gN, gE, err):
             "" if est.get("fix_score") is None else f"{est['fix_score']:.4f}",
             "" if est.get("fix_inliers") is None else f"{est['fix_inliers']:d}",
             "" if est.get("fix_alt_m") is None else f"{est['fix_alt_m']:.1f}",
+            "" if est.get("fix_age_s") is None else f"{est['fix_age_s']:.3f}",
             "" if est.get("step_px") is None else f"{est['step_px']:.2f}",
             est.get("step_action", ""),
             "" if est.get("step_dn") is None else f"{est['step_dn']:.4f}",
@@ -2602,10 +2609,19 @@ class VpsNode:
         res = self.worker.poll()
         fix_lon = fix_lat = fix_score = fix_alt = None
         fix_inl = None
+        fix_age = None
         if res is not None and res.ok:
             fN = (res.lat - self.origin[1]) * M_PER_DEG_LAT
             fE = (res.lon - self.origin[0]) * self.mlon
-            fix_used = self.fuser.update(fN, fE)
+            # The prior the matcher was actually handed, in the same frame.
+            # See MapFuser.update: the fix describes the moment the image was
+            # taken, not this one, and the fuser needs the pair to recover the
+            # offset the matcher determined rather than that offset minus
+            # however far the estimate has since travelled.
+            pN = (res.prior_lat - self.origin[1]) * M_PER_DEG_LAT
+            pE = (res.prior_lon - self.origin[0]) * self.mlon
+            fix_used = self.fuser.update(fN, fE, prior_north=pN, prior_east=pE)
+            fix_age = float(getattr(res, "age_s", 0.0) or 0.0)
             self.n_fix += 1
             # Where the MATCHER put us, before the fuser weighed and capped
             # it, and the height it was matched at. This is the raw number the
@@ -2620,6 +2636,7 @@ class VpsNode:
 
         lon, lat = self.to_lonlat(*self.fuser.pos)
         return dict(step_px=self.step_px, step_action=self.step_action,
+                    fix_age_s=fix_age,
                     # getattr, because the tests build VpsNode through
                     # __new__ and never run __init__ - the same reason the
                     # frame-age and veto counters are read this way.

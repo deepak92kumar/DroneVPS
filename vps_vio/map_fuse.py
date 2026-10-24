@@ -254,7 +254,9 @@ class MapFuser:
         return self.pos
 
     def update(self, fix_north: float, fix_east: float,
-               fix_sigma_m: float | None = None) -> bool:
+               fix_sigma_m: float | None = None,
+               prior_north: float | None = None,
+               prior_east: float | None = None) -> bool:
         """Fold in one map fix. Returns False if it was rejected as an outlier.
 
         The correction is capped at max_correction_m, so no single fix can
@@ -269,7 +271,27 @@ class MapFuser:
         filter has to concede that the fixes are probably right and it is
         probably lost.
         """
-        r = np.array([fix_north, fix_east], float) - self.pos
+        # THE RESIDUAL IS MEASURED AGAINST THE PRIOR THE MATCHER SAW, not
+        # against where we are now. The matcher is handed a position and an
+        # image, takes 0.098 s at 42 m and 0.319 s at 110 m to answer, and
+        # answers about THAT MOMENT. Subtracting it from the present position
+        # folds everything the estimate did in between into the correction.
+        #
+        # It is not a rounding error. Over 0.1-0.34 s at the 0.8-2.8 m/s this
+        # node reports, the estimate moves 0.3-0.95 m, against a correction
+        # that the Kalman gain holds to about 0.49 m - so the contamination is
+        # the same size as the correction itself, and it is drawn from the
+        # phantom velocity, which is the very thing the map is there to
+        # bound. FixResult has carried prior_lon/prior_lat since it was
+        # written, with a comment saying the caller should "apply it as a
+        # correction to that, not to 'now'". The caller never did.
+        #
+        # With the prior, r is the offset the matcher actually determined.
+        # Applying it to the present position is right because whatever the
+        # aircraft did since is already in that position by dead reckoning.
+        ref = (self.pos if prior_north is None or prior_east is None
+               else np.array([prior_north, prior_east], float))
+        r = np.array([fix_north, fix_east], float) - ref
         d = float(np.linalg.norm(r))
         self.last_residual_m = d
         fv = self.fix_var if fix_sigma_m is None else float(fix_sigma_m) ** 2
