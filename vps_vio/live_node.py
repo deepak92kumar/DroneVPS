@@ -453,6 +453,32 @@ class LiveSource:
         # before anything depends on it. Derotation still uses the FC.
         self._gyro_roll = self._gyro_pitch = 0.0
         self._gyro_n = 0
+        # THE GYRO IS INTEGRATED OVER THE FRAME'S OWN INTERVAL, not over
+        # whatever happened to be in the queue when the loop last drained it.
+        # Flight 240 measured what the old way cost: fitting the per-frame
+        # pixel displacement against the rotation derotation had just removed
+        # gives step_px = 0.157 x rotation_px + 1.48, so 16% of the rotation
+        # survived - a residual of 0.64 px that is the SAME at every height
+        # and becomes 0.75 m/s at 38 m and 2.19 m/s at 110 m, which is the
+        # hover phantom. corr(rotation, pixel error) was +0.870 while the
+        # pixel error itself was flat across altitude.
+        #
+        # The direction said which kind of error it was: cos(angle between
+        # the residual and the correction) came out +0.07 and -0.005, near
+        # zero, so it is not a sign or a gain error in GYRO_PX_PER_DEG - a
+        # wrong gain would leave the residual pointing along the correction.
+        # A WINDOW offset leaves exactly this: right magnitude, scattered
+        # direction. And the windows really did differ - 886 frames were
+        # skipped by the newest-frame logic and 9.7% of loop iterations ran
+        # past 60 ms, while the pixel shift always spans frame to frame.
+        #
+        # Samples are kept with their own device timestamps and weighted by
+        # how much of each sample's interval falls inside the frame window,
+        # so a sample straddling the boundary contributes its overlap rather
+        # than all or nothing. At ~170 Hz against 25 fps that is about seven
+        # samples a frame, where all-or-nothing would be a 14% quantisation.
+        self._gyro_buf: list[tuple] = []
+        self._ts_prev_frame = None
         self._accel_n = 0
         self._t_accel = None
         self._t_gyro = None
@@ -622,12 +648,43 @@ class LiveSource:
                         # FC attitude, so this pair is logged for comparison
                         # rather than flown on.
                         gx, gy, gz = self._to_cam(g.x, g.y, g.z)
+                        # The drain-window integral, kept only so a flight
+                        # can show what the change to frame-window
+                        # integration was worth. Nothing flies on it.
                         d_roll += np.degrees(gx) * dt
                         d_pitch += np.degrees(gy) * dt
                         self._gyro_n += 1
                         gyro.append((ts, gx, gy, gz))
+                        # (interval start, interval end, roll rate, pitch
+                        # rate) - the sample covers (ts - dt, ts].
+                        self._gyro_buf.append((ts - dt, ts,
+                                               np.degrees(gx), np.degrees(gy)))
                 self._t_gyro = ts
             pk = self.q_imu.tryGet()
+
+        # The frame window. ts is this frame's device timestamp and the gyro
+        # samples carry device timestamps from the same clock, so the two are
+        # directly comparable - that is the whole reason this is possible.
+        drain_roll, drain_pitch = d_roll, d_pitch
+        gyro_win_s = 0.0
+        if self._ts_prev_frame is not None and ts > self._ts_prev_frame:
+            w0, w1 = self._ts_prev_frame, ts
+            wr = wp = 0.0
+            for (a, b, r_rate, p_rate) in self._gyro_buf:
+                ov = min(b, w1) - max(a, w0)
+                if ov > 0.0:
+                    wr += r_rate * ov
+                    wp += p_rate * ov
+                    gyro_win_s += ov
+            d_roll, d_pitch = wr, wp
+            # Keep only what the NEXT frame can still need. A sample wholly
+            # before this window is spent; one that reaches past w1 is not.
+            self._gyro_buf = [g for g in self._gyro_buf if g[1] > w1]
+        else:
+            # No previous frame to bound the window: the drain integral is
+            # all there is, and the buffer is spent.
+            self._gyro_buf = []
+        self._ts_prev_frame = ts
 
         depth = None
         if self.q_depth is not None:
@@ -693,6 +750,9 @@ class LiveSource:
                         alt=None, yaw=None, roll=None,
                         pitch=None, gps=None, depth=depth, rngfnd=s.get("rngfnd"),
                         gyro_d_roll=d_roll, gyro_d_pitch=d_pitch,
+                        gyro_drain_roll=drain_roll,
+                        gyro_drain_pitch=drain_pitch,
+                        gyro_win_s=gyro_win_s,
                         gyro_n=self._gyro_n,
                         quat_d_roll=q_roll, quat_d_pitch=q_pitch,
                         quat=quat, quat_n=self._quat_n,
@@ -730,6 +790,9 @@ class LiveSource:
                               if s.get("gps1_lat") not in (None, 0.0) else None),
                     roll=s["roll"], pitch=s["pitch"], gps=gps, depth=depth,
                     gyro_d_roll=d_roll, gyro_d_pitch=d_pitch,
+                        gyro_drain_roll=drain_roll,
+                        gyro_drain_pitch=drain_pitch,
+                        gyro_win_s=gyro_win_s,
                     gyro_n=self._gyro_n,
                     quat_d_roll=q_roll, quat_d_pitch=q_pitch,
                     quat=quat, quat_n=self._quat_n,
@@ -1123,6 +1186,13 @@ CSV_COLUMNS = ["t", "north_m", "east_m", "lon", "lat", "sigma_m",
     # the gyro - sign flipped - took the sent-velocity error from p95 3.58 to
     # 1.22 m/s. This column is what tests the same claim for the fused source.
     "quat_d_roll", "quat_d_pitch", "quat_n",
+    # The SAME gyro integrated the old way - over whatever the loop's last
+    # drain happened to hold - and the length of the window the new way
+    # actually covered. Side by side so one flight measures what moving to
+    # the frame's own interval was worth, rather than this comment asserting
+    # it. gyro_win_s should track the frame interval; where it does not, the
+    # IMU queue did not carry the whole span. 24 Oct.
+    "gyro_drain_roll", "gyro_drain_pitch", "gyro_win_s",
     # Which of the three actually derotated this frame, and - where both the
     # gyro and the fused orientation were present - how far they disagreed.
     # The disagreement is the measurement that says whether
@@ -1247,6 +1317,9 @@ def csv_row(est, f, v, gN, gE, err):
             "" if est.get("quat_d_roll") is None else f"{est['quat_d_roll']:.4f}",
             "" if est.get("quat_d_pitch") is None else f"{est['quat_d_pitch']:.4f}",
             est.get("quat_n") or 0,
+            "" if est.get("gyro_drain_roll") is None else f"{est['gyro_drain_roll']:.4f}",
+            "" if est.get("gyro_drain_pitch") is None else f"{est['gyro_drain_pitch']:.4f}",
+            "" if est.get("gyro_win_s") is None else f"{est['gyro_win_s']:.4f}",
             est.get("derot_src") or "",
             "" if est.get("derot_dis_roll") is None else f"{est['derot_dis_roll']:.4f}",
             "" if est.get("derot_dis_pitch") is None else f"{est['derot_dis_pitch']:.4f}",
@@ -2549,6 +2622,9 @@ class VpsNode:
                     fc_d_roll=fc_dr, fc_d_pitch=fc_dp,
                     gyro_d_roll=f.get("gyro_d_roll"),
                     gyro_d_pitch=f.get("gyro_d_pitch"),
+                    gyro_drain_roll=f.get("gyro_drain_roll"),
+                    gyro_drain_pitch=f.get("gyro_drain_pitch"),
+                    gyro_win_s=f.get("gyro_win_s"),
                     quat_d_roll=f.get("quat_d_roll"),
                     quat_d_pitch=f.get("quat_d_pitch"),
                     quat_n=f.get("quat_n"),

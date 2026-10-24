@@ -54,6 +54,26 @@ def est(**kw):
 
 print("the header and a full row are the same width")
 row = csv_row(est(), dict(rngfnd=0.26, alt_amsl=300.7), Vel(), 1.0, 2.0, 0.5)
+# Added 24 Oct, after three columns went into the header after quat_n and
+# into csv_row after gyro_d_roll. The widths still matched, so the check
+# below passed while every value from gyro_d_pitch onward was written under
+# the wrong heading. Equal length is not alignment. Each field here gets a
+# value unlike all the others, and is then looked for under its own column.
+_sent = dict(fc_d_roll=0.1111, fc_d_pitch=0.2222, gyro_d_roll=0.3333,
+             gyro_d_pitch=0.4444, gyro_n=55, quat_d_roll=0.6666,
+             quat_d_pitch=0.7777, quat_n=88, gyro_drain_roll=0.9999,
+             gyro_drain_pitch=1.1111, gyro_win_s=0.0404)
+_row = csv_row(est(**_sent), dict(rngfnd=0.26, alt_amsl=300.7), Vel(), 1.0, 2.0, 0.5)
+_bad = []
+for _c, _want in _sent.items():
+    _got = _row[CSV_COLUMNS.index(_c)]
+    _ok = (str(_got) == str(_want) if isinstance(_want, int)
+           else abs(float(_got) - _want) < 1e-6 if _got else False)
+    if not _ok:
+        _bad.append(f"{_c}: wanted {_want}, column holds {_got!r}")
+check("each derotation value lands under its own heading", not _bad,
+      "; ".join(_bad) if _bad else f"{len(_sent)} fields, all aligned")
+
 check("widths match", len(row) == len(CSV_COLUMNS),
       f"header {len(CSV_COLUMNS)}, row {len(row)}")
 # 39 until 20 Oct, when frame_file was added: live_node now saves camera
@@ -116,7 +136,7 @@ check("widths match", len(row) == len(CSV_COLUMNS),
 # because seven columns were once added to the ROW and not to the header, and
 # 1162 rows were written with everything past the 32nd attributed to the wrong
 # name. Adding a column here is meant to be a decision, not an accident.
-check("and there are the columns we expect", len(CSV_COLUMNS) == 73,
+check("and there are the columns we expect", len(CSV_COLUMNS) == 76,
       str(len(CSV_COLUMNS)))
 i = CSV_COLUMNS.index("fc_d_roll")
 check("the three derotation opinions sit together",
