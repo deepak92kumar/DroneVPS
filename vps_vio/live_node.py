@@ -430,6 +430,16 @@ class LiveSource:
         # Both are reported, because "dual flow is on" and "dual flow is
         # working" are different claims.
         self._partner_n = self._partner_skew = 0
+        # How many queued frames were thrown away as stale, and how old the
+        # frame the loop actually used was. Both are reported, because "we
+        # take the newest" and "the newest is fresh" are different claims.
+        self._frames_skipped = 0
+        self._frame_age_s = 0.0
+        # Anchor for turning the camera's device clock into an age. Set on
+        # the first frame; only the DIFFERENCE is ever used, so the two
+        # clocks never have to agree about absolute time.
+        self._dev_t0 = None
+        self._dev_ts0 = None
         self._partner_last = None
         # Non-blocking and shallow on purpose: a depth frame that is late is
         # dropped rather than delaying the mono frame the flow loop runs on.
@@ -493,7 +503,39 @@ class LiveSource:
         return img if self.crop_left <= 0 else img[:, self.crop_left:]
 
     def read(self):
+        # THE NEWEST FRAME, NOT THE OLDEST, and the age is carried with it.
+        #
+        # This was self.q.get() on a depth-4 non-blocking queue, which returns
+        # the OLDEST frame sitting in it. The loop runs at 24.7 Hz against a
+        # camera at 25, so it is marginally the slower of the two and the
+        # queue tends to fill rather than drain - and 12.8% of frames already
+        # arrive late, max gap 810 ms at 30 fps. Four frames at 25 fps is
+        # 160 ms, and the position computed from a 160 ms old frame was being
+        # stamped "now": at 3 m/s that is 0.48 m the flight controller reads
+        # as real motion, which is the lag feeding the very velocity that ends
+        # every window.
+        #
+        # The pilot put it plainly: old frames make the FC run more, so throw
+        # the stale ones away and act on the latest.
         fr = self.q.get()
+        while True:
+            nf = self.q.tryGet()
+            if nf is None:
+                break
+            fr = nf
+            self._frames_skipped += 1
+        try:
+            ts = fr.getTimestampDevice().total_seconds()
+            now = time.monotonic()
+            if self._dev_t0 is None:
+                # First frame anchors the two clocks against each other. Only
+                # the difference is ever used, so they never have to agree
+                # about absolute time - and this frame's own age is unknown,
+                # which is honest: it reads 0.
+                self._dev_t0, self._dev_ts0 = now, ts
+            self._frame_age_s = max(0.0, (now - self._dev_t0) - (ts - self._dev_ts0))
+        except Exception:
+            self._frame_age_s = 0.0
         # tryGet, never get: the mono frame is what the flow loop is waiting on,
         # and depth is an aid to it. Missing depth means this frame has none,
         # not that the loop waits for it.
@@ -655,6 +697,8 @@ class LiveSource:
                         quat_d_roll=q_roll, quat_d_pitch=q_pitch,
                         quat=quat, quat_n=self._quat_n,
                         accel=accel, accel_n=self._accel_n, gyro=gyro,
+                        frame_age_s=self._frame_age_s,
+                        frames_skipped=self._frames_skipped,
                         t=time.monotonic() - self.t0)
         gps = None
         if s.get("lat") not in (None, 0.0):
@@ -690,6 +734,8 @@ class LiveSource:
                     quat_d_roll=q_roll, quat_d_pitch=q_pitch,
                     quat=quat, quat_n=self._quat_n,
                     accel=accel, accel_n=self._accel_n, gyro=gyro,
+                    frame_age_s=self._frame_age_s,
+                    frames_skipped=self._frames_skipped,
                     t=time.monotonic() - self.t0, armed=bool(s.get("armed")))
 
 
@@ -1082,7 +1128,7 @@ CSV_COLUMNS = ["t", "north_m", "east_m", "lon", "lat", "sigma_m",
     # The two cameras' own disagreement, pixels, and whether both ran on this
     # frame. Two independent looks at the same ground is the first thing this
     # project has had that BOUNDS the flow's noise instead of inferring it.
-    "flow_disagree_px", "flow_dual",
+    "flow_disagree_px", "flow_dual", "frame_age_s", "frames_skipped",
     "n_dr", "src", "rngfnd_m", "alt_amsl_m",
     # The saved image for THIS row, or empty on the rows where no
     # frame was saved (most of them - the gate saves a couple a
@@ -1196,6 +1242,8 @@ def csv_row(est, f, v, gN, gE, err):
             "" if est.get("flow_disagree_px") is None
             else f"{est['flow_disagree_px']:.2f}",
             "1" if est.get("flow_dual") else "0",
+            "" if est.get("frame_age_s") is None else f"{est['frame_age_s']:.4f}",
+            est.get("frames_skipped") or 0,
             est["n_dr"],
             est.get("src") or "",
             "" if f.get("rngfnd") is None else f"{f['rngfnd']:.2f}",
@@ -1804,7 +1852,7 @@ class VpsNode:
     STEP_ESCAPE_N = 5
 
     def __init__(self, cache: MapCache, focal_px: float, *,
-                 fix_period_s: float = 1.0, radius_m: float = 150.0,
+                 fix_period_s: float = 2.0, radius_m: float = 150.0,
                  max_corners: int = 300, K=None, D=None, focal_y_px=None,
                  derotate: str = "auto"):
         self.cache = cache
@@ -1854,6 +1902,16 @@ class VpsNode:
         self.tracker_b = None
         self.n_dual = self.n_single = 0
         self.flow_disagree_px = None
+        # Read here, not from the block further down that builds the map
+        # worker: these gate the flow and have to exist before the first
+        # frame, which is earlier than that block runs.
+        _c0 = _vps_config()
+        self.flow_disagree_max_px = float(getattr(_c0, "flow_disagree_max_px", 0.5))
+        self.frame_age_max_s = float(getattr(_c0, "frame_age_max_s", 0.12))
+        # Frames whose two cameras disagreed, and frames that were already too
+        # old to act on. Counted separately because they are different faults.
+        self.n_flow_vetoed = 0
+        self.n_frame_stale = 0
         # fix_sigma_m 20, not 12. This line said 12 while MapFuser's own default,
         # its docstring and tests/test_restored_from_flown_logs.py all said 20 -
         # so the flying code was quietly using a number the evidence does not
@@ -2124,7 +2182,20 @@ class VpsNode:
         # VPU, carried all the way into this dict and then dropped. It is used
         # to keep the flow on ONE surface - see FlowTracker._depth_gate - and
         # not as a height, which 9 Oct already tried and reverted.
-        d, ntrk = self.tracker.step(f["img"], depth=f.get("depth"))
+        # A FRAME TOO OLD TO ACT ON PRODUCES NO SHIFT.
+        #
+        # The reader drains to the newest frame now, so this only fires when
+        # the newest frame AVAILABLE is already stale - the camera or the link
+        # is behind, not the loop. A position computed from a 0.16 s old frame
+        # and stamped "now" is read by the flight controller as motion: at
+        # 3 m/s that is half a metre of invented travel, and it feeds the
+        # velocity that ends every window.
+        _age = float(f.get("frame_age_s") or 0.0)
+        if _age > getattr(self, "frame_age_max_s", 0.12):
+            self.n_frame_stale = getattr(self, "n_frame_stale", 0) + 1
+            d, ntrk = None, 0
+        else:
+            d, ntrk = self.tracker.step(f["img"], depth=f.get("depth"))
         # THE SECOND CAMERA. Averaged into the first when both produced a
         # shift on this frame; ignored entirely when it did not, so a partner
         # that drops out costs nothing but the averaging.
@@ -2146,10 +2217,22 @@ class VpsNode:
             if d is not None and db is not None and (ntrk + ntrk_b) > 0:
                 self.flow_disagree_px = float(np.hypot(*(np.asarray(db, float)
                                                          - np.asarray(d, float))))
-                w = float(ntrk) / float(ntrk + ntrk_b)
-                d = np.asarray(d, float) * w + np.asarray(db, float) * (1.0 - w)
-                ntrk = int(ntrk + ntrk_b)
-                self.n_dual = getattr(self, "n_dual", 0) + 1
+                # THE VETO. See VpsConfig.flow_disagree_max_px for the
+                # measurement. Two independent trackers on the same ground
+                # cannot both be right and 30 px apart; when they are, one of
+                # them has broken and we do not know which, so the frame
+                # produces no shift at all rather than an average of a good
+                # estimate and a broken one.
+                if self.flow_disagree_px > getattr(
+                        self, "flow_disagree_max_px", 0.5):
+                    self.n_flow_vetoed = getattr(self, "n_flow_vetoed", 0) + 1
+                    d = None
+                    ntrk = int(ntrk + ntrk_b)
+                else:
+                    w = float(ntrk) / float(ntrk + ntrk_b)
+                    d = np.asarray(d, float) * w + np.asarray(db, float) * (1.0 - w)
+                    ntrk = int(ntrk + ntrk_b)
+                    self.n_dual = getattr(self, "n_dual", 0) + 1
             elif d is None and db is not None:
                 # The primary failed this frame and the partner did not. This
                 # is the whole point of the second camera: flight 00000237's
@@ -2402,6 +2485,8 @@ class VpsNode:
                     quat_d_pitch=f.get("quat_d_pitch"),
                     quat_n=f.get("quat_n"),
                     flow_disagree_px=getattr(self, "flow_disagree_px", None),
+                    frame_age_s=f.get("frame_age_s"),
+                    frames_skipped=f.get("frames_skipped"),
                     flow_dual=(tracker_b is not None
                                and f.get("img_partner") is not None),
                     derot_src=("gyro" if self.n_derot_gyro > _dg
@@ -2456,7 +2541,7 @@ def main():
                     help="camera IMU report rate in Hz for all three sensors "
                          "(default from VpsConfig.imu_rate, 100). They share "
                          "one packet, so this sets them together.")
-    ap.add_argument("--fix-period", type=float, default=1.0,
+    ap.add_argument("--fix-period", type=float, default=2.0,
                     help="seconds between map fixes. 1.0 was tried on 22 Oct "
                          "because the pilot's archived 11 Oct reports record "
                          "'0.500 m per fix at 1 fix/s' - later evidence than "

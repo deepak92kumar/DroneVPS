@@ -109,12 +109,14 @@ check("widths match", len(row) == len(CSV_COLUMNS),
 # justified refusal from a lost real step. Post-gate the accepted steps run
 # p50 3.4-4.9 px against a 50 px ceiling, and at 85 m a real 3 m/s is 0.93 px
 # per frame, so the question is whether the top few percent were noise at all.
+# 68 -> 70 on 24 Oct: frame_age_s and frames_skipped, when the reader started
+# draining the queue to the newest frame instead of taking the oldest.
 # 66 -> 68 on 23 Oct: flow_disagree_px and flow_dual, when the partner camera
 # got its own tracker. The count is pinned on purpose - this file exists
 # because seven columns were once added to the ROW and not to the header, and
 # 1162 rows were written with everything past the 32nd attributed to the wrong
 # name. Adding a column here is meant to be a decision, not an accident.
-check("and there are the columns we expect", len(CSV_COLUMNS) == 68,
+check("and there are the columns we expect", len(CSV_COLUMNS) == 70,
       str(len(CSV_COLUMNS)))
 i = CSV_COLUMNS.index("fc_d_roll")
 check("the three derotation opinions sit together",

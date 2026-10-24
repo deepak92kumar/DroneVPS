@@ -159,7 +159,24 @@ class VpsConfig:
     # is unchanged, so 1.0 doubles the correction the map can apply - 0.24 m/s
     # against 0.12 - and flight 237's first ALT_HOLD was the map losing a race
     # at exactly that rate: it could pull 0.12 m/s while the error grew 0.14.
-    fix_period_s: float = 1.0      # 5 Oct: 0.4 -> 2.0 s. At 0.4 s the map pushed
+                                   #
+                                   # 24 OCT: BACK TO 2.0, AND THIS TIME IT WAS
+                                   # FLOWN. The pilot asked for 1.0 knowing the
+                                   # replay disagreed - "error badhe tab bhi
+                                   # karo" - and flight 00000238 settled it.
+                                   # Against GPS_RAW_INT, VPS rows, band by
+                                   # band:
+                                   #
+                                   #            237 (2.0)   238 (1.0)
+                                   #   60-80 m    4.08 m      8.79 m
+                                   #   > 80 m     6.16 m     10.00 m
+                                   #
+                                   # Fixes went 39 -> 113 and the position got
+                                   # worse, which is the same direction the
+                                   # replay gave. More correction towards a map
+                                   # whose own error is 2.6-7.5 m is not better
+                                   # correction. The plumbing stays.
+    fix_period_s: float = 2.0      # 5 Oct: 0.4 -> 2.0 s. At 0.4 s the map pushed
                                    # a STATIONARY aircraft at 1.18 m/s above 80 m
                                    # while the drift it exists to catch is
                                    # 0.15-0.37 m/s. At 2 s it pushes 0.26, and the
@@ -436,6 +453,42 @@ class VpsConfig:
     # primary left the device - so this adds a second 1280x800 mono stream at
     # the mono rate, and a second LK pass on the Jetson, which was already
     # running at about 56% of six cores.
+    # THE TWO CAMERAS' DISAGREEMENT IS A VETO, and it is the only thing in
+    # this project that can tell a broken tracker from a bad estimate.
+    #
+    # Measured on flight 00000238, 5216 VPS frames with both cameras and a
+    # receiver truth: healthy frames agree to 0.03-0.08 px p50 and 0.28 px
+    # p90 even at the highest rotation, and the frames where the flow bursts
+    # disagree by 30-36 px. That is a hundredfold separation, not a margin.
+    #
+    # It matters because those rare frames are what ends a window. At t 331
+    # the flow reported 23.71 m/s while the aircraft did 1.70, the bridge
+    # smoothed it to 11.16 and the cap held it at 6.00 - and XKF4.SV went to
+    # 3.71 against a 1.2 gate. Derotation was NOT the cause: it removes 92.7%
+    # of the rotation effect and the residual is flat at 0.48-0.71 m/s. The
+    # tracker simply failed on those frames, independently in each camera.
+    #
+    # Thresholds, scored against the receiver on that flight:
+    #
+    #     threshold   rejected   flow err p50 / p90 / p99
+    #      (none)        0.0%        0.58 / 2.08 / 9.31
+    #      0.5 px        3.1%        0.56 / 1.92 / 5.96
+    #      2.0 px        2.7%        0.56 / 1.93 / 6.20
+    #
+    # 0.5 px takes the tail - p99 9.31 to 5.96 m/s - and leaves the middle
+    # alone, which is the whole point: p50 and p90 barely move. A rejected
+    # frame sends IGNORE, not zero. "I do not know" is a thing the EKF can
+    # ride out on the IMU; a 4 m/s lie is not.
+    #
+    # It only works while both cameras are running. With one, there is
+    # nothing to compare and the veto cannot fire - see dual_flow.
+    flow_disagree_max_px: float = 0.5
+    # How old the frame the loop acted on may be. The queue is drained to the
+    # newest now, so this is a backstop rather than the mechanism: if the
+    # newest frame available is itself this old, the camera or the link is in
+    # trouble and the position is stale enough to matter. 3 m/s for 0.12 s is
+    # 0.36 m, and the flight controller reads a stale position as motion.
+    frame_age_max_s: float = 0.12
     dual_flow: bool = True
     crop_left_px: int = 0
 
