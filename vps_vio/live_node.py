@@ -2139,6 +2139,7 @@ class VpsNode:
         # which is also what the archived pre-SSD engine did, though it ramped
         # the other way.
         self._vel_alt_span_m = 15.0
+        self.cam_yaw_offset_deg = float(_c.camera_yaw_offset_deg)
         self._vel_cum_n = self._vel_cum_e = 0.0
         self.step_px = None
         self.step_action = "ok"
@@ -2604,7 +2605,8 @@ class VpsNode:
         if f["t"] >= self._next_fix:
             lon, lat = self.to_lonlat(*self.fuser.pos)
             if self.worker.submit(f["img"], prior_lon=lon, prior_lat=lat,
-                                  altitude_m=f["alt"], yaw_deg=f["yaw"]):
+                                  altitude_m=f["alt"],
+                                  yaw_deg=f["yaw"] + self.cam_yaw_offset_deg):
                 self._next_fix = f["t"] + self.fix_period
         res = self.worker.poll()
         fix_lon = fix_lat = fix_score = fix_alt = None

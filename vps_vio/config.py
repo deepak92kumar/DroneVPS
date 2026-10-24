@@ -176,6 +176,34 @@ class VpsConfig:
                                    # replay gave. More correction towards a map
                                    # whose own error is 2.6-7.5 m is not better
                                    # correction. The plumbing stays.
+    # THE CAMERA'S YAW ON THE AIRFRAME, degrees, added to the FC heading
+    # before the map query is rotated north-up. The mount was moved on
+    # 23 Oct and this is the calibration that was asked for then.
+    #
+    # Measured two ways on 24 Oct. Fitting a similarity to the translation
+    # inliers gives a residual rotation of -2.03 deg on log 240 (spread 0.85)
+    # and -1.87 deg on log 242 (spread 0.83), over different yaw ranges and
+    # with corr against yaw of only -0.25 and +0.19 - a constant offset, not
+    # a heading-scale error.
+    #
+    # Then checked by replaying locate() on real frames against the raw
+    # receiver, which is what decided the SIGN - the first attempt tested
+    # +1.95 only and read it as harmful:
+    #
+    #     log 240:  -1.95 -> 23 fixes, 11.22 m | 0 -> 19, 11.38 | +1.95 -> 12, 12.58
+    #     log 242:  -1.95 -> 16 fixes,  9.41 m | 0 -> 14,  9.70 | +1.95 -> 10,  8.19
+    #
+    # Negative gains fixes and loses nothing on both flights; positive halves
+    # the fix count on both. The error gain is small (1-3%); the fix-rate gain
+    # is 14-21%, which is what the map is short of.
+    #
+    # NOT applied to the flow's own yaw rotation. The same offset should
+    # physically appear there too, but measuring it from the flow direction
+    # against the receiver gave +3.05, +6.21, -1.19, +5.43 deg across three
+    # flights with an interquartile spread of 15-49 deg - the phantom
+    # velocity swamps it. One place at a time, where it is measured.
+    camera_yaw_offset_deg: float = -1.95
+
     fix_period_s: float = 2.0      # 5 Oct: 0.4 -> 2.0 s. At 0.4 s the map pushed
                                    # a STATIONARY aircraft at 1.18 m/s above 80 m
                                    # while the drift it exists to catch is
