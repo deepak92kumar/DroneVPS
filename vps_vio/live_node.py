@@ -2294,6 +2294,15 @@ class VpsNode:
             self.flow_disagree_px = None
             self.n_single = getattr(self, "n_single", 0) + 1
         flowed = False
+        # Cleared per frame, NOT only written when a step exists. The first
+        # version set these at the gate below, inside this `if`, so a frame
+        # that produced no shift wrote the PREVIOUS frame's displacement to
+        # the CSV again. Flight 240 shows it exactly: 837 frames with an
+        # empty derot_src and 837 consecutive exact repeats, 6.9% of the
+        # flight, each one a displacement that never happened - and they
+        # cluster where the tracker struggled, which is where a baseline
+        # sweep reads them. A non-flowing frame must be blank.
+        self.step_dn = self.step_de = self.step_dt = None
         if d is not None and self.prev_att is not None:
             # DEROTATION. The camera's own gyro by default, the FC's
             # attitude only as a fallback and only because something has to

@@ -408,7 +408,35 @@ class VpsConfig:
     # at corr 0.374 (the fuser is not a raw integrator), and frames land every
     # 3-8 so no consecutive pair survives to re-track. step_dn/step_de/
     # step_dt_s were added the same day for exactly this, so the NEXT flight's
-    # CSV answers it as arithmetic. Until then, flat.
+    # CSV answers it as arithmetic.
+    #
+    # IT DID, THE SAME DAY - FLIGHT 240 - AND THE ANSWER IS NO. The sweep ran
+    # on that flight's own step_dn/step_de, reconstruction validated against
+    # the node's own vel_flow at corr 0.9990 and a median difference of
+    # 0.0021 m/s, with the 6.9% of frames that produced no shift masked and
+    # the window reset at each of them exactly as _vel_hist.clear() does:
+    #
+    #     N    lag     phantom 35-45m  70-95m  95-112m | real motion the
+    #                  (reported while truly under 0.5)| deadband zeroes
+    #     20   0.40 s      0.61         1.27    1.96   |      33.3%
+    #     40   0.80 s      0.52         1.40    1.67   |      38.6%
+    #     60   1.20 s      0.52         1.40    1.46   |      43.6%
+    #     90   1.80 s      0.49         1.40    1.41   |      49.6%
+    #     120  2.40 s      0.41         1.40    1.29   |      51.7%
+    #     160  3.20 s      0.32         1.40    1.26   |      52.2%
+    #
+    # At 70-95 m the phantom is FLAT at 1.40 from N=40 onward - the baseline
+    # does nothing there at any length. At 95-112 m it falls 25% between N=40
+    # and N=160, for 3.2 s of lag, while the share of real motion the deadband
+    # zeroes goes 38.6% -> 52.2%: that second column is log 229's runaway,
+    # measured rather than remembered. corr(reported, truth) sits at 0.23-0.25
+    # at EVERY N, so length does not make the signal track either.
+    #
+    # White noise halves in power when the window doubles. This does not move.
+    # The phantom is a CORRELATED error that persists over seconds, so no
+    # amount of averaging will reach it, and the whole longer-baseline family
+    # is now closed by this aircraft's own data instead of by recollection.
+    # Flat, and not to be reopened without a different mechanism.
     flow_vel_frames_high: int = 40
     flow_vel_alt_m: float = 25.0
 
