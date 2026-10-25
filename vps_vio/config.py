@@ -507,6 +507,32 @@ class VpsConfig:
     # What it is NOT: a height source. That is the part 9 Oct reverted, and the
     # report's own verdict was that it came out "worse than the baro it was
     # meant to help". Height stays TF03 below lidar_max_alt_m, barometer above.
+    #
+    # THAT LAST SENTENCE IS NOT TRUE AND HAS NOT BEEN FOR SOME TIME.
+    # lidar_max_alt_m is read by nothing - grep it. The height this node
+    # divides by is the flight controller's, from the barometer and the EKF,
+    # at every altitude. The lidar is logged as rngfnd_m and used only for
+    # the pre-arm zero check. So the pilot's proposal of 25 Oct - keep the
+    # lidar on, log it, do not fly on it - is already what happens.
+    #
+    # WHAT THAT COSTS, measured on flight 245 against the lidar:
+    #
+    #     lidar 0-5 m      alt_m  1.80    ratio 2.86
+    #     lidar 5-15 m     alt_m 16.40    ratio 1.72
+    #     lidar 15-30 m    alt_m 29.00    ratio 1.29
+    #     lidar 30-50 m    alt_m 38.70    ratio 1.17
+    #     lidar 50-80 m    alt_m 82.00    ratio 1.08
+    #     lidar 80-120 m   alt_m 107.7    ratio 1.07
+    #
+    # A near-constant offset of 5-7 m, the SAME climbing and descending
+    # (+6.59/+6.82/+7.00 against +6.63/+6.02/+5.24), so it is not the
+    # descent hysteresis the pilot remembers from last time - it is an
+    # offset. At touchdown the lidar read 0.60 m and alt_m read 4.2.
+    #
+    # It matters because velocity is pixels x altitude / focal: a 6%
+    # over-estimate at 100 m is nothing, a 72% one at 10 m is a phantom
+    # three quarters as large as the real motion, and that is where the
+    # aircraft was circling.
     # --- the aircraft's own leg, in the left camera's frame ---
     # Measured 20 Oct off CAM_B at 1280x800. The left landing leg occludes the
     # left edge: columns 0-63 fall below 60% of the frame median (70-90 against

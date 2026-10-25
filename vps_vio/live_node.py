@@ -1009,8 +1009,10 @@ class GpsInputSender:
 
         IGN_VEL_VERT is ALWAYS set. The bridge is horizontal only, and the FC
         itself agrees there is no vertical source: EK3_SRC1_VELZ reads 0 in log
-        00000195.BIN. Height comes from the lidar below 60 m and the barometer
-        above it.
+        00000195.BIN. Height comes from the BAROMETER AND THE EKF AT EVERY
+        ALTITUDE - the lidar is logged as rngfnd_m and flies on nothing.
+        The old claim that it took over below 60 m was true once;
+        lidar_max_alt_m is now read by no code at all. See VpsConfig.
 
         Horizontal velocity is sent only when the bridge says valid AND the
         value is above the deadband. When the deadband bites we go back to
