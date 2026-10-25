@@ -2619,7 +2619,13 @@ class VpsNode:
             lon, lat = self.to_lonlat(*self.fuser.pos)
             if self.worker.submit(f["img"], prior_lon=lon, prior_lat=lat,
                                   altitude_m=f["alt"],
-                                  yaw_deg=f["yaw"] + self.cam_yaw_offset_deg):
+                                  yaw_deg=f["yaw"] + self.cam_yaw_offset_deg,
+                                  # For the nadir correction: the frame's own
+                                  # attitude, so the matcher's answer is moved
+                                  # from the image centre to under the
+                                  # aircraft. See MapFixWorker.nadir_offset_m.
+                                  roll_deg=f.get("roll"),
+                                  pitch_deg=f.get("pitch")):
                 self._next_fix = f["t"] + self.fix_period
         res = self.worker.poll()
         fix_lon = fix_lat = fix_score = fix_alt = None

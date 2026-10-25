@@ -192,6 +192,7 @@ class MapFixWorker:
         # NCC only: how far beyond the frame's own footprint the search window
         # reaches. This IS the search range - the prior has to be within it.
         self.ncc_search_m = 45.0
+        self.last_tilt_shift_m = 0.0
         self.frame_w_px = 1280.0
         self.fix_period_s = float(fix_period_s)
 
@@ -317,8 +318,50 @@ class MapFixWorker:
               f"ground - this is the 2.6 s that used to be spent crossing 60 m",
               flush=True)
 
+    @staticmethod
+    def nadir_offset_m(altitude_m, roll_deg, pitch_deg, yaw_deg):
+        """Where the image CENTRE lands on the ground, relative to nadir.
+
+        A tilted camera does not look straight down, so the point under the
+        middle of the frame is not the point under the aircraft - it is
+        alt*tan(tilt) away, in the direction of the tilt. The matcher reports
+        that centre as the aircraft's position, and nothing corrected it.
+
+        The pilot named this before it was measured: "moving ke time drone
+        tilt hota hai tho ncc bhagayega". It is geometry, not noise, and it
+        bites hardest exactly when the aircraft is moving:
+
+            tilt    @38 m   @76 m   @110 m
+             2 deg   1.3 m   2.7 m    3.8 m
+             5 deg   3.3 m   6.6 m    9.6 m
+            10 deg   6.7 m  13.4 m   19.4 m
+
+        Measured on the fixes of two flights: corr(tilt, fix error) is +0.484
+        and corr(alt*tan(tilt), fix error) +0.506, with the error running
+        8.85 m below 2 deg, 10.68 m at 2-5 and 14.33 m above 5.
+
+        THE SIGNS ARE MEASURED, NOT DERIVED. Both were tried against the raw
+        receiver on every fix of both flights, because an unmeasured sign is
+        what caused the 21 Oct runaway:
+
+            flight 240 (70 fixes)   no correction 11.18 m -> 8.69 m, p90 21.73 -> 13.45
+            flight 242 (17 fixes)   no correction  9.86 m -> 6.83 m, p90 16.61 ->  8.75
+
+        and the other three sign pairs all made it worse on both.
+        """
+        if not (altitude_m and altitude_m > 0.0):
+            return 0.0, 0.0
+        r = math.radians(float(roll_deg or 0.0))
+        p = math.radians(float(pitch_deg or 0.0))
+        y = math.radians(float(yaw_deg or 0.0))
+        fwd = altitude_m * math.tan(p)          # + forward
+        rgt = -altitude_m * math.tan(r)         # - right: the measured pair
+        return (fwd * math.cos(y) - rgt * math.sin(y),
+                fwd * math.sin(y) + rgt * math.cos(y))
+
     def submit(self, img: np.ndarray, *, prior_lon: float, prior_lat: float,
-               altitude_m: float, yaw_deg: float) -> bool:
+               altitude_m: float, yaw_deg: float,
+               roll_deg: float = 0.0, pitch_deg: float = 0.0) -> bool:
         """Queue a fix. False if it was refused, for any of three reasons.
 
         Below min_alt_m the map does not run at all. That is deliberate and it
@@ -356,7 +399,8 @@ class MapFixWorker:
             if self._job is not None:
                 self.dropped += 1
                 return False
-            self._job = (img, prior_lon, prior_lat, altitude_m, yaw_deg, now,
+            self._job = (img, prior_lon, prior_lat, altitude_m, yaw_deg,
+                         float(roll_deg or 0.0), float(pitch_deg or 0.0), now,
                          discard)
             self.submitted += 1
             self._last_submit = now
@@ -411,7 +455,7 @@ class MapFixWorker:
                 job = self._job
             if job is None:
                 continue
-            img, plon, plat, alt, yaw, t0, discard = job
+            img, plon, plat, alt, yaw, roll, pitch, t0, discard = job
             res = None
             got = {}
             try:
@@ -442,6 +486,9 @@ class MapFixWorker:
             # ONLY measured predictor of a bad fix: corr +0.928 against the
             # error, where score manages -0.10 and inlier count +0.20.
             # Logged, not enforced.
+            # Both matchers get the SAME tilt shift, so it cancels out of
+            # their disagreement entirely - this number is unaffected by the
+            # correction above and still means what it meant.
             disagree = None
             if len(got) == 2:
                 a, b = (got[k] for k in self._pair)
@@ -449,6 +496,16 @@ class MapFixWorker:
                     (a.lat - b.lat) * 111320.0,
                     (a.lon - b.lon) * 111320.0
                     * math.cos(math.radians(a.lat))))
+            # THE TILT CORRECTION. The matcher answers "the middle of this
+            # frame is here"; the aircraft is nadir of that, not at it. Both
+            # matchers report the same centre, so this is applied once, here,
+            # rather than inside either of them.
+            dN, dE = self.nadir_offset_m(alt, roll, pitch, yaw)
+            self.last_tilt_shift_m = float(math.hypot(dN, dE))
+            if res is not None and res.ok and (dN or dE):
+                res.lat = res.lat - dN / 111320.0
+                res.lon = res.lon - dE / (111320.0
+                                          * math.cos(math.radians(res.lat)))
             out = None
             if res is not None:
                 out = FixResult(res.lon, res.lat, res.score, res.margin, res.ok,
