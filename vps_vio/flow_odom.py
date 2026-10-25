@@ -230,6 +230,50 @@ def gyro_shift_px(d_roll_deg: float, d_pitch_deg: float,
                      GYRO_PX_PER_DEG_PITCH_Y * float(sign_pitch) * float(d_pitch_deg)])
 
 
+def gyro_shift_px_at(pts_xy: np.ndarray, d_roll_deg: float, d_pitch_deg: float,
+                     *, centre_xy, focal_px: float,
+                     sign_roll: float = 1.0, sign_pitch: float = 1.0):
+    """The rotation's displacement AT EACH POINT, not one shift for the frame.
+
+    gyro_shift_px returns a single vector and live_node subtracted it from the
+    median. That is exact only at the optical centre. A rotation moves a point
+    at radius r by f*theta*(1 + r^2/f^2), which on this camera's 77.7 degree
+    field is +25% at the top and bottom edge and +65% at the left and right:
+
+        position        displacement for 1 deg      against the flat 13.88 px
+        centre                 13.88 px                     +0%
+        v edge (400 px)        17.39 px                    +25%
+        u edge (640 px)        22.87 px                    +65%
+
+    The tracker reduces ~400 points spread across the whole frame to one
+    number, so subtracting a single centre-valued shift leaves a residual.
+    Over points spread uniformly the median shortfall is +25.6% of the
+    rotation, and the residual MEASURED on two flights - fitting
+    step_px = a * rotation_px + b - was a = 0.157 and 0.317. That is the
+    same quantity, and it is why nothing else touched it: the coefficient
+    sweep moved it 0.026 to 0.024, the integration window was bit-identical,
+    and both were looking for a gain error in a model error.
+
+    THE GAINS ARE UNCHANGED. GYRO_PX_PER_DEG_* still set the size, so this
+    alters only the SHAPE - the quadratic and cross terms that a single shift
+    cannot carry. At the centre it reduces exactly to gyro_shift_px, which is
+    what the test pins.
+
+    pts_xy is (N,2) in the same pixel frame as centre_xy. Returns (N,2).
+    """
+    p = np.asarray(pts_xy, float).reshape(-1, 2)
+    c = np.asarray(centre_xy, float).reshape(2)
+    f = float(focal_px)
+    u = p[:, 0] - c[0]
+    v = p[:, 1] - c[1]
+    ax = GYRO_PX_PER_DEG_ROLL_X * float(sign_roll) * float(d_roll_deg)
+    ay = GYRO_PX_PER_DEG_PITCH_Y * float(sign_pitch) * float(d_pitch_deg)
+    f2 = f * f
+    du = ax * (1.0 + u * u / f2) + ay * (u * v / f2)
+    dv = ay * (1.0 + v * v / f2) + ax * (u * v / f2)
+    return np.column_stack((du, dv))
+
+
 def attitude_shift_px(att_prev, att_cur) -> np.ndarray:
     """Image shift caused purely by the aircraft tilting, in pixels.
 
@@ -387,6 +431,8 @@ class FlowTracker:
     and says so. That path is what every flight before 20 Oct used.
     """
 
+    derot_applied = False
+
     def __init__(self, *, max_corners: int = 300, quality: float = 0.01,
                  min_dist: int = 8, min_tracks: int = 30,
                  redetect_below: float = 0.6, redetect_every: int = 30,
@@ -397,6 +443,11 @@ class FlowTracker:
         self.D = None if D is None else np.asarray(D, np.float64).reshape(1, -1)
         self.centre = (None if self.K is None
                        else np.array([self.K[0, 2], self.K[1, 2]], float))
+        # For the per-track derotation, which needs the focal to know how
+        # fast the rotation's displacement grows away from the centre. Falls
+        # back to the value GYRO_PX_PER_DEG_* were measured at, so a tracker
+        # built without K still derotates with the right curvature.
+        self.focal = (795.1 if self.K is None else float(self.K[0, 0]))
         self.redetect_below = redetect_below
         self.redetect_every = redetect_every
         self.prev = None
@@ -488,7 +539,8 @@ class FlowTracker:
             return None
         return keep, med, tol
 
-    def step(self, img: np.ndarray, depth: np.ndarray | None = None):
+    def step(self, img: np.ndarray, depth: np.ndarray | None = None,
+             derot_deg=None):
         """Returns (median pixel shift, track count), or (None, n) if it failed.
 
         depth is the stereo pair's range map, aligned to this image and in
@@ -513,6 +565,10 @@ class FlowTracker:
         # One surface, if the stereo pair can tell us which one.
         self.depth_med_m = None
         self.depth_dropped = 0
+        # Cleared per frame: it says whether THIS frame's tracks were
+        # derotated, which is what stops live_node subtracting the
+        # rotation a second time on a frame where the gyro gave nothing.
+        self.derot_applied = False
         g = self._depth_gate(self.pts[good], depth)
         if g is not None:
             keep, self.depth_med_m, _tol = g
@@ -530,6 +586,21 @@ class FlowTracker:
             # raw pixels because that is the image LK ran on; the metres come
             # out of the fit, so the fit is where the lens has to be removed.
             u_src, u_dst = self._undistort(src), self._undistort(dst)
+            # DEROTATE EACH TRACK, before anything reduces them to one number.
+            # Subtracting a single shift afterwards is exact only at the
+            # optical centre; see gyro_shift_px_at for why that left 16-32%
+            # of the rotation behind and why no coefficient could reach it.
+            if derot_deg is not None:
+                _dr, _dp = derot_deg
+                if _dr is not None and _dp is not None:
+                    _c = (self.centre if self.centre is not None
+                          else np.array([img.shape[1] / 2.0,
+                                         img.shape[0] / 2.0]))
+                    _sh = gyro_shift_px_at(u_src.reshape(-1, 2), _dr, _dp,
+                                           centre_xy=_c, focal_px=self.focal)
+                    u_dst = (u_dst.reshape(-1, 2) - _sh
+                             ).reshape(-1, 1, 2).astype(np.float32)
+                    self.derot_applied = True
             M, inl = cv2.estimateAffinePartial2D(u_src, u_dst, method=cv2.RANSAC,
                                                  ransacReprojThreshold=1.5)
             if M is not None and inl is not None and int(inl.sum()) >= self.min_tracks:

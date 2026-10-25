@@ -2355,7 +2355,17 @@ class VpsNode:
             self.n_frame_stale = getattr(self, "n_frame_stale", 0) + 1
             d, ntrk = None, 0
         else:
-            d, ntrk = self.tracker.step(f["img"], depth=f.get("depth"))
+            # The gyro's rotation goes IN, so each track is derotated
+            # before the fit reduces them. See flow_odom.gyro_shift_px_at:
+            # the old path subtracted one centre-valued shift from the
+            # result, which is exact only at the optical centre and left
+            # 16-32% of the rotation behind on this 77.7 degree field.
+            _gr, _gp = f.get("gyro_d_roll"), f.get("gyro_d_pitch")
+            _use_pp = (self.derotate != "fc" and _gr is not None
+                       and _gp is not None)
+            d, ntrk = self.tracker.step(
+                f["img"], depth=f.get("depth"),
+                derot_deg=((_gr, _gp) if _use_pp else None))
         # THE SECOND CAMERA. Averaged into the first when both produced a
         # shift on this frame; ignored entirely when it did not, so a partner
         # that drops out costs nothing but the averaging.
@@ -2498,7 +2508,14 @@ class VpsNode:
                 # decides which way the shift points, because it picks that
                 # by matching rotation and the thing that matters is
                 # translation.
-                d = d - gyro_shift_px(gd_r, gd_p)
+                #
+                # 25 OCT: THIS NO LONGER SUBTRACTS ANYTHING. The same
+                # rotation went into tracker.step above and was removed from
+                # every track individually, which is the only place it can
+                # be removed correctly - see flow_odom.gyro_shift_px_at.
+                # Subtracting it here as well would take it off twice.
+                if not getattr(self.tracker, "derot_applied", False):
+                    d = d - gyro_shift_px(gd_r, gd_p)
                 self.n_derot_gyro += 1
             elif (self.derotate != "fc" and self.val_quat.ok
                   and qd_r is not None and qd_p is not None):

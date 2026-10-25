@@ -70,7 +70,11 @@ class FakeTracker:
         self.depth_med_m = None
         self.depth_dropped = 0
 
-    def step(self, img, depth=None):
+    # **kw since 25 Oct: the node now hands the gyro rotation in as
+    # derot_deg so each track can be derotated before the fit. A fake
+    # that refuses unknown keywords would make every such change look
+    # like a gap-fill regression.
+    def step(self, img, depth=None, **kw):
         d = self.seq[min(self.n, len(self.seq) - 1)]
         self.n += 1
         return (None, 0) if d is None else (np.array(d, float), 200)
