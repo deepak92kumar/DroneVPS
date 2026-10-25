@@ -73,7 +73,15 @@ check("and above the fastest the aircraft was measured doing on the VPS",
 check("and well below the 25.5-25.9 m/s that actually went out", CAP < 10.0)
 
 print("\nreal motion inside the cap passes through untouched")
-for sp in (0.8, 2.0, 3.0, 5.0):
+# 0.8 was in this list until 25 Oct. The deadband became a ramp that day -
+# zero at the threshold, full value at 1.5x it - because the hard edge was
+# making the aircraft jerk: on flight 245 the sent speed crossed zero 307
+# times in 634 s and the commanded tilt saturated at ATC_ANGLE_MAX. 0.8 m/s
+# sits inside that ramp at this height, so it is attenuated by design and no
+# longer belongs here. Everything above 1.5x the threshold still does, which
+# is what this check is actually for - log 229 ran 11.1 m in 24 s because
+# the aircraft was told it was slower than it was.
+for sp in (2.0, 3.0, 5.0):
     st = feed(VelocityBridge(), sp, 0.0)
     check(f"a sustained {sp:.1f} m/s is sent as {st.sent_vn:.3f}",
           abs(st.sent_vn - sp) < 0.01 and not st.capped)
