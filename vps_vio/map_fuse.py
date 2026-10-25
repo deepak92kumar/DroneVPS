@@ -156,7 +156,28 @@ class MapFuser:
                  # altitude_m and the recorder carries fix_lon / fix_lat /
                  # fix_score / fix_inliers / fix_alt_m. Until a flight has
                  # those, raising this is the same experiment twice.
-                 max_correction_m: float = 0.5):
+                 max_correction_m: float = 0.5,
+                 # HOW FAST A FIX IS ALLOWED TO MOVE, metres per second.
+                 #
+                 # The pilot's words: "agar wo ek dum se 20 mtr dur sho kar
+                 # raha hai tho use phek diya jaye kuki wo wrong hai". Set to
+                 # 5 m/s against a LOIT_SPEED of 3 and a mission speed of 4,
+                 # so it bounds what the AIRFRAME can do with headroom, and
+                 # is to be raised only as those are.
+                 #
+                 # What is rate-limited is the RESIDUAL - the fix minus the
+                 # prior it was computed against - not the fix's absolute
+                 # position. The residual is our accumulated drift, and drift
+                 # cannot step: whatever the aircraft actually did between
+                 # two fixes is already in the prior by dead reckoning, which
+                 # over one fix_period of 2 s is the most reliable thing
+                 # aboard. So a residual that jumps faster than the airframe
+                 # can fly is the matcher moving, not the aircraft.
+                 #
+                 # This is NOT the 3-sigma gate above. That one asks "is this
+                 # fix plausible at all"; at sigma 5 and fix_sigma 20 it
+                 # allows 62 m, which a 20 m jump passes easily.
+                 max_fix_speed_mps: float = 5.0):
         """Defaults are swept on the 27 Sep flight, not assumed.
 
         fix_sigma_m is deliberately larger than the fixes actually are (they
@@ -177,6 +198,10 @@ class MapFuser:
         # slow convergence in exchange for no sudden jumps - and the residual
         # is reported every time so a log shows when the cap was biting.
         self.max_correction_m = float(max_correction_m)
+        self.max_fix_speed_mps = float(max_fix_speed_mps)
+        self._last_resid = None       # the previous fix's residual, metres
+        self._last_resid_t = None
+        self.n_too_fast = 0
         self.n_capped = 0
         self.pos = np.zeros(2)               # North, East, metres from origin
         self.var = float(init_sigma_m) ** 2
@@ -256,7 +281,8 @@ class MapFuser:
     def update(self, fix_north: float, fix_east: float,
                fix_sigma_m: float | None = None,
                prior_north: float | None = None,
-               prior_east: float | None = None) -> bool:
+               prior_east: float | None = None,
+               t: float | None = None) -> bool:
         """Fold in one map fix. Returns False if it was rejected as an outlier.
 
         The correction is capped at max_correction_m, so no single fix can
@@ -293,6 +319,17 @@ class MapFuser:
                else np.array([prior_north, prior_east], float))
         r = np.array([fix_north, fix_east], float) - ref
         d = float(np.linalg.norm(r))
+
+        # THE RATE LIMIT. See max_fix_speed_mps.
+        if t is not None:
+            if self._last_resid is not None and t > self._last_resid_t:
+                dt = t - self._last_resid_t
+                moved = float(np.linalg.norm(r - self._last_resid))
+                if moved > self.max_fix_speed_mps * dt:
+                    self.n_too_fast += 1
+                    self.last_residual_m = d
+                    return False
+            self._last_resid, self._last_resid_t = r.copy(), float(t)
         self.last_residual_m = d
         fv = self.fix_var if fix_sigma_m is None else float(fix_sigma_m) ** 2
         allowed = self.gate * (1.0 + self.consec_rejected) * np.sqrt(self.var + fv)

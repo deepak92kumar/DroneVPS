@@ -2642,7 +2642,8 @@ class VpsNode:
             # however far the estimate has since travelled.
             pN = (res.prior_lat - self.origin[1]) * M_PER_DEG_LAT
             pE = (res.prior_lon - self.origin[0]) * self.mlon
-            fix_used = self.fuser.update(fN, fE, prior_north=pN, prior_east=pE)
+            fix_used = self.fuser.update(fN, fE, prior_north=pN, prior_east=pE,
+                                         t=f["t"])
             fix_age = float(getattr(res, "age_s", 0.0) or 0.0)
             fix_dis = getattr(res, "disagree_m", None)
             self.n_fix += 1
