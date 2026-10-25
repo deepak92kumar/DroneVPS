@@ -372,22 +372,7 @@ class VpsConfig:
     # (1.42 vs 1.44), with corr(error, tilt) +0.109 against corr(error, speed)
     # +0.662. What is left is the flow's own pixel noise: 1.4 m/s at 31 m is
     # 1.2 px per frame, and a longer baseline is the only thing that touches it.
-    # 40 -> 30 ON 25 OCT. Re-swept on flight 245, the first flight with the
-    # derotation model correct; every earlier sweep was done with it broken,
-    # which is why N looked inert. Hover phantom by band:
-    #
-    #     N    lag     35-45m  45-70m  70-95m
-    #     20   0.80 s   0.51    0.50    1.04
-    #     30   1.20 s   0.54    0.30    0.87   <- taken
-    #     40   1.60 s   0.48    0.41    0.90
-    #     60   2.40 s   0.49    0.35    0.93
-    #
-    # Lower phantom AND less lag, which is the rare case where there is no
-    # trade. The lag is why it matters: at 35 m the aircraft orbited at
-    # 11.4 s and 2*pi*1.6 s is 10.1 s, so the baseline's delay IS the
-    # toilet-bowl period. 30 moves that to 7.5 s and out of the controller's
-    # way. Not lower, because 20 costs real phantom at 70-95 m.
-    flow_vel_frames: int = 30
+    flow_vel_frames: int = 40
 
     # Above flow_vel_alt_m the baseline lengthens to flow_vel_frames_high.
     #
@@ -504,7 +489,7 @@ class VpsConfig:
     # amount of averaging will reach it, and the whole longer-baseline family
     # is now closed by this aircraft's own data instead of by recollection.
     # Flat, and not to be reopened without a different mechanism.
-    flow_vel_frames_high: int = 30
+    flow_vel_frames_high: int = 40
     flow_vel_alt_m: float = 25.0
 
     # Stereo depth: ON, and for VIO ONLY.
@@ -522,32 +507,6 @@ class VpsConfig:
     # What it is NOT: a height source. That is the part 9 Oct reverted, and the
     # report's own verdict was that it came out "worse than the baro it was
     # meant to help". Height stays TF03 below lidar_max_alt_m, barometer above.
-    #
-    # THAT LAST SENTENCE IS NOT TRUE AND HAS NOT BEEN FOR SOME TIME.
-    # lidar_max_alt_m is read by nothing - grep it. The height this node
-    # divides by is the flight controller's, from the barometer and the EKF,
-    # at every altitude. The lidar is logged as rngfnd_m and used only for
-    # the pre-arm zero check. So the pilot's proposal of 25 Oct - keep the
-    # lidar on, log it, do not fly on it - is already what happens.
-    #
-    # WHAT THAT COSTS, measured on flight 245 against the lidar:
-    #
-    #     lidar 0-5 m      alt_m  1.80    ratio 2.86
-    #     lidar 5-15 m     alt_m 16.40    ratio 1.72
-    #     lidar 15-30 m    alt_m 29.00    ratio 1.29
-    #     lidar 30-50 m    alt_m 38.70    ratio 1.17
-    #     lidar 50-80 m    alt_m 82.00    ratio 1.08
-    #     lidar 80-120 m   alt_m 107.7    ratio 1.07
-    #
-    # A near-constant offset of 5-7 m, the SAME climbing and descending
-    # (+6.59/+6.82/+7.00 against +6.63/+6.02/+5.24), so it is not the
-    # descent hysteresis the pilot remembers from last time - it is an
-    # offset. At touchdown the lidar read 0.60 m and alt_m read 4.2.
-    #
-    # It matters because velocity is pixels x altitude / focal: a 6%
-    # over-estimate at 100 m is nothing, a 72% one at 10 m is a phantom
-    # three quarters as large as the real motion, and that is where the
-    # aircraft was circling.
     # --- the aircraft's own leg, in the left camera's frame ---
     # Measured 20 Oct off CAM_B at 1280x800. The left landing leg occludes the
     # left edge: columns 0-63 fall below 60% of the frame median (70-90 against
