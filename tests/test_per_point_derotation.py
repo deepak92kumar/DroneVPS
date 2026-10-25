@@ -87,5 +87,20 @@ check("the old subtraction is conditional on the tracker NOT having done it",
       'if not getattr(self.tracker, "derot_applied", False):' in node,
       "otherwise the rotation comes off twice and the sign flips")
 
+print("\nBOTH cameras get the same rotation, or the veto eats the flight")
+# Flight 163: the primary was derotated per track and the partner was not,
+# so the gap between them WAS the rotation. flow_disagree_px p50 went 0.06
+# -> 2.32 px, the 0.5 px veto fired on 95% of frames against 4.8%, the flow
+# stopped, velocity was stale on 41% of rows and the aircraft dropped to
+# ALT_HOLD four times. Both cameras are bolted to one airframe.
+_calls = [ln for ln in node.split("\n") if "derot_deg=((_gr, _gp)" in ln]
+check("the rotation reaches BOTH trackers", len(_calls) == 2,
+      f"{len(_calls)} call(s) pass it - primary and partner")
+_pi = node.index("self.tracker.step(")
+_pb = node.index("tracker_b.step(")
+check("the primary gets it", "derot_deg" in node[_pi:_pi + 400])
+check("the partner gets it", "derot_deg" in node[_pb:_pb + 500],
+      "a partner left unrotated turns the whole rotation into disagreement")
+
 print("\n" + ("ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}"))
 sys.exit(1 if fails else 0)

@@ -2382,8 +2382,18 @@ class VpsNode:
         # and until now there was nothing to compare against.
         tracker_b = getattr(self, "tracker_b", None)
         if tracker_b is not None and f.get("img_partner") is not None:
-            db, ntrk_b = tracker_b.step(f["img_partner"],
-                                        depth=f.get("depth"))
+            # THE SAME ROTATION, or the comparison below is meaningless.
+            # Flight 163 is what happens otherwise: the primary was
+            # derotated per track and the partner was not, so the gap
+            # between them WAS the rotation. flow_disagree_px went from a
+            # p50 of 0.06 px to 2.32, the 0.5 px veto fired on 95% of frames
+            # against 4.8% before, the flow stopped, the velocity went stale
+            # on 41% of rows, and the aircraft dropped to ALT_HOLD four
+            # times. Both cameras are on one airframe and turn together;
+            # whatever is removed from one is removed from the other.
+            db, ntrk_b = tracker_b.step(
+                f["img_partner"], depth=f.get("depth"),
+                derot_deg=((_gr, _gp) if _use_pp else None))
             if d is not None and db is not None and (ntrk + ntrk_b) > 0:
                 self.flow_disagree_px = float(np.hypot(*(np.asarray(db, float)
                                                          - np.asarray(d, float))))
