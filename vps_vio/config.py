@@ -372,7 +372,22 @@ class VpsConfig:
     # (1.42 vs 1.44), with corr(error, tilt) +0.109 against corr(error, speed)
     # +0.662. What is left is the flow's own pixel noise: 1.4 m/s at 31 m is
     # 1.2 px per frame, and a longer baseline is the only thing that touches it.
-    flow_vel_frames: int = 40
+    # 40 -> 30 ON 25 OCT. Re-swept on flight 245, the first flight with the
+    # derotation model correct; every earlier sweep was done with it broken,
+    # which is why N looked inert. Hover phantom by band:
+    #
+    #     N    lag     35-45m  45-70m  70-95m
+    #     20   0.80 s   0.51    0.50    1.04
+    #     30   1.20 s   0.54    0.30    0.87   <- taken
+    #     40   1.60 s   0.48    0.41    0.90
+    #     60   2.40 s   0.49    0.35    0.93
+    #
+    # Lower phantom AND less lag, which is the rare case where there is no
+    # trade. The lag is why it matters: at 35 m the aircraft orbited at
+    # 11.4 s and 2*pi*1.6 s is 10.1 s, so the baseline's delay IS the
+    # toilet-bowl period. 30 moves that to 7.5 s and out of the controller's
+    # way. Not lower, because 20 costs real phantom at 70-95 m.
+    flow_vel_frames: int = 30
 
     # Above flow_vel_alt_m the baseline lengthens to flow_vel_frames_high.
     #
@@ -489,7 +504,7 @@ class VpsConfig:
     # amount of averaging will reach it, and the whole longer-baseline family
     # is now closed by this aircraft's own data instead of by recollection.
     # Flat, and not to be reopened without a different mechanism.
-    flow_vel_frames_high: int = 40
+    flow_vel_frames_high: int = 30
     flow_vel_alt_m: float = 25.0
 
     # Stereo depth: ON, and for VIO ONLY.

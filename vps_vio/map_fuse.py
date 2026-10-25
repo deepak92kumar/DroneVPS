@@ -112,7 +112,17 @@ class MapFuser:
                  # fix_sigma_m = 20 was already right." 30 came back with the
                  # rebuild and makes the filter trust every fix less than the
                  # measurement says it should.
-                 fix_sigma_m: float = 20.0,
+                 # 20 -> 8 ON 25 OCT. The 20 came from 9 Oct - "the map's
+                 # median error is 20.0 m against our own 6.6" - and that is
+                 # no longer what the map does. Flight 245, 159 fixes scored
+                 # against the raw receiver: p50 5.64 m overall, 2.89 m
+                 # between 60 and 80, 5.49 at 80-95. At 20 the Kalman gain
+                 # is 0.068 and a 5.6 m residual becomes a 0.38 m pull; at 8
+                 # it is 0.313 and the 0.5 m cap binds instead, which is the
+                 # bound that was actually chosen by flight. Not lower than
+                 # 8, because the 95-110 m band is still 11.37 m and the
+                 # same number serves every height.
+                 fix_sigma_m: float = 8.0,
                  gate_sigmas: float = 3.0,
                  max_sigma_m: float = 400.0,
                  init_sigma_m: float = 2.0,

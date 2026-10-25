@@ -231,8 +231,15 @@ check("and VpsNode actually passes it to the worker",
 
 print("\nwhat the fuser does with a fix that passes")
 f = MapFuser()
-check("fix_sigma_m 20", abs(f.fix_var ** 0.5 - 20.0) < 1e-6,
-      '9 Oct: "the map\'s median error is 20.0 m against our own 6.6 m"')
+# 20 -> 8 ON 25 OCT, and the 9 Oct basis is why it moved rather than being
+# ignored. That report said "the map's median error is 20.0 m against our
+# own 6.6". Flight 245 scored 159 fixes against the raw receiver: p50
+# 5.64 m, 2.89 between 60 and 80 m, 5.49 at 80-95, 11.37 above 95. At 20
+# the Kalman gain is 0.068 and a 5.6 m residual pulls 0.38 m; at 8 it is
+# 0.313 and the 0.5 m cap binds instead - and the cap is the bound that was
+# chosen by flight, on 3 Oct, rather than this one.
+check("fix_sigma_m 8, and the map measured 5.64 m to earn it",
+      abs(f.fix_var ** 0.5 - 8.0) < 1e-6, f"{f.fix_var ** 0.5:.2f}")
 check("max_correction_m 0.5", abs(f.max_correction_m - 0.5) < 1e-9,
       '3 Oct: raised to 1.5-3.0 once and "the hold fell from 11-14 s to '
       '4.5-9.0 s while map_move_m sat at exactly 1.50". Reverted the same '

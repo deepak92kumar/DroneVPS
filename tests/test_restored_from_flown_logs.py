@@ -117,9 +117,13 @@ check("the input gate alone would not have done this",
 
 print("\nhow much the filter trusts a map fix")
 f = MapFuser()
-check("fix_sigma_m is 20, not 30", abs(f.fix_var ** 0.5 - 20.0) < 1e-6,
-      '9 Oct: "the map\'s median error is 20.0 m against our own 6.6 m ... '
-      'the code\'s fix_sigma_m = 20 was already right"')
+# 30 -> 20 on 9 Oct, 20 -> 8 on 25 Oct. Each step was a measurement, not a
+# preference: 9 Oct found the map at 20.0 m against our own 6.6, and flight
+# 245 found it at 5.64 m over 159 fixes - 2.89 between 60 and 80 m. What
+# must not come back is 30, which the rebuild reintroduced and which trusts
+# every fix less than any measurement has ever supported.
+check("fix_sigma_m is 8, and never 30 again", abs(f.fix_var ** 0.5 - 8.0) < 1e-6,
+      f"{f.fix_var ** 0.5:.2f} - flight 245 measured the map at 5.64 m")
 
 print("\n" + ("ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}"))
 sys.exit(1 if fails else 0)
