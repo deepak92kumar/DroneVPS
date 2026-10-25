@@ -78,9 +78,38 @@ check("config's shape is the one the worker uses",
 check("and live_node passes both, not neither",
       "window_alt_frac=" in live and "query_shape=" in live,
       "VpsNode must hand them to MapFixWorker or config is decoration again")
-check("floored at 40 m and capped at radius_m",
-      "np.clip(self.window_alt_frac * altitude_m, 40.0, self.radius_m)"
-      in open(os.path.join(HERE, "vps_vio", "map_fix_worker.py")).read())
+class _FakeCache:
+    gsd = 0.5092
+    gsd_x = 0.4369
+
+    def covers(self, *a, **k):
+        return False
+
+
+def _mk_worker(matcher):
+    from map_fix_worker import MapFixWorker
+    return MapFixWorker(_FakeCache(), focal_px=795.1, matcher=matcher,
+                        radius_m=150.0, window_alt_frac=0.60)
+
+# The rule is PER MATCHER as of 25 Oct, so this checks the behaviour rather
+# than the line. NCC slides its template inside the window and starved on
+# XFeat's radius - 0 of 40 frames, "template does not fit the search window"
+# - so its floor is the frame's own half-footprint plus room to search.
+# XFeat matches features, tolerates partial overlap, and is not widened with
+# it: a wider window costs it time and offers more wrong places to peak
+# (accept rate measured 97% at 150 m, 77% at 200, 53% at 260).
+_W = _mk_worker("both")
+for _alt in (38.0, 76.0, 110.0):
+    _half = 0.5 * 1280.0 * _alt / 795.1
+    check(f"NCC's window clears the frame's footprint at {_alt:.0f} m",
+          _W._radius_for(_alt, "ncc") > _half,
+          f"{_W._radius_for(_alt, 'ncc'):.1f} m against half-footprint {_half:.1f}")
+    check(f"XFeat is not widened with it at {_alt:.0f} m",
+          _W._radius_for(_alt, "xfeat") < _W._radius_for(_alt, "ncc"))
+check("both are still floored at 40 and capped at radius_m",
+      _W._radius_for(1.0, "xfeat") == 40.0
+      and _W._radius_for(9000.0, "ncc") == W["radius_m"].default)
+_W.stop()
 check("radius_m 150", W["radius_m"].default == 150.0)
 
 # ------------------------------------------------- the gates

@@ -77,7 +77,31 @@ class VpsConfig:
     # ---------------------------------------------------------------------
 
     # --- map matcher ---
-    matcher: str = "xfeat"         # 4 Oct: NCC -> XFeat. Flown, kept.
+    matcher: str = "both"          # 25 OCT: BOTH. NCC came back, and the reason is in
+                                   # map_match_ncc's docstring. XFeat accepted
+                                   # 78% of frames at 11:38 and 0 of 40 at
+                                   # 15:20 on the same site with sharper
+                                   # imagery - the shadows had swung 100 deg
+                                   # from the map's. Replayed on both flights
+                                   # at the radius NCC needs (150 m):
+                                   #            XFeat          NCC
+                                   #   11:38    78%, 2.13 m    97%, 1.55 m
+                                   #   15:20     0%,     -     70%, 5.01 m
+                                   # and 0.106 s a fix against 0.345. The
+                                   # system error is per-fix/sqrt(N), so the
+                                   # accept rate is what it buys.
+                                   #
+                                   # "both" because neither covers the day.
+                                   # Fixes produced on 45 frames from each:
+                                   #            NCC  XFeat  either
+                                   #   11:38     45    34     45
+                                   #   15:20     26     2     26
+                                   # And when both fire they check each
+                                   # other: corr(their disagreement, their
+                                   # error) = +0.928, against -0.10 for
+                                   # score and +0.20 for inlier count. That
+                                   # disagreement is LOGGED, not enforced -
+                                   # a veto on it is a new gate. UNFLOWN.
                                    # Map matching went 45% -> 75% on the swap.
     map_min_alt_m: float = 60.0    # 3 Oct: 80 -> 60 m. Flown, kept. At 80 m the
                                    # map never started. The map runs ABOVE this

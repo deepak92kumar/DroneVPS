@@ -52,6 +52,7 @@ it pushes 0.26 and costs 17%. The period is enforced here as well as by the
 caller, so a caller that forgets cannot put that behaviour back.
 """
 from __future__ import annotations
+import math
 import threading
 import time
 from dataclasses import dataclass
@@ -146,6 +147,9 @@ class FixResult:
     age_s: float          # how long the fix took, i.e. how stale it is on arrival
     prior_lon: float      # the prior it was computed against, so the caller can
     prior_lat: float      # apply it as a correction to that, not to "now"
+    disagree_m: float | None = None   # how far the two matchers were apart,
+                          # when both produced a fix. None if only one ran or
+                          # only one succeeded. The measured predictor.
     inliers: int = 0      # RANSAC inliers behind the fix
     total_matches: int = 0
     reason: str = ""      # why a rejected fix was rejected, for the recorder
@@ -185,21 +189,64 @@ class MapFixWorker:
         # VpsConfig.map_query_shape for the measurement.
         self.query_shape = str(query_shape)
         self.min_alt_m = float(min_alt_m)
+        # NCC only: how far beyond the frame's own footprint the search window
+        # reaches. This IS the search range - the prior has to be within it.
+        self.ncc_search_m = 45.0
+        self.frame_w_px = 1280.0
         self.fix_period_s = float(fix_period_s)
 
-        # XFeat only. The NCC matcher was removed on 20 Oct at the pilot's
-        # instruction - XFeat had already been the default here and the two
-        # were never run together, so the alternative was dead weight on the
-        # flying path. The geometry they shared lives in map_query.
-        if self.matcher != "xfeat":
-            raise ValueError(f"unknown matcher {matcher!r}, only 'xfeat' remains")
-        from map_match_xfeat import locate
+        # BOTH MATCHERS AGAIN, as of 25 Oct. NCC was removed on 20 Oct as dead
+        # weight; it is back because flight 160 showed what it is for. XFeat
+        # accepted 78% of frames at 11:38 and 0 of 40 at 15:20 on the same
+        # site with sharper imagery - the shadows had swung a hundred degrees
+        # from the map's. Descriptors move with the shadow; correlation of
+        # gradient magnitude does not. Neither is strictly better, so the
+        # choice is a setting (VpsConfig.matcher) and not a code change.
+        #
+        # They do NOT share a gate: see _GATES above. NCC's margin is read off
+        # a coarse correlation surface and XFeat's is a cluster tightness.
+        from map_match_xfeat import locate as _loc_xfeat
+        from map_match_ncc import locate as _loc_ncc
+        _ALL = {"xfeat": _loc_xfeat, "ncc": _loc_ncc}
+        if self.matcher == "both":
+            # BOTH, because neither covers the day on its own. Measured
+            # 25 Oct on 45 frames from each of two flights, fixes produced:
+            #
+            #                   NCC   XFeat   either
+            #     11:38          45     34      45   (100%)
+            #     15:20          26      2      26   ( 58%)
+            #
+            # XFeat alone is 76% and 4%. The union is what the system error
+            # actually rides on, because that error is per-fix/sqrt(N).
+            #
+            # And when both fire they cross-check each other: corr between
+            # how far apart they are and how wrong they are is +0.928, the
+            # strongest predictor of a bad fix this project has found -
+            # score and inlier count both fail at it (-0.10 and +0.20).
+            # The disagreement is CARRIED OUT, not acted on: refusing a fix
+            # on it would be a new gate and that is the pilot's call.
+            self._pair = ["ncc", "xfeat"]
+        elif self.matcher in _ALL:
+            self._pair = [self.matcher]
+        else:
+            raise ValueError(f"unknown matcher {matcher!r}, "
+                             f"expected 'xfeat', 'ncc' or 'both'")
+        self._all_locate = _ALL
         self._window_kind = "grey"
-        self._locate = locate
+        self._locate = _ALL[self._pair[0]]
 
-        gate = _GATES[self.matcher]
-        self.min_score = gate["min_score"] if min_score is None else float(min_score)
-        self.min_margin = gate["min_margin"] if min_margin is None else float(min_margin)
+        # ONE GATE PER MATCHER. They are not interchangeable - see _GATES -
+        # and running both made that concrete rather than a comment: NCC's
+        # margin comes off a coarse correlation surface, XFeat's is a cluster
+        # tightness. An explicit min_score/min_margin overrides both, which
+        # is what the offline sweeps pass.
+        self._gate = {}
+        for mname in self._pair:
+            g = _GATES[mname]
+            self._gate[mname] = (
+                g["min_score"] if min_score is None else float(min_score),
+                g["min_margin"] if min_margin is None else float(min_margin))
+        self.min_score, self.min_margin = self._gate[self._pair[0]]
 
         self._job = None
         self._result: FixResult | None = None
@@ -249,6 +296,13 @@ class MapFixWorker:
         """
         import time as _t
         t0 = _t.monotonic()
+        if "xfeat" not in self._pair:
+            # Nothing to warm. NCC is cv2.matchTemplate and has no model, so
+            # an NCC-only worker must not drag torch in - that import is the
+            # 2.35-4.95 s this method exists to move off the flying path.
+            self.model_ready = True
+            self.model_load_s = 0.0
+            return
         try:
             from map_match_xfeat import _load
             _load()
@@ -320,7 +374,7 @@ class MapFixWorker:
             r, self._result = self._result, None
         return r
 
-    def _radius_for(self, altitude_m: float) -> float:
+    def _radius_for(self, altitude_m: float, matcher: str | None = None) -> float:
         """Search window scaled to what the camera can actually see.
 
         It was a fixed 100 m until 4 Oct, which had the matcher guessing
@@ -329,7 +383,24 @@ class MapFixWorker:
         never smaller than the query, and capped at radius_m so one bad
         altitude cannot ask for the whole map.
         """
-        return float(np.clip(self.window_alt_frac * altitude_m, 40.0, self.radius_m))
+        r = self.window_alt_frac * altitude_m
+        if (matcher or self.matcher) == "ncc":
+            # NCC SLIDES THE TEMPLATE INSIDE THE WINDOW, so the window has to
+            # be bigger than the frame's own footprint or matchTemplate has
+            # nowhere to search and every rotation is skipped. XFeat matches
+            # features and is happy with partial overlap, which is why the
+            # same radius rule serves one and starves the other: restored on
+            # 25 Oct, NCC scored 0 of 40 on both flights until this was found,
+            # with "template does not fit the search window" every time.
+            #
+            # The footprint is frame_width x altitude / focal; half of that
+            # plus room to search is the floor. Measured on 30 frames at
+            # 60-110 m, accept rate against radius: 150 m -> 97%, 200 -> 77%,
+            # 260 -> 53%, so bigger is NOT better once it fits - a wider
+            # window offers more wrong places to peak.
+            half = 0.5 * self.frame_w_px * altitude_m / self.focal_px
+            r = max(r, half + self.ncc_search_m)
+        return float(np.clip(r, 40.0, self.radius_m))
 
     def _loop(self):
         self._warm()
@@ -342,24 +413,47 @@ class MapFixWorker:
                 continue
             img, plon, plat, alt, yaw, t0, discard = job
             res = None
+            got = {}
             try:
                 if self.cache.covers(plon, plat):
-                    win, wg = self.cache.window(plon, plat, self._radius_for(alt),
-                                                kind=self._window_kind)
-                    res = self._locate(
-                        img, win, wg, altitude_m=alt, focal_px=self.focal_px,
-                        yaw_deg=yaw, map_gsd_m=self.cache.gsd,
-                        map_gsd_x_m=getattr(self.cache, "gsd_x", None),
-                        min_score=self.min_score, min_margin=self.min_margin,
-                        window_is_edges=(self._window_kind == "edges"),
-                        principal_xy=self.principal_xy,
-                        query_shape=self.query_shape)
+                    for mname in self._pair:
+                        # Each matcher gets the window IT needs: NCC slides
+                        # the template inside the window and starves on
+                        # XFeat's radius. See _radius_for.
+                        win, wg = self.cache.window(
+                            plon, plat, self._radius_for(alt, mname),
+                            kind=self._window_kind)
+                        ms, mm = self._gate[mname]
+                        r_ = self._all_locate[mname](
+                            img, win, wg, altitude_m=alt, focal_px=self.focal_px,
+                            yaw_deg=yaw, map_gsd_m=self.cache.gsd,
+                            map_gsd_x_m=getattr(self.cache, "gsd_x", None),
+                            min_score=ms, min_margin=mm,
+                            window_is_edges=(self._window_kind == "edges"),
+                            principal_xy=self.principal_xy,
+                            query_shape=self.query_shape)
+                        if r_ is not None and r_.ok:
+                            got[mname] = r_
+                        if res is None or (r_ is not None and r_.ok and not res.ok):
+                            res = r_
             except Exception:
-                res = None
+                pass
+            # How far apart the two answers are, when both produced one. The
+            # ONLY measured predictor of a bad fix: corr +0.928 against the
+            # error, where score manages -0.10 and inlier count +0.20.
+            # Logged, not enforced.
+            disagree = None
+            if len(got) == 2:
+                a, b = (got[k] for k in self._pair)
+                disagree = float(math.hypot(
+                    (a.lat - b.lat) * 111320.0,
+                    (a.lon - b.lon) * 111320.0
+                    * math.cos(math.radians(a.lat))))
             out = None
             if res is not None:
                 out = FixResult(res.lon, res.lat, res.score, res.margin, res.ok,
                                 time.monotonic() - t0, plon, plat,
+                                disagree,
                                 getattr(res, "inliers", 0),
                                 getattr(res, "total_matches", 0),
                                 getattr(res, "reason", ""),
@@ -377,4 +471,9 @@ class MapFixWorker:
     def stop(self):
         self._run = False
         self._wake.set()
-        self._thread.join(timeout=2.0)
+        # Long enough to outlast _warm(). The model load is 2.35 s warm and
+        # 4.95 s cold, so a 2 s join returned while the thread was still
+        # inside torch - and an abandoned torch thread aborts the interpreter
+        # at exit ("terminate called without an active exception"). Seen
+        # 25 Oct when a test built several workers in a row.
+        self._thread.join(timeout=8.0)

@@ -1184,6 +1184,12 @@ CSV_COLUMNS = ["t", "north_m", "east_m", "lon", "lat", "sigma_m",
     # every correction. It is logged now so the size of what was being folded
     # in is visible rather than inferred. 24 Oct.
     "fix_age_s",
+    # How far the two matchers were apart on this fix, when both produced
+    # one. Measured 25 Oct: corr with the fix's actual error is +0.928, where
+    # fix_score manages -0.10 and fix_inliers +0.20. Blank when only one ran
+    # or only one succeeded. Logged so a flight can price a veto before one
+    # is fitted. 25 Oct.
+    "fix_disagree_m",
     # THE STEP GATE'S INPUT. A refused step enters the position as zero and a
     # clipped one at the ceiling, so n_step_rej counts the bites but nothing
     # records what was bitten. 22 Oct.
@@ -1331,6 +1337,8 @@ def csv_row(est, f, v, gN, gE, err):
             "" if est.get("fix_inliers") is None else f"{est['fix_inliers']:d}",
             "" if est.get("fix_alt_m") is None else f"{est['fix_alt_m']:.1f}",
             "" if est.get("fix_age_s") is None else f"{est['fix_age_s']:.3f}",
+            "" if est.get("fix_disagree_m") is None
+            else f"{est['fix_disagree_m']:.2f}",
             "" if est.get("step_px") is None else f"{est['step_px']:.2f}",
             est.get("step_action", ""),
             "" if est.get("step_dn") is None else f"{est['step_dn']:.4f}",
@@ -2083,6 +2091,11 @@ class VpsNode:
         _cfg = _vps_config()
         self.worker = MapFixWorker(
             cache, focal_px=focal_px, radius_m=radius_m,
+            # PASSED, for the same reason the comment below gives about the
+            # other three: the worker's own default is "xfeat", so leaving
+            # this out made VpsConfig.matcher dead. Found 25 Oct, the day NCC
+            # came back and the setting had to mean something.
+            matcher=getattr(_cfg, "matcher", "xfeat"),
             window_alt_frac=getattr(_cfg, "map_window_alt_frac", 0.90),
             query_shape=getattr(_cfg, "map_query_shape", "full"),
             # PASSED, not defaulted. It was not before, so the worker's own
@@ -2612,6 +2625,7 @@ class VpsNode:
         fix_lon = fix_lat = fix_score = fix_alt = None
         fix_inl = None
         fix_age = None
+        fix_dis = None
         if res is not None and res.ok:
             fN = (res.lat - self.origin[1]) * M_PER_DEG_LAT
             fE = (res.lon - self.origin[0]) * self.mlon
@@ -2624,6 +2638,7 @@ class VpsNode:
             pE = (res.prior_lon - self.origin[0]) * self.mlon
             fix_used = self.fuser.update(fN, fE, prior_north=pN, prior_east=pE)
             fix_age = float(getattr(res, "age_s", 0.0) or 0.0)
+            fix_dis = getattr(res, "disagree_m", None)
             self.n_fix += 1
             # Where the MATCHER put us, before the fuser weighed and capped
             # it, and the height it was matched at. This is the raw number the
@@ -2638,7 +2653,7 @@ class VpsNode:
 
         lon, lat = self.to_lonlat(*self.fuser.pos)
         return dict(step_px=self.step_px, step_action=self.step_action,
-                    fix_age_s=fix_age,
+                    fix_age_s=fix_age, fix_disagree_m=fix_dis,
                     # getattr, because the tests build VpsNode through
                     # __new__ and never run __init__ - the same reason the
                     # frame-age and veto counters are read this way.
