@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DroneVPS Studio</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header>
+  <div class="brand"><b>DroneVPS Studio</b><span>ZD850 &middot; map &amp; flight</span></div>
+  <nav>
+    <button id="tab-map" class="on">Map Cutter</button>
+    <button id="tab-log">Flight Review</button>
+  </nav>
+  <div class="right"><span id="status">ready</span></div>
+</header>
+
+<!-- ======================================================== MAP CUTTER -->
+<main id="view-map" class="on">
+  <aside>
+    <section class="card">
+      <h3>Source sheet</h3>
+      <div class="list" id="sheet-list"></div>
+      <p class="hint" id="sheet-hint">Any GeoTIFF under /data/DRONE. Drop a new
+        one in and reload.</p>
+    </section>
+
+    <section class="card" id="sheet-info" style="display:none">
+      <h3>This sheet</h3>
+      <table class="kv" id="sheet-kv"></table>
+      <div id="sheet-issues" style="margin-top:10px"></div>
+      <button class="b ghost" id="btn-ovr" style="margin-top:10px;width:100%">
+        Build overview pyramid (.ovr)</button>
+    </section>
+
+    <section class="card">
+      <h3>Go to a position</h3>
+      <label class="f"><span>latitude, longitude</span>
+        <input type="text" id="goto" placeholder="30.895774, 74.614113"></label>
+      <div class="row">
+        <button class="b ghost" id="btn-goto">Go</button>
+        <button class="b ghost" id="btn-centre-here">Centre crop here</button>
+      </div>
+      <p class="hint">Decimal degrees, or <code>30 53 44.8 N 74 36 50.8 E</code>.
+        The marker stays until you clear it.</p>
+    </section>
+
+    <section class="card">
+      <h3>Crop</h3>
+      <div class="seg" style="margin-bottom:10px">
+        <button id="mode-box" class="on">Drag a box</button>
+        <button id="mode-centre">Centre &amp; size</button>
+      </div>
+      <div id="crop-centre" style="display:none">
+        <div class="row">
+          <label class="f"><span>centre latitude</span>
+            <input type="text" id="c-lat"></label>
+          <label class="f"><span>centre longitude</span>
+            <input type="text" id="c-lon"></label>
+        </div>
+        <div class="row">
+          <label class="f"><span>width (m)</span>
+            <input type="number" id="c-w" value="1500"></label>
+          <label class="f"><span>height (m)</span>
+            <input type="number" id="c-h" value="1500"></label>
+        </div>
+      </div>
+      <table class="kv" id="crop-kv"></table>
+      <label class="f" style="margin-top:10px"><span>output file</span>
+        <input type="text" id="out-name" placeholder="site_name.tif"></label>
+      <label class="f"><span>output folder</span>
+        <input type="text" id="out-dir" value="/data/DRONE/maps"></label>
+      <div class="row">
+        <label class="f"><span>resolution</span>
+          <select id="out-gsd">
+            <option value="">keep source (pixel-exact)</option>
+            <option value="0.5092">0.5092 m/px (the flown sheet)</option>
+            <option value="0.25">0.25 m/px</option>
+            <option value="0.75">0.75 m/px</option>
+            <option value="1.0">1.0 m/px</option>
+          </select></label>
+        <label class="f"><span>bands</span>
+          <select id="out-grey">
+            <option value="">colour (3 bands)</option>
+            <option value="1">greyscale (1 band)</option>
+          </select></label>
+      </div>
+      <label class="f"><span>take-off point to check (optional)</span>
+        <input type="text" id="takeoff" placeholder="30.895774, 74.614113"></label>
+      <button class="b" id="btn-cut" style="width:100%">Cut this sheet</button>
+      <p class="hint">The cut is always written EPSG:4326, north-up, origin
+        top-left &mdash; whatever the source was. That is what
+        <code>map_cache.py</code> assumes and never checks.</p>
+    </section>
+
+    <section class="card" id="cut-result" style="display:none">
+      <h3>Result</h3>
+      <div id="cut-body"></div>
+    </section>
+  </aside>
+
+  <div class="pane">
+    <div class="canvas-wrap" id="map-wrap">
+      <canvas id="map-canvas"></canvas>
+      <div class="overlay-help">
+        <b>drag</b> pan &nbsp; <b>wheel</b> zoom &nbsp; <b>shift+drag</b> draw a crop box<br>
+        <b>drag a handle</b> resize &nbsp; <b>double-click</b> clear the box
+      </div>
+    </div>
+    <div class="statusbar">
+      <span id="st-pos">&mdash;</span>
+      <span id="st-zoom">&mdash;</span>
+      <span id="st-box">no crop box</span>
+      <span id="st-ram" style="margin-left:auto"></span>
+    </div>
+  </div>
+</main>
+
+<!-- ====================================================== FLIGHT REVIEW -->
+<main id="view-log">
+  <aside>
+    <section class="card">
+      <h3>Flight controller log (.BIN)</h3>
+      <div class="list" id="fc-list"></div>
+    </section>
+    <section class="card">
+      <h3>Node log (vps_*)</h3>
+      <div class="list" id="node-list"></div>
+      <button class="b ghost" id="btn-pair" style="margin-top:10px;width:100%">
+        Find the matching node log</button>
+      <p class="hint">Pairing is decided by correlating the two altitude
+        traces, not by the file times &mdash; two node logs are usually written
+        within minutes of the same .BIN and only one of them flew.</p>
+    </section>
+    <section class="card">
+      <button class="b" id="btn-review" style="width:100%">Review this flight</button>
+      <button class="b ghost" id="btn-report" style="width:100%;margin-top:8px"
+              disabled>Download the review as Markdown</button>
+      <p class="hint" id="review-hint">A .BIN is half a million messages and
+        takes about 15 s the first time. After that it is cached.</p>
+    </section>
+  </aside>
+
+  <div class="pane">
+    <div class="scroll" id="log-scroll">
+      <div class="empty">Pick a log on the left and press Review.</div>
+    </div>
+  </div>
+</main>
+
+<div id="lightbox"><img alt=""></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
