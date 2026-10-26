@@ -103,7 +103,31 @@ class VpsConfig:
                                    # disagreement is LOGGED, not enforced -
                                    # a veto on it is a new gate. UNFLOWN.
                                    # Map matching went 45% -> 75% on the swap.
-    map_min_alt_m: float = 60.0    # 3 Oct: 80 -> 60 m. Flown, kept. At 80 m the
+    # 60 -> 50 ON 26 OCT, at the pilot's instruction and on their reasoning:
+    # the gate reads the BAROMETER, which runs 5-9 m high, so a gate of 50
+    # stops the map at about 44 m of real height. Below that the flow, the
+    # VIO and the stereo depth carry it.
+    #
+    # It is NCC that makes this possible, and I had said the opposite earlier
+    # the same day. Tested on 156 frames from the two 25 Oct flights, each
+    # matcher with the window and gate the worker gives it:
+    #
+    #     matcher   30-45 m   45-60 m   60-80 m
+    #     NCC          43%       53%       73%
+    #     XFeat         0%        0%        9%
+    #
+    # XFeat dies down there because the query is rescaled to the map's
+    # 0.509 m/px and runs out of pixels - 56x56 at 30 m, 9 raw matches
+    # against a gate of 12. NCC slides a template in a much larger window and
+    # does not care.
+    #
+    # THE COST, so nobody is surprised by it: NCC's fixes below 60 m are
+    # 13.07-13.39 m p50 with a p90 past 50 m, against the 2.89 m the pair
+    # manage at 60-80 m. The system settles near the map's own accuracy, so
+    # expect roughly 13 m down there. The case for it is the alternative -
+    # this file's own note below records the flow going 4.13 -> 26.0 m in the
+    # 12 s of a 6 m/s descent. 13 beats 26. UNFLOWN.
+    map_min_alt_m: float = 50.0    # 3 Oct: 80 -> 60 m. Flown, kept. At 80 m the
                                    # map never started. The map runs ABOVE this
                                    # height and NOT below it, which is why the
                                    # descent is uncorrected: error went 4.13 ->
