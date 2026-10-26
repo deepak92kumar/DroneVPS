@@ -2417,9 +2417,16 @@ class VpsNode:
         # Corrected height, used for everything that divides by one. Never
         # below 1 m: the correction is an offset, not a licence to invent a
         # negative altitude on the ground.
-        # The lidar's own zero first, so everything downstream - the
-        # barometric bias, the CSV, the depth gate - sees a corrected reading
-        # rather than each correcting it again differently.
+        # The lidar's own zero comes off first, so everything that USES the
+        # reading - the barometric bias below, the depth gate - sees one
+        # corrected value rather than each correcting it again differently.
+        #
+        # The CSV is deliberately NOT part of that: csv_row is handed the
+        # caller's dict, which is the raw one, and rngfnd_zero_m is its own
+        # column beside it. Raw plus the offset can always be turned into the
+        # corrected reading afterwards; a corrected column alone cannot be
+        # turned back, and every past argument about this sensor has needed
+        # the raw number.
         self.rngfnd_zero_m = self._rngfnd_zero(f)
         if self.rngfnd_zero_m and f.get("rngfnd") is not None:
             f = dict(f)
