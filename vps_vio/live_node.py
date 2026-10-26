@@ -1190,6 +1190,9 @@ CSV_COLUMNS = ["t", "north_m", "east_m", "lon", "lat", "sigma_m",
     # or only one succeeded. Logged so a flight can price a veto before one
     # is fitted. 25 Oct.
     "fix_disagree_m",
+    # How much the barometer was corrected by, from the lidar. 0 when the
+    # lidar said nothing usable - the correction is never required. 25 Oct.
+    "alt_bias_m",
     # THE STEP GATE'S INPUT. A refused step enters the position as zero and a
     # clipped one at the ceiling, so n_step_rej counts the bites but nothing
     # records what was bitten. 22 Oct.
@@ -1339,6 +1342,7 @@ def csv_row(est, f, v, gN, gE, err):
             "" if est.get("fix_age_s") is None else f"{est['fix_age_s']:.3f}",
             "" if est.get("fix_disagree_m") is None
             else f"{est['fix_disagree_m']:.2f}",
+            f"{est.get('alt_bias_m') or 0.0:.2f}",
             "" if est.get("step_px") is None else f"{est['step_px']:.2f}",
             est.get("step_action", ""),
             "" if est.get("step_dn") is None else f"{est['step_dn']:.4f}",
@@ -2153,6 +2157,9 @@ class VpsNode:
         # the other way.
         self._vel_alt_span_m = 15.0
         self.cam_yaw_offset_deg = float(_c.camera_yaw_offset_deg)
+        self._alt_bias_m = 0.0
+        self._alt_bias_t = None
+        self.alt_bias_m = 0.0
         self._vel_cum_n = self._vel_cum_e = 0.0
         self.step_px = None
         self.step_action = "ok"
@@ -2301,10 +2308,60 @@ class VpsNode:
         return (self.origin[0] + east / self.mlon,
                 self.origin[1] + north / M_PER_DEG_LAT)
 
+    # THE HEIGHT THE BAROMETER IS WRONG BY, learned from the lidar.
+    #
+    # Velocity is pixels x altitude / focal, so an altitude error is a
+    # velocity error of the same proportion. Measured on flight 245 against
+    # the lidar: alt_m / lidar is 1.07 at 100 m, 1.17 at 40, 1.29 at 20 and
+    # 1.72 at 10. That is a near-constant 5-7 m offset - the SAME climbing
+    # and descending, so not hysteresis - and at low level it is most of a
+    # phantom. The aircraft was circling at 35 m.
+    #
+    # The lidar CORRECTS, it does not replace. The pilot's condition was
+    # that a badly configured lidar must never stop the aircraft flying, so
+    # nothing here is required: no lidar, no correction, and the altitude is
+    # exactly what it was. The bias is learned slowly, only from readings
+    # the lidar can actually make, and clamped.
+    ALT_BIAS_TAU_S = 20.0       # slow: this is an offset, not a signal
+    ALT_BIAS_MAX_M = 12.0       # beyond this the lidar is not seeing ground
+    ALT_BIAS_LIDAR_MIN_M = 2.0  # below, the leg and the ground confuse it
+    ALT_BIAS_LIDAR_MAX_M = 50.0 # above, the TF03 is out of its range
+
+    def _alt_bias(self, f: dict) -> float:
+        """Learn alt_m - rngfnd, slowly, and return it. 0.0 if unlearnable."""
+        # getattr, because the tests build VpsNode through __new__ and
+        # never run __init__ - the same reason the step and veto counters
+        # are read this way.
+        self._alt_bias_m = getattr(self, "_alt_bias_m", 0.0)
+        self._alt_bias_t = getattr(self, "_alt_bias_t", None)
+        rng = f.get("rngfnd")
+        alt = f.get("alt")
+        t = f.get("t")
+        if (rng is not None and alt is not None and t is not None
+                and self.ALT_BIAS_LIDAR_MIN_M < rng < self.ALT_BIAS_LIDAR_MAX_M):
+            b = float(alt) - float(rng)
+            if abs(b) <= self.ALT_BIAS_MAX_M:
+                if self._alt_bias_t is None:
+                    self._alt_bias_m = b
+                else:
+                    dt = max(0.0, float(t) - self._alt_bias_t)
+                    k = 1.0 - math.exp(-dt / self.ALT_BIAS_TAU_S)
+                    self._alt_bias_m += k * (b - self._alt_bias_m)
+                self._alt_bias_t = float(t)
+        return self._alt_bias_m
+
     def step(self, f: dict) -> dict | None:
         """One frame in, one position estimate out."""
         if f["alt"] is None or f["yaw"] is None or self.origin is None:
             return None
+
+        # Corrected height, used for everything that divides by one. Never
+        # below 1 m: the correction is an offset, not a licence to invent a
+        # negative altitude on the ground.
+        self.alt_bias_m = self._alt_bias(f)
+        if self.alt_bias_m:
+            f = dict(f)
+            f["alt"] = max(1.0, float(f["alt"]) - self.alt_bias_m)
         # Counters as they stood on entry, so the row can name the source that
         # actually ran on THIS frame rather than the one that ran most often.
         _dg, _dq, _df = self.n_derot_gyro, self.n_derot_quat, self.n_derot_fc
@@ -2688,6 +2745,7 @@ class VpsNode:
         lon, lat = self.to_lonlat(*self.fuser.pos)
         return dict(step_px=self.step_px, step_action=self.step_action,
                     fix_age_s=fix_age, fix_disagree_m=fix_dis,
+                    alt_bias_m=getattr(self, "alt_bias_m", 0.0),
                     # getattr, because the tests build VpsNode through
                     # __new__ and never run __init__ - the same reason the
                     # frame-age and veto counters are read this way.
