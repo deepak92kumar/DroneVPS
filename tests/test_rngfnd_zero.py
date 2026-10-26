@@ -91,6 +91,12 @@ for _ in range(40):
 check("altitude alone stops it, even if the armed flag is wrong",
       z4 == frozen, f"{z4:.3f} m")
 
+# A MISSING armed flag must not read as disarmed.
+n_m = Node()
+for _ in range(20):
+    zm = n_m._rngfnd_zero(dict(rngfnd=6.94, alt=0.0))      # no 'armed' key
+check("a missing armed flag does not count as disarmed", zm == 0.0, f"{zm}")
+
 # A stale barometric bias cannot survive sitting on the ground.
 n2 = Node()
 n2._alt_bias_m = -5.81          # what the node was found holding

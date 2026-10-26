@@ -2366,7 +2366,14 @@ class VpsNode:
         self._rngfnd_zero_m = getattr(self, "_rngfnd_zero_m", 0.0)
         rng = f.get("rngfnd")
         alt = f.get("alt")
-        if (not f.get("armed") and rng is not None and alt is not None
+        # `is False` and not `not ...`: a MISSING armed flag must not read as
+        # disarmed. The frame dict always carries a real bool, so this costs
+        # nothing on the flying path and closes the one way a half-built frame
+        # could let this learn in the air. The altitude gate already stopped
+        # that on its own - the pilot asked whether the node could zero the
+        # lidar mid-flight, and it could not - but two independent conditions
+        # for something this consequential is worth the word.
+        if (f.get("armed") is False and rng is not None and alt is not None
                 and abs(float(alt)) < self.RNGFND_GROUND_ALT_M):
             self._rz_hist.append(float(rng))
             if len(self._rz_hist) >= 8:
