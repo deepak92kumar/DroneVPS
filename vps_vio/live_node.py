@@ -28,7 +28,6 @@ from map_fuse import MapFuser
 from velocity_bridge import VelocityBridge
 from frame_writer import FrameWriter, next_run_number
 import single_instance
-import active_map
 
 M_PER_DEG_LAT = 111_320.0
 
@@ -66,12 +65,7 @@ def _socket(name: str):
 # site and SCR_USER holds the newer southern one. A take-off point outside the
 # sheet means no map fixes for the whole flight, which that report lists as its
 # first item to confirm before flying. Pass --map explicitly per site.
-# WHICH sheet is no longer decided here. `active_map` reads
-# /data/DRONE/maps/ACTIVE_MAP, which the studio writes when a freshly cut
-# sheet is loaded, and falls back to bhh.tif when there is no pointer. The
-# startup banner prints the path and the reason, so a flight never begins
-# without the sheet being stated. --map still overrides both.
-DEFAULT_MAP, _MAP_SOURCE, _MAP_NOTE = active_map.resolve()
+DEFAULT_MAP = "/data/DRONE/bhh.tif"
 
 
 # --------------------------------------------------------------------------- #
@@ -3166,13 +3160,6 @@ def main():
     src = (ReplaySource(a.replay, a.every, a.min_alt) if a.replay
            else LiveSource(a.fc_port, a.fc_baud, crop_left=a.crop_left,
                            imu_rate=a.imu_rate))
-    # Say WHICH sheet, and why it is that one, before anything opens it. A
-    # flight on the wrong sheet gets no map fixes at all, and the only sign of
-    # it in the air is that no fix ever lands.
-    if os.path.abspath(a.map) == os.path.abspath(DEFAULT_MAP):
-        print(f"map {a.map}  ({_MAP_SOURCE}: {_MAP_NOTE})")
-    else:
-        print(f"map {a.map}  (--map on the command line)")
     cache = MapCache(a.map)
     print(cache.summary())
     print(f"focal {src.focal:.1f} px, fix every {a.fix_period:.1f} s, window +-{a.radius:.0f} m, "

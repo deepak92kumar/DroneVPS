@@ -36,20 +36,20 @@
     </section>
 
     <section class="card" id="flight-sheet">
-      <h3>The sheet the node will fly</h3>
+      <h3>The sheet to fly</h3>
       <div id="active-body"></div>
       <div class="row" style="margin-top:10px">
-        <button class="b" id="btn-activate">Load the selected sheet</button>
+        <button class="b" id="btn-activate">Use the selected sheet</button>
         <button class="b ghost" id="btn-check">Check it loads</button>
       </div>
       <button class="b ghost" id="btn-deactivate" style="width:100%;margin-top:8px">
-        Back to the default sheet</button>
+        Clear the choice</button>
       <div id="check-body"></div>
-      <p class="hint">"Load" writes the path into
-        <code>/data/DRONE/maps/ACTIVE_MAP</code>, which the node reads at
-        startup and prints in its banner. "Check" opens the sheet with the
-        node's own <code>MapCache</code> and takes a matcher window out of it
-        &mdash; if that works here it works in the air.</p>
+      <p class="hint">"Use" points <code>/data/DRONE/maps/active.tif</code> at
+        this sheet, so the command you fly with never changes &mdash; nothing
+        in <code>vps_vio</code> is modified. "Check" opens the sheet with the
+        node's own <code>MapCache</code> and takes a matcher window out of it:
+        if that works here it works in the air.</p>
     </section>
 
     <section class="card">

@@ -502,28 +502,35 @@ const Map1 = {
       const a = await api('/api/active');
       this.active = a;
       const b = $('#active-body'); b.innerHTML = '';
-      const name = a.path.split('/').pop();
-      b.appendChild(el('div', 'banner ' + (a.exists ? 'ok' : 'alarm'),
-        a.exists ? `The node will open ${name}` : `${a.path} is NOT on this machine`));
-      const kv = el('table', 'kv');
-      const add = (k, v) => { const tr = kv.insertRow();
-        tr.insertCell().textContent = k; tr.insertCell().textContent = v; };
-      add('path', a.path);
-      add('chosen by', a.source === 'pointer' ? 'ACTIVE_MAP' : 'the default');
-      if (a.sheet) {
-        add('ground', `${fmt(a.sheet.ground_w_km)} x ${fmt(a.sheet.ground_h_km)} km`);
-        add('resolution', `${fmt(a.sheet.gsd_ns_m, 4)} m/px N-S`);
+      if (!a.path) {
+        b.appendChild(el('div', 'banner warn', 'No sheet chosen yet.'));
+      } else {
+        const name = a.path.split('/').pop();
+        b.appendChild(el('div', 'banner ' + (a.exists ? 'ok' : 'alarm'),
+          a.exists ? `active.tif points at ${name}`
+                   : `${a.path} is NOT on this machine`));
+        const kv = el('table', 'kv');
+        const add = (k, v) => { const tr = kv.insertRow();
+          tr.insertCell().textContent = k; tr.insertCell().textContent = v; };
+        add('sheet', a.path);
+        if (a.sheet) {
+          add('ground', `${fmt(a.sheet.ground_w_km)} x ${fmt(a.sheet.ground_h_km)} km`);
+          add('resolution', `${fmt(a.sheet.gsd_ns_m, 4)} m/px N-S`);
+        }
+        b.appendChild(kv);
+        const dl = el('p', 'hint');
+        dl.innerHTML = `<a href="/api/download?path=${encodeURIComponent(a.path)}" ` +
+          `style="color:#4da3ff">Download this sheet</a> to take it away.`;
+        b.appendChild(dl);
       }
-      b.appendChild(kv);
-      const dl = el('p', 'hint');
-      dl.innerHTML = `<a href="/api/download?path=${encodeURIComponent(a.path)}" ` +
-        `style="color:#4da3ff">Download this sheet</a> to take it away.`;
-      b.appendChild(dl);
-    } catch (e) { status('active sheet: ' + e.message); }
+      const cmd = el('p', 'hint');
+      cmd.innerHTML = 'Fly it with <code>' + a.fly + '</code>';
+      b.appendChild(cmd);
+    } catch (e) { status('chosen sheet: ' + e.message); }
   },
   async activate(path) {
     if (!path) { status('pick a sheet first'); return; }
-    status('loading ' + path.split('/').pop() + ' into the node...');
+    status('pointing active.tif at ' + path.split('/').pop() + '...');
     $('#btn-activate').disabled = true;
     try {
       const body = { path };
@@ -533,7 +540,8 @@ const Map1 = {
         headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       this.showCheck(r);
       await this.loadActive();
-      status(r.ok ? 'loaded - the node will open this sheet' : 'loaded, but it will NOT work');
+      status(r.ok ? 'chosen - active.tif now points at it'
+                  : 'chosen, but it will NOT work - see the checks');
     } catch (e) { status('load: ' + e.message); }
     $('#btn-activate').disabled = false;
   },
@@ -556,7 +564,7 @@ const Map1 = {
         headers: { 'Content-Type': 'application/json' }, body: '{}' });
       $('#check-body').innerHTML = '';
       await this.loadActive();
-      status('back to the default sheet');
+      status('choice cleared');
     } catch (e) { status('clear: ' + e.message); }
   },
   showCheck(r, into) {
@@ -645,7 +653,7 @@ const Map1 = {
       n.appendChild(d2); b.appendChild(n);
     });
     const row = el('div', 'row'); row.style.marginTop = '10px';
-    const load = el('button', 'b', 'Load this cut into the node');
+    const load = el('button', 'b', 'Use this cut as the sheet to fly');
     load.onclick = () => this.activate(rep.out_path);
     const dl = el('button', 'b ghost', 'Download it');
     dl.onclick = () => { location.href =

@@ -81,33 +81,27 @@ exception is when a resolution is explicitly chosen in the dropdown: that
 produces square metre pixels, which `map_query` then skips correcting, and
 both are consistent.
 
-### Loading a cut into the node, and proving it opens
+### Choosing a cut to fly, and proving it opens
 
 Cutting a sheet is half the job; the node has to actually fly it.
 
-**"Load the selected sheet"** writes the path into
-`/data/DRONE/maps/ACTIVE_MAP` and points `/data/DRONE/maps/active.tif` at it.
-`vps_vio/active_map.py` reads that pointer, `live_node.py` takes its
-`DEFAULT_MAP` from it, and `preflight.py` checks coverage against the same
-sheet rather than against a constant. The node's startup banner prints the
-path **and why it is that one**, so a flight never begins without the sheet
-being stated:
+**"Use the selected sheet"** points `/data/DRONE/maps/active.tif` at it. That
+is the whole mechanism - one symlink next to the cuts. **Nothing in `vps_vio`
+is modified.** The node is flown the way it always was, with one command that
+never changes:
 
-    map /data/DRONE/maps/site_a.tif  (pointer: set in /data/DRONE/maps/ACTIVE_MAP)
+    python3 vps_vio/live_node.py --map /data/DRONE/maps/active.tif
 
-If the pointer is missing, empty, or names a file that is not on the machine,
-it falls back to `bhh.tif` **and says that it fell back** - a silent fallback
-to the wrong site is the failure this is meant to prevent. `--map` on the
-command line still overrides everything, and "Back to the default sheet"
-removes the pointer.
+so a new site is a click here and the same command on the aircraft. "Clear the
+choice" removes the link.
 
 **"Check it loads"** does not re-read the header by this program's own rules.
 It constructs the real `vps_vio.map_cache.MapCache` - the same class the
 flying node constructs at startup - and then slices a matcher window out of it
-at the take-off point. If that works here it works in the air. Every failure
-carries its remedy, because "CRS is not EPSG:4326" is a puzzle and "cut it
-again from the Map tab, which reprojects it" is an instruction. What it
-catches:
+at the take-off point. If that works here it works in the air. `map_cache.py`
+is imported and read, never written. Every failure carries its remedy, because
+"CRS is not EPSG:4326" is a puzzle and "cut it again from the Map tab, which
+reprojects it" is an instruction. What it catches:
 
 | It fails on | and tells you |
 |---|---|
@@ -191,11 +185,12 @@ Breaking them is how this project has repeatedly fooled itself
     studio/analysis.py      the findings engine
     studio/plots.py         the twelve panels
     studio/report.py        the Markdown review
-    studio/flightsheet.py   loading a sheet into the node, and the load check
+    studio/flightsheet.py   the sheet to fly, and the load check
     studio/launch.sh        what the desktop icon runs
     studio/install-icon.sh  puts the icon on the desktop and in the menu
     studio/icon.png         the icon
     studio/static/          one page, one stylesheet, one script
     studio/cache/           parsed .BIN caches (safe to delete)
 
-    vps_vio/active_map.py   the pointer the node reads (tests/test_active_map.py)
+Nothing outside `studio/` is written by any of this. `vps_vio/map_cache.py` is
+imported read-only, to run the load check with the node's own code.

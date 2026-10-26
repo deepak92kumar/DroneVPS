@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Loading a cut sheet into the node, and proving it will actually open.
+"""Choosing a cut sheet to fly, and proving it will actually open.
 
 "Cut it, then check it loaded, and if it did not, say what is wrong" - this
 file is the second half of that. The check is not a re-reading of the
@@ -8,6 +8,10 @@ GeoTIFF's header by this program's own rules: it constructs the real
 startup, and then slices a window out of it the way the matcher does. If that
 works here it will work in the air, and if it does not, it fails here on the
 ground where the message can be read.
+
+Nothing in vps_vio is modified by any of this. The node is read, never
+written: `map_cache.py` is imported to run the real check, and the choice of
+sheet is a symlink the pilot passes with --map.
 
 Every check that can fail carries the remedy with it. A red line that says
 only "CRS is not EPSG:4326" is a puzzle; one that says "cut it again from the
@@ -25,41 +29,52 @@ import geotiff
 
 VPS_VIO = "/data/DRONE/vps_vio"
 FLOWN_GSD = 0.5092
+MAPS_DIR = "/data/DRONE/maps"
+# The chosen sheet is a SYMLINK next to the cuts, and nothing else. Nothing in
+# vps_vio is touched: the node is flown with
+#
+#     python3 vps_vio/live_node.py --map /data/DRONE/maps/active.tif
+#
+# and "Use this sheet" repoints that one link, so a new site is a click here
+# and the same command as always on the aircraft.
+LINK = os.path.join(MAPS_DIR, "active.tif")
 # MapCache holds the WHOLE sheet in RAM as one greyscale array, on purpose.
 # This machine has 8 GB shared with the camera stack and TensorRT, so a sheet
 # past this size is a problem to find on the ground, not in the air.
 RAM_LIMIT_MB = 700.0
-
-
-def _active_module():
-    if VPS_VIO not in sys.path:
-        sys.path.insert(0, VPS_VIO)
-    import active_map
-    return active_map
+FLY_CMD = "python3 vps_vio/live_node.py --map " + LINK
 
 
 def active():
-    """Which sheet the node will open, and why that one."""
-    am = _active_module()
-    path, source, note = am.resolve()
-    out = dict(path=path, source=source, note=note, pointer=am.POINTER,
-               link=am.LINK, exists=os.path.exists(path))
-    if out["exists"]:
-        try:
-            out["sheet"] = geotiff.Sheet(path).describe()
-        except Exception as e:                           # noqa: BLE001
-            out["sheet"] = None
-            out["error"] = f"{type(e).__name__}: {e}"
+    """Which sheet the link points at, if any."""
+    out = dict(link=LINK, path=None, exists=False, fly=FLY_CMD)
+    if os.path.islink(LINK):
+        target = os.path.realpath(LINK)
+        out["path"] = target
+        out["exists"] = os.path.exists(target)
+        if out["exists"]:
+            try:
+                out["sheet"] = geotiff.Sheet(target).describe()
+            except Exception as e:                       # noqa: BLE001
+                out["error"] = f"{type(e).__name__}: {e}"
     return out
 
 
-def set_active(path: str):
-    am = _active_module()
-    return am.set_active(path)
+def set_active(path: str) -> str:
+    """Point maps/active.tif at this sheet. Returns the absolute path."""
+    p = os.path.abspath(path)
+    if not os.path.exists(p):
+        raise FileNotFoundError(p)
+    os.makedirs(MAPS_DIR, exist_ok=True)
+    if os.path.islink(LINK) or os.path.exists(LINK):
+        os.unlink(LINK)
+    os.symlink(p, LINK)
+    return p
 
 
 def clear_active():
-    _active_module().clear()
+    if os.path.islink(LINK) or os.path.exists(LINK):
+        os.unlink(LINK)
 
 
 def load_check(path: str, takeoff=None):
