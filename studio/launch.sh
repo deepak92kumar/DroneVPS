@@ -10,7 +10,7 @@ DIR="/data/DRONE"
 LOG="$DIR/studio/studio.log"
 URL="http://127.0.0.1:$PORT/"
 
-up() { curl -fsS -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/api/sheets"; }
+up() { curl -fs -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/api/sheets" 2>/dev/null; }
 
 if ! up; then
   cd "$DIR" || exit 1
