@@ -158,6 +158,14 @@ HILITE = [
      "times with the props turning. RNGFND1_TYPE is 0. Narrowing its analog "
      "span would fix the noise but needs a UART adapter the pilot does not "
      "have."),
+    ("DroneVPS Studio: a page on the Jetson for cutting maps and reading "
+     "flights.",
+     "Built in a separate session and already in the repo - 15 files under "
+     "studio/. Map Cutter crops a GeoTIFF to a sheet the node can load; "
+     "Flight Review plots a flight from its CSV and BIN. Served at "
+     "<jetson-ip>:8099 to any browser on the field network, or by a desktop "
+     "icon on the Jetson itself. Standard library, GDAL, pymavlink, numpy, "
+     "matplotlib - nothing new installed, works with the network unplugged."),
     ("Climbing we under-report, descending we over-report.",
      "Both 25 Oct flights, 30-80 m against the raw receiver: climbing -0.33 "
      "and -0.55 m/s, descending +0.53 and +0.25, with step_px going 2.03 to "
@@ -183,6 +191,11 @@ SECTIONS = [
    "zero and GPS2_POS_Z - with the node running and its rangefinder stream "
    "intact afterwards."),
   ("Services and auto-start", 100, "Unchanged."),
+  ("Ground tools", 90,
+   "New. studio/ serves a page at <jetson-ip>:8099 with a Map Cutter for "
+   "GeoTIFF sheets and a Flight Review for CSV and BIN, plus a desktop "
+   "launcher on the Jetson. Not 100% because none of it has been used at a "
+   "field yet."),
   ("Flight data recording", 96,
    "80-column CSV, frames at 4 Hz. Down from 97: flight 247 produced NO "
    "node-side CSV at all, so that flight can only be read from the FC log."),
