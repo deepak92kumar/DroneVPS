@@ -344,10 +344,10 @@ def flight_controller(port):
         print(f"\nTHE ORIGIN  SCR_USER1/2 = {lat:.6f}, {lon:.6f}")
         covered = sheet_covers(lon, lat)
         if covered is None:
-            warn("the sheet covers the take-off point", "could not read bhh.tif")
+            warn("the sheet covers the take-off point", "could not read the sheet")
         else:
             check(covered, "the sheet covers the take-off point",
-                  "bhh.tif" if covered else
+                  os.path.basename(sheet_path()) if covered else
                   "OFF-SHEET - there will be no map fixes for the whole flight")
         # Is the aircraft actually AT the typed point? 20 Oct: 150 m away.
         d = distance_to_gps(fc, lat, lon)
@@ -362,7 +362,20 @@ def flight_controller(port):
     return fc
 
 
-def sheet_covers(lon, lat, path="/data/DRONE/bhh.tif"):
+def sheet_path():
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from active_map import active_map
+    return active_map()
+
+
+def sheet_covers(lon, lat, path=None):
+    # The sheet the NODE will actually open, not the one this file was written
+    # with: checking coverage against a sheet the flight will not use is worse
+    # than not checking it.
+    if path is None:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from active_map import active_map
+        path = active_map()
     try:
         from osgeo import gdal
         ds = gdal.Open(path)

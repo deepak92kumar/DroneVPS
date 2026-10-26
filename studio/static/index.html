@@ -35,6 +35,23 @@
         Build overview pyramid (.ovr)</button>
     </section>
 
+    <section class="card" id="flight-sheet">
+      <h3>The sheet the node will fly</h3>
+      <div id="active-body"></div>
+      <div class="row" style="margin-top:10px">
+        <button class="b" id="btn-activate">Load the selected sheet</button>
+        <button class="b ghost" id="btn-check">Check it loads</button>
+      </div>
+      <button class="b ghost" id="btn-deactivate" style="width:100%;margin-top:8px">
+        Back to the default sheet</button>
+      <div id="check-body"></div>
+      <p class="hint">"Load" writes the path into
+        <code>/data/DRONE/maps/ACTIVE_MAP</code>, which the node reads at
+        startup and prints in its banner. "Check" opens the sheet with the
+        node's own <code>MapCache</code> and takes a matcher window out of it
+        &mdash; if that works here it works in the air.</p>
+    </section>
+
     <section class="card">
       <h3>Go to a position</h3>
       <label class="f"><span>latitude, longitude</span>
@@ -49,10 +66,12 @@
 
     <section class="card">
       <h3>Crop</h3>
-      <div class="seg" style="margin-bottom:10px">
-        <button id="mode-box" class="on">Drag a box</button>
+      <div class="seg" style="margin-bottom:8px">
+        <button id="mode-box" class="on">Draw a box</button>
         <button id="mode-centre">Centre &amp; size</button>
       </div>
+      <p class="hint" style="margin:0 0 10px">Draw a box: <b>drag on the
+        sheet</b>. Pan with the right button or shift+drag.</p>
       <div id="crop-centre" style="display:none">
         <div class="row">
           <label class="f"><span>centre latitude</span>
@@ -68,6 +87,8 @@
         </div>
       </div>
       <table class="kv" id="crop-kv"></table>
+      <button class="b ghost" id="btn-clear-box" style="width:100%;margin-top:8px">
+        Clear the box</button>
       <label class="f" style="margin-top:10px"><span>output file</span>
         <input type="text" id="out-name" placeholder="site_name.tif"></label>
       <label class="f"><span>output folder</span>
@@ -105,8 +126,12 @@
     <div class="canvas-wrap" id="map-wrap">
       <canvas id="map-canvas"></canvas>
       <div class="overlay-help">
-        <b>drag</b> pan &nbsp; <b>wheel</b> zoom &nbsp; <b>shift+drag</b> draw a crop box<br>
-        <b>drag a handle</b> resize &nbsp; <b>double-click</b> clear the box
+        <span id="help-box"><b>drag</b> draw the crop box &nbsp;
+          <b>drag inside it</b> move it &nbsp; <b>handles</b> resize<br></span>
+        <span id="help-pan" style="display:none"><b>drag</b> pan &nbsp;
+          <b>handles</b> resize the box<br></span>
+        <b>right-drag</b> or <b>shift+drag</b> pan &nbsp; <b>wheel</b> zoom
+        &nbsp; <b>double-click</b> clear the box
       </div>
     </div>
     <div class="statusbar">

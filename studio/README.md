@@ -1,9 +1,25 @@
 # DroneVPS Studio
 
 Two tools in one page, served from the Jetson to whatever browser is on the
-field network:
+field network.
 
-    python3 studio/server.py              # http://<jetson-ip>:8099
+**On the Jetson: double-click the DroneVPS Studio icon on the desktop.** It
+starts the server if it is not already running and opens the page. Install the
+icon once with
+
+    bash /data/DRONE/studio/install-icon.sh
+
+which puts it on the desktop and in the Activities menu, and marks it trusted
+(GNOME will not run an untrusted launcher).
+
+**From a laptop on the same network** no icon is needed - the server listens on
+every interface:
+
+    http://<jetson-ip>:8099
+
+By hand, if you want a terminal:
+
+    python3 studio/server.py              # or studio/launch.sh
     python3 studio/server.py --port 9000 --host 127.0.0.1
 
 Standard library, GDAL, pymavlink, numpy, matplotlib - all of which were
@@ -16,8 +32,13 @@ page works with the network unplugged.
 
 Cuts a flyable sheet out of a big GeoTIFF.
 
-* Any GeoTIFF under `/data/DRONE` is listed. Pan with the mouse, zoom with the
-  wheel, **shift-drag** a crop box, drag its handles to adjust it.
+* Any GeoTIFF under `/data/DRONE` is listed.
+* In **Draw a box** mode (the default) a plain **drag draws the crop box**,
+  dragging inside it moves it, and the handles resize it. **Pan with the right
+  button or shift+drag**, zoom with the wheel, double-click to clear the box.
+  (The first version had it the other way round - drag panned and only
+  shift+drag drew a box, under a button that said "Drag a box" - which is why
+  the first session on it produced no cut at all.)
 * **Go to a position** takes `30.895774, 74.614113` or
   `30 53 44.8 N 74 36 50.8 E`, drops a marker, and says whether that point is
   on the sheet at all.
@@ -59,6 +80,45 @@ resampled here to square metre pixels would be corrected twice. The one
 exception is when a resolution is explicitly chosen in the dropdown: that
 produces square metre pixels, which `map_query` then skips correcting, and
 both are consistent.
+
+### Loading a cut into the node, and proving it opens
+
+Cutting a sheet is half the job; the node has to actually fly it.
+
+**"Load the selected sheet"** writes the path into
+`/data/DRONE/maps/ACTIVE_MAP` and points `/data/DRONE/maps/active.tif` at it.
+`vps_vio/active_map.py` reads that pointer, `live_node.py` takes its
+`DEFAULT_MAP` from it, and `preflight.py` checks coverage against the same
+sheet rather than against a constant. The node's startup banner prints the
+path **and why it is that one**, so a flight never begins without the sheet
+being stated:
+
+    map /data/DRONE/maps/site_a.tif  (pointer: set in /data/DRONE/maps/ACTIVE_MAP)
+
+If the pointer is missing, empty, or names a file that is not on the machine,
+it falls back to `bhh.tif` **and says that it fell back** - a silent fallback
+to the wrong site is the failure this is meant to prevent. `--map` on the
+command line still overrides everything, and "Back to the default sheet"
+removes the pointer.
+
+**"Check it loads"** does not re-read the header by this program's own rules.
+It constructs the real `vps_vio.map_cache.MapCache` - the same class the
+flying node constructs at startup - and then slices a matcher window out of it
+at the take-off point. If that works here it works in the air. Every failure
+carries its remedy, because "CRS is not EPSG:4326" is a puzzle and "cut it
+again from the Map tab, which reprojects it" is an instruction. What it
+catches:
+
+| It fails on | and tells you |
+|---|---|
+| a projected or rotated sheet | why it can never match, and to re-cut |
+| a truncated or half-copied file | that GDAL cannot read a block, with the byte |
+| a sheet too large for RAM | that the node loads the whole thing at startup |
+| the take-off point off the sheet | that there will be no map fixes for the whole flight |
+| a blank window at that point | that water, cloud or a nodata margin has no texture to match |
+
+**"Download this sheet"** hands the file back through the browser, for taking
+a cut away from the Jetson.
 
 ---
 
@@ -131,5 +191,11 @@ Breaking them is how this project has repeatedly fooled itself
     studio/analysis.py      the findings engine
     studio/plots.py         the twelve panels
     studio/report.py        the Markdown review
+    studio/flightsheet.py   loading a sheet into the node, and the load check
+    studio/launch.sh        what the desktop icon runs
+    studio/install-icon.sh  puts the icon on the desktop and in the menu
+    studio/icon.png         the icon
     studio/static/          one page, one stylesheet, one script
     studio/cache/           parsed .BIN caches (safe to delete)
+
+    vps_vio/active_map.py   the pointer the node reads (tests/test_active_map.py)

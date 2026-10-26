@@ -31,6 +31,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import analysis                                            # noqa: E402
+import flightsheet                                         # noqa: E402
 import geotiff                                             # noqa: E402
 import logs                                                # noqa: E402
 import plots                                               # noqa: E402
@@ -119,7 +120,11 @@ def find_sheets():
         for f in files:
             if f.lower().endswith((".tif", ".tiff")):
                 p = os.path.join(dirpath, f)
-                if p in seen:
+                # maps/active.tif is a symlink to whichever sheet is loaded.
+                # Listing it as well shows the same sheet twice under two
+                # names, and cutting "from active.tif" would be cutting from
+                # something that changes under your feet.
+                if p in seen or os.path.islink(p):
                     continue
                 seen.add(p)
                 st = os.stat(p)
@@ -182,6 +187,28 @@ class Handler(BaseHTTPRequestHandler):
                 takeoff = ((float(q["lon"]), float(q["lat"]))
                            if q.get("lat") and q.get("lon") else None)
                 return self._send(geotiff.verify(safe(q["path"]), takeoff=takeoff))
+            if u.path == "/api/active":
+                return self._send(flightsheet.active())
+            if u.path == "/api/loadcheck":
+                takeoff = ((float(q["lon"]), float(q["lat"]))
+                           if q.get("lat") and q.get("lon") else None)
+                return self._send(flightsheet.load_check(safe(q["path"]),
+                                                         takeoff=takeoff))
+            if u.path == "/api/download":
+                p = safe(q["path"])
+                self.send_response(200)
+                self.send_header("Content-Type", "image/tiff")
+                self.send_header("Content-Disposition",
+                                 f'attachment; filename="{os.path.basename(p)}"')
+                self.send_header("Content-Length", str(os.path.getsize(p)))
+                self.end_headers()
+                with open(p, "rb") as f:
+                    while True:
+                        chunk = f.read(1 << 20)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                return
             if u.path == "/api/logs":
                 return self._send(logs.discover())
             if u.path == "/api/pair":
@@ -226,6 +253,16 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(n) or b"{}")
             if u.path == "/api/cut":
                 return self._send(self._cut(body))
+            if u.path == "/api/activate":
+                path = flightsheet.set_active(safe(body["path"]))
+                takeoff = ((float(body["lon"]), float(body["lat"]))
+                           if body.get("lat") and body.get("lon") else None)
+                out = flightsheet.load_check(path, takeoff=takeoff)
+                out["active"] = flightsheet.active()
+                return self._send(out)
+            if u.path == "/api/deactivate":
+                flightsheet.clear_active()
+                return self._send(flightsheet.active())
             if u.path == "/api/overviews":
                 n = geotiff.build_overviews(safe(body["path"]))
                 return self._send(dict(ok=True, levels=n))

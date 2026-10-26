@@ -225,16 +225,31 @@ class MapView {
   _bind() {
     const cv = this.cv;
     let drag = null;
+    // Right-drag pans, so the context menu must not open on top of it.
+    cv.addEventListener('contextmenu', e => e.preventDefault());
     cv.addEventListener('mousedown', e => {
       if (!this.sheet || !this.interactive) return;
       const r = cv.getBoundingClientRect();
       const sx = e.clientX - r.left, sy = e.clientY - r.top;
-      const h = this.hitHandle(sx, sy);
-      if (h >= 0) drag = { kind: 'handle', h };
-      else if (e.shiftKey) {
-        const [px, py] = this.toPixel(sx, sy);
-        this.box = [px, py, px, py]; drag = { kind: 'handle', h: 4 };
-      } else drag = { kind: 'pan', sx, sy, cx: this.cx, cy: this.cy };
+      // The first version made a plain drag pan and reserved shift+drag for
+      // the crop box, while the button above it said "Drag a box". The pilot
+      // dragged, the sheet moved, and no box was ever drawn - the server log
+      // has 110 requests from the laptop and not one cut. So in box mode a
+      // plain drag now does what the button says, and panning moves to the
+      // right button, the middle button, or shift.
+      const wantPan = e.shiftKey || e.button === 1 || e.button === 2;
+      const h = wantPan ? -1 : this.hitHandle(sx, sy);
+      const [px, py] = this.toPixel(sx, sy);
+      if (h >= 0) {
+        drag = { kind: 'handle', h };
+      } else if (!wantPan && this.boxTool && this.inBox(px, py)) {
+        drag = { kind: 'move', px, py, box: this.box.slice() };
+      } else if (!wantPan && this.boxTool) {
+        this.box = [px, py, px, py];
+        drag = { kind: 'handle', h: 4 };
+      } else {
+        drag = { kind: 'pan', sx, sy, cx: this.cx, cy: this.cy };
+      }
       e.preventDefault();
     });
     addEventListener('mousemove', e => {
@@ -244,12 +259,22 @@ class MapView {
       if (!drag) {
         if (sx >= 0 && sy >= 0 && sx < r.width && sy < r.height && this.onHover)
           this.onHover(...this.toPixel(sx, sy));
-        if (this.interactive) cv.style.cursor = this.hitHandle(sx, sy) >= 0 ? 'crosshair' : 'grab';
+        if (this.interactive) {
+          const [px, py] = this.toPixel(sx, sy);
+          cv.style.cursor = this.hitHandle(sx, sy) >= 0 ? 'crosshair'
+            : (this.boxTool && this.inBox(px, py)) ? 'move'
+            : this.boxTool ? 'crosshair' : 'grab';
+        }
         return;
       }
       if (drag.kind === 'pan') {
         this.cx = drag.cx - (sx - drag.sx) / this.scale;
         this.cy = drag.cy - (sy - drag.sy) / this.scale;
+      } else if (drag.kind === 'move') {
+        const [px, py] = this.toPixel(sx, sy);
+        const dx = px - drag.px, dy = py - drag.py, b0 = drag.box;
+        this.box = [b0[0] + dx, b0[1] + dy, b0[2] + dx, b0[3] + dy];
+        if (this.onBox) this.onBox(this.normBox());
       } else {
         const [px, py] = this.toPixel(sx, sy), b = this.box, h = drag.h;
         if ([0, 6, 7].includes(h)) b[0] = px;
@@ -261,8 +286,13 @@ class MapView {
       this.requestDraw();
     });
     addEventListener('mouseup', () => {
-      if (drag && drag.kind === 'handle') { this.box = this.normBox();
-        if (this.onBox) this.onBox(this.box); }
+      if (drag && (drag.kind === 'handle' || drag.kind === 'move')) {
+        // A click with no movement in box mode should not leave a zero-sized
+        // box behind, which would then swallow every later click as a "move".
+        const b = this.normBox();
+        this.box = (b && (b[2] - b[0] > 2) && (b[3] - b[1] > 2)) ? b : null;
+        if (this.onBox) this.onBox(this.box);
+      }
       drag = null;
     });
     cv.addEventListener('dblclick', () => {
@@ -293,6 +323,10 @@ class MapView {
       if (Math.abs(sx - hs[i][0]) < 6 && Math.abs(sy - hs[i][1]) < 6) return i;
     return -1;
   }
+  inBox(px, py) {
+    const b = this.normBox();
+    return !!b && px > b[0] && px < b[2] && py > b[1] && py < b[3];
+  }
   normBox() {
     const b = this.box; if (!b) return null;
     return [Math.min(b[0], b[2]), Math.min(b[1], b[3]),
@@ -320,12 +354,18 @@ const Map1 = {
     $('#goto').addEventListener('keydown', e => { if (e.key === 'Enter') this.goto(); });
     $('#btn-centre-here').onclick = () => this.centreCrop();
     $('#mode-box').onclick = () => this.setMode('box');
+    $('#btn-clear-box').onclick = () => this.clearBox();
     $('#mode-centre').onclick = () => this.setMode('centre');
     $('#btn-cut').onclick = () => this.cut();
+    $('#btn-activate').onclick = () => this.activate(this.sheet && this.sheet.path);
+    $('#btn-check').onclick = () => this.check(this.sheet && this.sheet.path);
+    $('#btn-deactivate').onclick = () => this.deactivate();
     $('#btn-ovr').onclick = () => this.overviews();
     for (const id of ['#c-lat', '#c-lon', '#c-w', '#c-h'])
       $(id).addEventListener('input', () => this.centreChanged());
+    this.setMode('box');
     await this.loadSheets();
+    await this.loadActive();
   },
   async loadSheets(keep) {
     try {
@@ -394,7 +434,16 @@ const Map1 = {
     $('#mode-box').classList.toggle('on', m === 'box');
     $('#mode-centre').classList.toggle('on', m === 'centre');
     $('#crop-centre').style.display = m === 'centre' ? '' : 'none';
+    // In box mode the canvas IS the tool: a plain drag draws the box. In
+    // centre mode the box comes from the numbers, so a drag goes back to
+    // panning and only the handles still edit it.
+    this.view.boxTool = (m === 'box');
+    $('#help-box').style.display = m === 'box' ? '' : 'none';
+    $('#help-pan').style.display = m === 'box' ? 'none' : '';
     if (m === 'centre') this.centreChanged();
+  },
+  clearBox() {
+    this.view.box = null; this.showBox(null); this.view.requestDraw();
   },
   boxChanged(b) {
     if (this.mode === 'centre' && b) this.setMode('box');
@@ -442,6 +491,90 @@ const Map1 = {
     const p = parseLatLon($('#goto').value); if (!p) return;
     $('#c-lat').value = p[0]; $('#c-lon').value = p[1];
     this.setMode('centre');
+  },
+  /* ---- which sheet the node will fly, and proving it opens ------------- */
+  takeoff() {
+    const t = parseLatLon($('#takeoff').value) || parseLatLon($('#goto').value);
+    return t ? { lat: t[0], lon: t[1] } : null;
+  },
+  async loadActive() {
+    try {
+      const a = await api('/api/active');
+      this.active = a;
+      const b = $('#active-body'); b.innerHTML = '';
+      const name = a.path.split('/').pop();
+      b.appendChild(el('div', 'banner ' + (a.exists ? 'ok' : 'alarm'),
+        a.exists ? `The node will open ${name}` : `${a.path} is NOT on this machine`));
+      const kv = el('table', 'kv');
+      const add = (k, v) => { const tr = kv.insertRow();
+        tr.insertCell().textContent = k; tr.insertCell().textContent = v; };
+      add('path', a.path);
+      add('chosen by', a.source === 'pointer' ? 'ACTIVE_MAP' : 'the default');
+      if (a.sheet) {
+        add('ground', `${fmt(a.sheet.ground_w_km)} x ${fmt(a.sheet.ground_h_km)} km`);
+        add('resolution', `${fmt(a.sheet.gsd_ns_m, 4)} m/px N-S`);
+      }
+      b.appendChild(kv);
+      const dl = el('p', 'hint');
+      dl.innerHTML = `<a href="/api/download?path=${encodeURIComponent(a.path)}" ` +
+        `style="color:#4da3ff">Download this sheet</a> to take it away.`;
+      b.appendChild(dl);
+    } catch (e) { status('active sheet: ' + e.message); }
+  },
+  async activate(path) {
+    if (!path) { status('pick a sheet first'); return; }
+    status('loading ' + path.split('/').pop() + ' into the node...');
+    $('#btn-activate').disabled = true;
+    try {
+      const body = { path };
+      const t = this.takeoff();
+      if (t) Object.assign(body, t);
+      const r = await api('/api/activate', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      this.showCheck(r);
+      await this.loadActive();
+      status(r.ok ? 'loaded - the node will open this sheet' : 'loaded, but it will NOT work');
+    } catch (e) { status('load: ' + e.message); }
+    $('#btn-activate').disabled = false;
+  },
+  async check(path) {
+    if (!path) { status('pick a sheet first'); return; }
+    status('opening it with the node\'s own MapCache...');
+    $('#btn-check').disabled = true;
+    try {
+      const t = this.takeoff();
+      const q = `path=${encodeURIComponent(path)}` +
+        (t ? `&lat=${t.lat}&lon=${t.lon}` : '');
+      this.showCheck(await api('/api/loadcheck?' + q));
+      status('ready');
+    } catch (e) { status('check: ' + e.message); }
+    $('#btn-check').disabled = false;
+  },
+  async deactivate() {
+    try {
+      await api('/api/deactivate', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      $('#check-body').innerHTML = '';
+      await this.loadActive();
+      status('back to the default sheet');
+    } catch (e) { status('clear: ' + e.message); }
+  },
+  showCheck(r, into) {
+    const b = into || $('#check-body');
+    b.innerHTML = '';
+    b.appendChild(el('div', 'banner ' + (r.ok ? 'ok' : 'alarm'), r.verdict));
+    r.checks.forEach(c => {
+      const n = el('div', 'check ' + (c.ok ? 'pass' : (c.hard ? 'fail' : 'soft')));
+      n.appendChild(el('span', 'm', c.ok ? 'PASS' : (c.hard ? 'FAIL' : 'NOTE')));
+      const d = el('div');
+      d.appendChild(el('b', null, c.name));
+      d.appendChild(el('em', null, c.detail));
+      if (c.fix) { const f = el('em'); f.style.color = '#fbbf24';
+        f.textContent = c.fix; d.appendChild(f); }
+      n.appendChild(d); b.appendChild(n);
+    });
+    const t = el('p', 'hint', `checked in ${r.took_s} s with the node's own MapCache`);
+    b.appendChild(t);
   },
   async overviews() {
     if (!this.sheet) return;
@@ -511,8 +644,16 @@ const Map1 = {
       d2.appendChild(el('em', null, c.detail));
       n.appendChild(d2); b.appendChild(n);
     });
+    const row = el('div', 'row'); row.style.marginTop = '10px';
+    const load = el('button', 'b', 'Load this cut into the node');
+    load.onclick = () => this.activate(rep.out_path);
+    const dl = el('button', 'b ghost', 'Download it');
+    dl.onclick = () => { location.href =
+      '/api/download?path=' + encodeURIComponent(rep.out_path); };
+    row.appendChild(load); row.appendChild(dl);
+    b.appendChild(row);
     const cmd = el('p', 'hint');
-    cmd.innerHTML = 'Fly it with <code>python3 vps_vio/live_node.py --map ' +
+    cmd.innerHTML = 'Or fly it once with <code>python3 vps_vio/live_node.py --map ' +
       rep.out_path + '</code>';
     b.appendChild(cmd);
   },

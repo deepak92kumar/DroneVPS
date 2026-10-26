@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=DroneVPS Studio
+GenericName=Map cutter and flight review
+Comment=Cut a satellite sheet for the node, and review a flight log
+Exec=/data/DRONE/studio/launch.sh
+Icon=/data/DRONE/studio/icon.png
+Terminal=false
+Categories=Science;Education;Utility;
+Keywords=drone;map;geotiff;flight;log;VPS;
+StartupNotify=true
