@@ -118,7 +118,7 @@ def build(pages, path):
 
 
 # ===================== the report ====================================
-DATE = "26 October 2026"
+DATE = "26 October 2026, evening"
 NAVY = (0.106, 0.216, 0.369)
 GREY = (0.45, 0.45, 0.45)
 LIGHT = (0.863, 0.863, 0.863)
@@ -131,10 +131,11 @@ INTRO = ("Marker-free GNSS-denied navigation on a 4.0 kg hexacopter. Target: "
          "waypoint - a first - then lost its hold below 60 m and took an EKF "
          "failsafe at 377 s.")
 
-OVERALL = 79
-OVER_NOTE = ("78% on 25 October. The rise is the first autonomous mission and "
-             "the altitude fault finally being measured rather than argued. "
-             "Nothing new has flown, so nothing new is above 95%.")
+OVERALL = 78
+OVER_NOTE = ("79% earlier today, 78% on 25 October. It went back down when the "
+             "lidar came off the aircraft: the altitude fault is measured "
+             "exactly and now has no sensor to correct it with. The map gained "
+             "what the altitude lost.")
 
 HILITE = [
     ("The barometer is 5.5 m high, and now it is proven.",
@@ -143,21 +144,26 @@ HILITE = [
      "+5.49 m at corr 0.989. Same slope - that is the GPS - and the offsets "
      "are the finding. Velocity is pixels x altitude / focal, so +5.5 m is "
      "+7% of velocity at 100 m and +70% at 10 m."),
-    ("The map cannot work below 60 m with this sheet.",
-     "276 frames at 28-62 m, four window floors - 40 m as flown, 25, 15 and "
-     "none - accepted 0 of 276 in every one. The query is rescaled down to "
-     "the map's 0.509 m/px, so at 30 m it is 56x56 px and XFeat finds 9 "
-     "matches against a gate of 12. At 80 m it is 150x150 px and 145."),
-    ("The lidar's zero wanders metres, and the node now handles it.",
-     "6.94 m read with the lens 0.26 m above the floor; 0.65 -> 2.9 m in "
-     "30 minutes untouched. Not the supply: Vcc sd 0.0058 V, corr with the "
-     "reading -0.110. The scale is right. The node re-learns the zero on the "
-     "ground until the moment of arming."),
-    ("The handover is clean. The glitch is not the handover.",
-     "Measured on both switches into the VPS on log 246: the first injected "
-     "position was 0.01 m from what the EKF held, after dropping 31 m and "
-     "33 m of accumulated drift. The GPS-glitch and EKF messages arrive 0.4 "
-     "to 3.4 s LATER."),
+    ("NCC works below 60 m. XFeat does not. map_min_alt_m is now 50.",
+     "156 frames, each matcher with the window and gate the worker gives it: "
+     "NCC 43% at 30-45 m, 53% at 45-60, 73% at 60-80. XFeat 0%, 0%, 9%. I "
+     "tested XFeat alone first and wrote that the map could not work down "
+     "there at all - that was half the system. The cost is real: NCC's fixes "
+     "are 13 m p50 against 2.89 m at 60-80. The case is that the flow "
+     "unaided goes 4.13 -> 26.0 m in a 6 m/s descent."),
+    ("The lidar is off the aircraft, and that is a safety call.",
+     "It needed zeroing at 0.8545, then 0.7535, then 0.7254 V in one day - "
+     "130 mV is nine metres. It sits at 2 m on the floor and climbs, the "
+     "land detector wants under 2 m, and it has blocked disarm three or four "
+     "times with the props turning. RNGFND1_TYPE is 0. Narrowing its analog "
+     "span would fix the noise but needs a UART adapter the pilot does not "
+     "have."),
+    ("Climbing we under-report, descending we over-report.",
+     "Both 25 Oct flights, 30-80 m against the raw receiver: climbing -0.33 "
+     "and -0.55 m/s, descending +0.53 and +0.25, with step_px going 2.03 to "
+     "3.61. Nothing sleeps and nothing blurs - tracks fall 9% at most. This "
+     "is vertical motion leaking into the horizontal estimate, and LOITER "
+     "tolerates a speed reported low and flies out one reported high."),
 ]
 
 SECTIONS = [
@@ -192,26 +198,28 @@ SECTIONS = [
   ("Mount alignment", 90,
    "Camera yaw offset -1.95 deg. The ROLL mount offset is still unset while "
    "pitch is -1.13; roll MAD was 2.43 at 110 m, which is +-4.6 m of scatter."),
-  ("Map matching", 78,
-   "Down from 80, on knowledge rather than performance. Above 60 m it is "
-   "unchanged and good - 5.64 m p50, 2.89 m at 60-80. Below 60 m it is now "
-   "known to be impossible with this sheet, so lowering map_min_alt_m is "
-   "closed. A finer map is the only route left, and only for low altitude."),
+  ("Map matching", 80,
+   "map_min_alt_m 60 -> 50, which NCC makes possible: 53% accepted at "
+   "45-60 m against XFeat's 0%. The gate reads the barometer, which runs "
+   "5-9 m high, so 50 stops the map near 44 m of real height. Fixes down "
+   "there are 13 m p50 against 2.89 m at 60-80, and 13 beats the 26 m the "
+   "flow drifts to unaided on a descent. UNFLOWN."),
   ("Sensor fusion", 72,
    "Unchanged. fix_sigma_m is still 20 while the map now measures 5.64 m, so "
    "the Kalman gain sits at 0.068. The correction written for this was "
    "reverted and has not been brought back."),
-  ("Velocity to the FC", 55,
+  ("Velocity to the FC", 52,
    "At 40-60 m on flight 246 the sent speed was 2.03 m/s where the receiver "
-   "said 0.94. The barometric offset explains about 0.09 of that 1.09 m/s. "
-   "The rest is the phantom and is still open."),
+   "said 0.94. And a new fault with a sign to it: both flights under-report "
+   "climbing, -0.33 and -0.55 m/s, and over-report descending, +0.53 and "
+   "+0.25. Vertical motion is leaking into the horizontal estimate."),
   ("Heading / yaw", 55, "Unchanged. The compass is still the only yaw source."),
-  ("Altitude", 60,
-   "Up from 45. The fault is measured and a fix is written and unflown: the "
-   "lidar corrects the barometer's offset without replacing it, and the "
-   "lidar's own zero is re-learned on the ground to the moment of arming. "
-   "EK3_SRC1_POSZ stays 1 and EK3_RNG_USE_HGT stays -1 - this sensor is fit "
-   "to measure a slow offset, not to carry height."),
+  ("Altitude", 42,
+   "The fault is measured exactly - baro +5.49 m against the GPS altitude "
+   "while the lidar reads -0.04 - and there is now nothing to correct it "
+   "with. RNGFND1_TYPE is 0 because the lidar blocked disarm with the props "
+   "turning. The correction written for it stays in and goes inert on its "
+   "own with no sensor. Up from 45 on 25 Oct would have been wrong."),
   ("Position injection as GPS2", 92,
    "GPS2_POS_Z now 0.22 m, the camera's true offset below the CG."),
  ]),
@@ -241,18 +249,23 @@ SECTIONS = [
 
 MOVED_UP = [
  ("Autonomous mission", 40, 70, "247 flew every waypoint on the VPS"),
- ("Altitude", 45, 60, "+5.5 m measured against GPS altitude; fix written"),
+ ("Map matching", 80, 80, "NCC reaches 45-60 m; map_min_alt_m 60 -> 50"),
  ("Vibration", 96, 97, "re-measured on five flights, zero clipping"),
  ("Preflight diagnostics", 92, 94, "the lidar zeroes itself now"),
  ("Position injection as GPS2", 90, 92, "GPS2_POS_Z 0.14 -> 0.22"),
 ]
 MOVED_DOWN = [
  ("Actually flying on the VPS", 85, 80, "247 took an EKF failsafe below 60 m"),
- ("Map matching", 80, 78, "below 60 m is now known to be impossible here"),
+ ("Altitude", 45, 42, "the lidar came off: measured, and nothing to fix it with"),
+ ("Velocity to the FC", 55, 52, "climb/descend asymmetry, newly measured"),
  ("Flight data recording", 97, 96, "247 produced no node CSV at all"),
 ]
 
 CORRECTIONS = [
+ ("I wrote that the map cannot work below 60 m with this sheet.",
+  "I had tested XFeat alone. The aircraft flies matcher = both, and NCC - "
+  "which slides a template in a far larger window - accepts 53% at 45-60 m "
+  "where XFeat accepts 0%. Half the system, stated as all of it."),
  ("I called the 40 m window floor the direct answer to the descent problem.",
   "It was arithmetic. Measured on 276 real frames, all four window floors "
   "accepted 0 of 276. The fault is the query's pixel count, not the window."),
@@ -275,13 +288,22 @@ CORRECTIONS = [
 ]
 
 OPEN = [
+ ("NCC's gate, swept but not changed", "255 frames at 30-62 m: as flown "
+  "(0.05/0.01) keeps 122 at p50 14.99 m and p90 40.56; 0.15/0.05 keeps 31 at "
+  "p50 8.73 and p90 13.07. The margin is the lever. The catch is that the "
+  "gate is global, so tightening it also quietens NCC above 60 m. A gate is "
+  "a guard and waits on the pilot."),
+ ("Climb/descend asymmetry", "Under-reported climbing, over-reported "
+  "descending, both flights. New, and the likely reason the aircraft is "
+  "unstable coming down through 60 m."),
  ("Velocity at 40-60 m", "2.03 m/s sent where the receiver said 0.94. The "
   "barometric offset explains 0.09 of it. This is the largest open fault."),
  ("Smoothness", "307 zero crossings in 634 s. The deadband ramp is written "
   "and waiting on the pilot, because it changes a guard."),
- ("The lidar's zero", "4.5 m/hour at a fixed distance today. Not the supply. "
-  "A two-distance test an hour apart separates a drifting sensor zero from a "
-  "drifting resistor; only the second is fixed by a 25 ppm/C metal-film part."),
+ ("The lidar", "Off the aircraft. Its analog span is a setting - 180 m from "
+  "the factory, where one millivolt is 7.26 cm - and narrowing it to 60 m "
+  "would make it 2.9x finer. That needs a USB-TTL adapter on the sensor's "
+  "own UART, which the pilot does not have and is not buying. Parked."),
  ("Roll mount offset", "Unset. Pitch is -1.13. Roll MAD 2.43 at 110 m."),
  ("fix_sigma_m 20", "The map now measures 5.64 m. The gain is 0.068."),
  ("A finer map, below 60 m only", "The only route left to map fixes during "
