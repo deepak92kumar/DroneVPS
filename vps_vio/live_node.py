@@ -2349,7 +2349,19 @@ class VpsNode:
     # is not.
     RNGFND_CLEARANCE_M = 0.26   # lens height with the aircraft standing
     RNGFND_ZERO_N = 40          # samples in the rolling median
-    RNGFND_GROUND_ALT_M = 1.5   # |alt_rel| under this counts as "on the ground"
+    # |alt_rel| under this counts as "on the ground". 1.5 -> 5.0 on 26 Oct,
+    # measured rather than guessed: on vps_00212 the aircraft sat on the floor
+    # for 412 s and alt_rel read 2.10-2.30 m the whole time, so NONE of its
+    # 8192 rows passed a 1.5 m gate and the zero was never learned. alt_rel is
+    # relative to home, and home is wherever the barometer was when the EKF
+    # took its origin - it is not a height above the ground and it is not
+    # zero when parked.
+    #
+    # The real gate is `armed is False`, which is airtight: the aircraft is
+    # armed from takeoff to landing, so nothing here can run in flight. This
+    # one is the backstop for an armed flag that never arrives, and 5 m still
+    # catches that while tolerating a barometer that has wandered since boot.
+    RNGFND_GROUND_ALT_M = 5.0
 
     def _rngfnd_zero(self, f: dict) -> float:
         """How far the lidar's zero has wandered, in metres. 0.0 until known.

@@ -85,6 +85,14 @@ for _ in range(40):
     z3 = n._rngfnd_zero(dict(rngfnd=55.0, alt=60.0, armed=True))
 check("armed and airborne, the zero is frozen", z3 == frozen, f"{z3:.3f} m")
 
+# A barometer that reads metres on the ground must NOT stop it. Measured on
+# vps_00212: parked for 412 s with alt_rel 2.10-2.30 m throughout.
+n_b = Node()
+for _ in range(20):
+    zb = n_b._rngfnd_zero(dict(rngfnd=GROUND_READING, alt=2.20, armed=False))
+check("a barometer sitting at 2.2 m on the ground does not block it",
+      abs(zb - (GROUND_READING - TRUE)) < 1e-6, f"{zb:.3f} m")
+
 # Airborne but somehow disarmed must not re-learn either: the altitude gate.
 for _ in range(40):
     z4 = n._rngfnd_zero(dict(rngfnd=55.0, alt=60.0, armed=False))
