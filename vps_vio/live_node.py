@@ -1245,7 +1245,7 @@ CSV_COLUMNS = ["t", "north_m", "east_m", "lon", "lat", "sigma_m",
     # frame. Two independent looks at the same ground is the first thing this
     # project has had that BOUNDS the flow's noise instead of inferring it.
     "flow_disagree_px", "flow_dual", "frame_age_s", "frames_skipped",
-    "n_dr", "src", "rngfnd_m", "alt_amsl_m",
+    "n_dr", "src", "rngfnd_m", "rngfnd_zero_m", "alt_amsl_m",
     # The saved image for THIS row, or empty on the rows where no
     # frame was saved (most of them - the gate saves a couple a
     # second out of 17). This column is the whole point of writing
@@ -1373,6 +1373,7 @@ def csv_row(est, f, v, gN, gE, err):
             est["n_dr"],
             est.get("src") or "",
             "" if f.get("rngfnd") is None else f"{f['rngfnd']:.2f}",
+            f"{est.get('rngfnd_zero_m') or 0.0:.3f}",
             "" if f.get("alt_amsl") is None else f"{f['alt_amsl']:.2f}",
             est.get("frame_file") or "",
             f"{est['sigma_abs']:.1f}",
@@ -2160,6 +2161,9 @@ class VpsNode:
         self._alt_bias_m = 0.0
         self._alt_bias_t = None
         self.alt_bias_m = 0.0
+        self._rz_hist = collections.deque(maxlen=self.RNGFND_ZERO_N)
+        self._rngfnd_zero_m = 0.0
+        self.rngfnd_zero_m = 0.0
         self._vel_cum_n = self._vel_cum_e = 0.0
         self.step_px = None
         self.step_action = "ok"
@@ -2322,6 +2326,61 @@ class VpsNode:
     # nothing here is required: no lidar, no correction, and the altitude is
     # exactly what it was. The bias is learned slowly, only from readings
     # the lidar can actually make, and clamped.
+    # THE LIDAR'S OWN ZERO, RE-LEARNED ON THE GROUND EVERY BOOT.
+    #
+    # The TF03 is the 4-20 mA variant read on an ADC pin, so the FC computes
+    # dist = (volts - RNGFND1_OFFSET) * RNGFND1_SCALING. SCALING is 72.61 m/V
+    # and correct - one millivolt is 7.3 cm, the 20 Oct hover-minus-ground
+    # test gave 4.47 m against the EKF's 4.45, and on log 246 the lidar fits
+    # 0.898 * GPSalt - 0.04 m, through zero. It is the OFFSET that moves: the
+    # pin sat at 0.768 V when logs 246/247 were flown and at 0.855 V six days
+    # later, which is 87 mV, which is 6.3 m.
+    #
+    # Zeroing RNGFND1_OFFSET by hand before every flight was the obvious
+    # answer and the pilot rejected it, rightly: three terminal commands in a
+    # field is not a procedure, and a parameter rewritten every boot is a
+    # worse thing to own than a number we compute ourselves. So the FC's
+    # parameter is left alone and the zero is measured here.
+    #
+    # Learned ONLY while disarmed and sitting on the ground, and re-learned
+    # continuously until the moment of arming, so what the aircraft lifts off
+    # with is seconds old rather than sessions old. A rolling median, because
+    # the pin's noise is about 2 mV and a median of it is steady while a mean
+    # is not.
+    RNGFND_CLEARANCE_M = 0.26   # lens height with the aircraft standing
+    RNGFND_ZERO_N = 40          # samples in the rolling median
+    RNGFND_GROUND_ALT_M = 1.5   # |alt_rel| under this counts as "on the ground"
+
+    def _rngfnd_zero(self, f: dict) -> float:
+        """How far the lidar's zero has wandered, in metres. 0.0 until known.
+
+        Returns the offset to SUBTRACT from the raw reading. Frozen the moment
+        the aircraft arms; before that it tracks, because the zero wanders
+        both ways and what matters is its value at lift-off.
+        """
+        # Same defensive read as _alt_bias: a test or a replay can reach this
+        # with a VpsNode that did not run the whole of __init__.
+        import collections as _collections
+        if not hasattr(self, "_rz_hist"):
+            self._rz_hist = _collections.deque(maxlen=self.RNGFND_ZERO_N)
+        self._rngfnd_zero_m = getattr(self, "_rngfnd_zero_m", 0.0)
+        rng = f.get("rngfnd")
+        alt = f.get("alt")
+        if (not f.get("armed") and rng is not None and alt is not None
+                and abs(float(alt)) < self.RNGFND_GROUND_ALT_M):
+            self._rz_hist.append(float(rng))
+            if len(self._rz_hist) >= 8:
+                med = sorted(self._rz_hist)[len(self._rz_hist) // 2]
+                self._rngfnd_zero_m = med - self.RNGFND_CLEARANCE_M
+            # On the ground there is no barometric offset to have learned yet,
+            # and a stale one from a previous session is worse than none. The
+            # node was found holding -5.81 m and reporting 5.5 m of altitude
+            # while the aircraft sat on the floor, because the bias stops
+            # updating below ALT_BIAS_LIDAR_MIN_M but keeps its last value.
+            self._alt_bias_m = 0.0
+            self._alt_bias_t = None
+        return self._rngfnd_zero_m
+
     ALT_BIAS_TAU_S = 20.0       # slow: this is an offset, not a signal
     ALT_BIAS_MAX_M = 12.0       # beyond this the lidar is not seeing ground
     ALT_BIAS_LIDAR_MIN_M = 2.0  # below, the leg and the ground confuse it
@@ -2358,6 +2417,13 @@ class VpsNode:
         # Corrected height, used for everything that divides by one. Never
         # below 1 m: the correction is an offset, not a licence to invent a
         # negative altitude on the ground.
+        # The lidar's own zero first, so everything downstream - the
+        # barometric bias, the CSV, the depth gate - sees a corrected reading
+        # rather than each correcting it again differently.
+        self.rngfnd_zero_m = self._rngfnd_zero(f)
+        if self.rngfnd_zero_m and f.get("rngfnd") is not None:
+            f = dict(f)
+            f["rngfnd"] = float(f["rngfnd"]) - self.rngfnd_zero_m
         self.alt_bias_m = self._alt_bias(f)
         if self.alt_bias_m:
             f = dict(f)
@@ -2746,6 +2812,7 @@ class VpsNode:
         return dict(step_px=self.step_px, step_action=self.step_action,
                     fix_age_s=fix_age, fix_disagree_m=fix_dis,
                     alt_bias_m=getattr(self, "alt_bias_m", 0.0),
+                    rngfnd_zero_m=getattr(self, "rngfnd_zero_m", 0.0),
                     # getattr, because the tests build VpsNode through
                     # __new__ and never run __init__ - the same reason the
                     # frame-age and veto counters are read this way.
