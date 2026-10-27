@@ -429,7 +429,39 @@ class VpsConfig:
     # (1.42 vs 1.44), with corr(error, tilt) +0.109 against corr(error, speed)
     # +0.662. What is left is the flow's own pixel noise: 1.4 m/s at 31 m is
     # 1.2 px per frame, and a longer baseline is the only thing that touches it.
-    flow_vel_frames: int = 40
+    # 40 -> 30 ON 27 OCT. The lag is the point, not the noise.
+    #
+    # The pilot held at 10 m with the stick centred and the aircraft swung.
+    # Measured on vps_00248: it wandered 1.27 m sd north, 0.74 m east, 3.50 m
+    # at worst, and the east axis carried a clean 7.0 s oscillation. A control
+    # loop corrects on information one baseline old, and at 40 frames that is
+    # 1.59 s. The same shape was measured at 35 m on flight 245 - a 754 degree
+    # bearing sweep in 24 s with the yaw barely moving, period 11.4 s.
+    #
+    # Swept again on vps_00248's own step_dn/step_de, scored as VECTORS
+    # against the raw receiver:
+    #
+    #     N    lag     angle   slopeN   corrN   noise m/s
+    #     10   0.40 s    18d    0.98     0.76     0.407
+    #     20   0.79 s    10d    1.05     0.89     0.327
+    #     30   1.19 s     7d    1.04     0.95     0.289   <- taken
+    #     40   1.59 s     8d    0.97     0.95     0.257   <- what flew
+    #     60   2.38 s    16d    0.72     0.84     0.192
+    #
+    # 30 is better or equal on direction, slope and correlation AND carries
+    # 0.4 s less lag. The cost is 0.03 m/s of extra noise, which is the
+    # cheaper fault: a velocity pointing the wrong way is flown out, a noisy
+    # one is averaged by the EKF.
+    #
+    # e626f42 reached 30 by its own sweep on flight 245 and was reverted whole
+    # because it shipped beside a hand-set origin and nothing was separable.
+    # This is that one value, brought back alone, on new data.
+    #
+    # What the lag costs beyond the swing: the aircraft is mid-swing when it
+    # touches down. Lateral speed at 1-3 m on these flights was 1.40 m/s p90
+    # and 1.70 max, and the pilot's hexa flipped on landing. The legs are what
+    # saved it.
+    flow_vel_frames: int = 30
 
     # Above flow_vel_alt_m the baseline lengthens to flow_vel_frames_high.
     #
