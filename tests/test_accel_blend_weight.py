@@ -22,8 +22,10 @@ against each other: filter the flow's noise, without losing the magnitude of
 real motion. The 8 Oct module satisfied the first by failing the second -
 40% of truth at sustained speed, with nothing aboard able to tell.
 
-Neither check asserts a value of tau_s. A sweep against a recording is still
-owed, and needs vel_flow_* / vel_accel_* from a flight that has them.
+Neither check asserts a value of tau_s. THE SWEEP THIS ASKED FOR HAS NOW BEEN
+RUN - 27 Oct, on flight 248, which carried vel_flow_* and vel_accel_* - and it
+moved tau_s to 0.05. See the note on the second check below for what that
+costs and why it is worth it.
 """
 import math
 import os
@@ -97,7 +99,26 @@ print(f"        sigma at 90 m = {sigma_90:.2f} m/s")
 print(f"        flow rms {flow90:.3f}  ->  output rms {out90:.3f}   ({out90 / flow90:.2f}x)")
 # Not an assertion about what is acceptable - a record of what is coming.
 # FS_EKF_THRESH is 1.2 and SV already reached 3.60 at 31 m.
-check("the reduction holds at height too", out90 < 0.67 * flow90,
+# 0.67 -> 0.95 ON 27 OCT, with the trade written down rather than hidden.
+# tau_s went 0.35 -> 0.05, so the blend filters far less: it now takes 0.88 of
+# the flow's noise at height instead of under two thirds. That is a real loss
+# and it is accepted on purpose, because the sweep this file's own docstring
+# asked for has now been run, on flight 248's logged vel_flow_* and
+# vel_accel_*, scored as VECTORS against the raw receiver at matched 1 s
+# smoothing:
+#
+#     tau    5-15 m   15-25 m   45-55 m      (median angle from truth)
+#     0.35     24       25        20         <- what flew
+#     0.10      9       11        19
+#     0.05      6        9        20         <- taken
+#     no accel 10       12        18
+#
+# The noise the old tau filtered was costing eighteen degrees of DIRECTION,
+# and a velocity pointing 24 degrees wrong is what the pilot was flying when
+# the aircraft wandered below 25 m. Magnitude noise is the cheaper fault.
+# The camera accelerometer measured -0.49 correlation with truth over the
+# same rows, so what was being blended in was not a second opinion.
+check("the blend still reduces the flow's noise at height", out90 < 0.95 * flow90,
       f"{out90 / flow90:.2f}x")
 
 print("\n3. the property the 8 Oct module broke: no attenuation")
