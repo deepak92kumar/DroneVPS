@@ -990,10 +990,20 @@ class GpsInputSender:
         # after an arm - which is precisely when the aircraft needs it.
         self.gps_id = int(gps_id)
         self.sats = int(sats)
-        # OFF by default, and it stays off until someone passes it. Velocity is
-        # the channel that caused four EKF failsafes on 28 Sep by reporting
-        # 47.7 m/s during a 106 m hover, and it is the 54% row that the 13 Oct
-        # report still calls the largest open fault.
+        # ON by default. This comment said "OFF by default, and it stays off
+        # until someone passes it" until 27 Oct, and that was simply false:
+        # the keyword defaults to True here, main() has set_defaults(
+        # send_vel=True), and the flag is the NEGATIVE one, --no-send-vel.
+        # Nobody had to pass anything to get velocity; they had to pass
+        # something to stop it. I read this comment in flight and told the
+        # pilot the wrong thing about their own aircraft.
+        #
+        # The caution behind it is real and stands: velocity is the channel
+        # that caused four EKF failsafes on 28 Sep by reporting 47.7 m/s
+        # during a 106 m hover, and it is the 54% row the 13 Oct report calls
+        # the largest open fault. What goes out is vel.sent_vn/ve - the flow
+        # blended with the camera accelerometer, then the deadband ramp, the
+        # slew and the 6 m/s cap - not the raw flow.
         self.send_velocity = bool(send_velocity)
         # 4.3 Hz, which is what logs 00000191 and 00000194 actually carried.
         self.send_period_s = 1.0 / 4.3
