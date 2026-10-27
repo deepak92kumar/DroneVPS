@@ -31,6 +31,13 @@ import single_instance
 
 M_PER_DEG_LAT = 111_320.0
 
+
+def _cfg():
+    """The live VpsConfig. Imported lazily so this module stays importable
+    from the tests that build a node by hand."""
+    from config import VpsConfig
+    return VpsConfig()
+
 # WHICH MONO CAMERA EVERYTHING IS MEASURED IN. CAM_C since 22 Oct, at the
 # pilot's instruction; it was CAM_B before that.
 #
@@ -2273,7 +2280,9 @@ class VpsNode:
         drift = float(self.fuser.sigma_m)
         origin = self.origin_sigma_m
         if origin is None:
-            origin = float(np.sqrt(self.fuser.fix_var))
+            # config.origin_sigma_m, not the map's own error. See that setting
+            # for why 20 m was wrong here and what the typed origin measures.
+            origin = float(getattr(_cfg(), "origin_sigma_m", 0.5))
         return float(np.hypot(origin, drift))
 
     def gate_step(self, dn: float, de: float, dt: float | None,

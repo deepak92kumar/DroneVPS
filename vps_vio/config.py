@@ -127,6 +127,39 @@ class VpsConfig:
     # expect roughly 13 m down there. The case for it is the alternative -
     # this file's own note below records the flow going 4.13 -> 26.0 m in the
     # 12 s of a 6 m/s descent. 13 beats 26. UNFLOWN.
+    # HOW WELL THE TAKEOFF POINT IS KNOWN, metres. What the flight controller
+    # is told, combined in quadrature with the fuser's drift.
+    #
+    # 27 Oct, and it replaces a 20 m fallback that was costing the aircraft its
+    # hold at every height. That 20 m was MapFuser.fix_var - the MAP's own
+    # error - standing in because the origin's accuracy was unknown. It was
+    # written on 20 Oct after three flights with a STALE SCR_USER1/2 origin
+    # whose true error was 151 m while 14 m was declared, and for that case it
+    # was right.
+    #
+    # It is wrong for how this aircraft is flown now. The pilot types the point
+    # from a survey-grade handheld before each flight, and the only thing
+    # between that and the EKF is float32. Measured 27 Oct, typed against
+    # stored:
+    #
+    #     typed  30.8957905   stored 30.895790100   0.04 m
+    #     typed  74.6140336   stored 74.614036560   0.28 m
+    #
+    # So the origin is good to about 0.3 m and we were declaring 20. Mission
+    # Planner showing "xx.xxx" is its display rounding, not the stored value.
+    #
+    # 0.5 m is also what the pre-26-Sep marker system declared - see
+    # aruco_flow_rpi/flight_daemon.py, MARKER_POS_ERR_M - on the flights the
+    # pilot remembers holding like GPS, and it took its origin from the same
+    # SCR_USER1/2.
+    #
+    # NOTHING HERE COMES FROM THE GNSS RECEIVER, and nothing may. A spoofed
+    # M9N reports a confident h_acc while being completely wrong, and feeding
+    # that in would tighten the EKF onto a lie - the exact failure this whole
+    # project exists to avoid. This is the pilot's own number about their own
+    # typed point. RAISE IT if the origin is stale, borrowed or guessed.
+    origin_sigma_m: float = 0.5
+
     map_min_alt_m: float = 50.0    # 3 Oct: 80 -> 60 m. Flown, kept. At 80 m the
                                    # map never started. The map runs ABOVE this
                                    # height and NOT below it, which is why the

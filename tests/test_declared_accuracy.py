@@ -167,9 +167,38 @@ check("set_origin takes the origin's uncertainty",
 check("there is a separate absolute sigma", "def absolute_sigma_m" in src)
 check("it combines the origin with the drift in quadrature",
       "np.hypot(origin, drift)" in src)
-check("an unknown origin falls back to the map's own error",
-      "np.sqrt(self.fuser.fix_var)" in src,
-      "a hand-typed SCR_USER1/2 states no accuracy, and was 147-157 m out")
+# 27 OCT: the fallback is the PILOT'S declared number, not the map's error.
+#
+# This check used to require np.sqrt(self.fuser.fix_var) - 20 m, the map's own
+# error - because "a hand-typed SCR_USER1/2 states no accuracy". The premise
+# was right on 20 Oct, when the typed origin was STALE from another site and
+# 147-157 m out. It is not right for a point typed fresh from a survey-grade
+# handheld before each flight, which is how this aircraft is flown now, and
+# the pilot measured it:
+#
+#     typed 30.8957905   stored 30.895790100   0.04 m
+#     typed 74.6140336   stored 74.614036560   0.28 m
+#
+# The origin is good to 0.3 m and 20 m was being declared - 70 times too
+# loose, at every height, which is why the aircraft would not hold tightly as
+# it descended. The pre-26-Sep marker system declared 0.5 m from the same
+# SCR_USER1/2 and is the one the pilot remembers holding like GPS.
+#
+# The 20 Oct protection has not been deleted, it has been handed to the person
+# who knows: config.origin_sigma_m. A stale or borrowed origin means raising
+# it. What must NEVER happen is taking this number from the GNSS receiver - a
+# spoofed M9N reports a confident h_acc while being wrong, and tightening the
+# EKF onto that is the failure this project exists to avoid.
+check("an unknown origin falls back to the pilot's declared number",
+      "origin_sigma_m" in src and "np.sqrt(self.fuser.fix_var)" not in src,
+      "config.origin_sigma_m, which the pilot sets and can raise")
+from config import VpsConfig as _VC
+_os = _VC().origin_sigma_m
+check("and that number is a real setting with a sane default",
+      0.1 <= _os <= 50.0, f"origin_sigma_m = {_os} m")
+check("it is not read from the receiver anywhere in the sigma path",
+      "gps1_hacc" not in src.split("def absolute_sigma_m")[1][:600],
+      "nothing in the declared sigma may come from the M9N")
 check("and that is what the send is given, not the drift alone",
       'est["sigma_abs"], est["yaw"], vel=est["vel"]' in src)
 check("both are logged so a flight can be audited",
