@@ -127,7 +127,28 @@ class VpsConfig:
     # expect roughly 13 m down there. The case for it is the alternative -
     # this file's own note below records the flow going 4.13 -> 26.0 m in the
     # 12 s of a 6 m/s descent. 13 beats 26. UNFLOWN.
-    map_min_alt_m: float = 50.0    # 3 Oct: 80 -> 60 m. Flown, kept. At 80 m the
+    # 50 -> 0 ON 27 OCT, at the pilot's instruction: let the map run all the
+    # way down and see what it does, with the origin coming from SCR_USER1/2
+    # as it already does.
+    #
+    # What is known and what is not. NCC - not XFeat - is what reaches below
+    # 60 m at all; measured on 156 frames from the 25 Oct flights, each
+    # matcher with the window and gate the worker gives it:
+    #
+    #     matcher   30-45 m   45-60 m   60-80 m
+    #     NCC          43%       53%       73%
+    #     XFeat         0%        0%        9%
+    #
+    # Below 30 m NOTHING has been measured. The query is rescaled to the
+    # map's 0.509 m/px, so it shrinks with height - 56x56 px at 30 m and
+    # smaller below - and whether NCC still finds the right peak down there
+    # is exactly what this flight is for.
+    #
+    # What limits the damage if it matches wrongly: max_correction_m is 0.5
+    # and the Kalman gain is about 0.07, so a fix asking for a 13 m move
+    # becomes a 0.4 m nudge. A single bad fix cannot throw the aircraft; a
+    # steady stream of bad ones would walk it, which is what to watch for.
+    map_min_alt_m: float = 0.0    # 3 Oct: 80 -> 60 m. Flown, kept. At 80 m the
                                    # map never started. The map runs ABOVE this
                                    # height and NOT below it, which is why the
                                    # descent is uncorrected: error went 4.13 ->
