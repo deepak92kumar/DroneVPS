@@ -127,39 +127,6 @@ class VpsConfig:
     # expect roughly 13 m down there. The case for it is the alternative -
     # this file's own note below records the flow going 4.13 -> 26.0 m in the
     # 12 s of a 6 m/s descent. 13 beats 26. UNFLOWN.
-    # HOW WELL THE TAKEOFF POINT IS KNOWN, metres. What the flight controller
-    # is told, combined in quadrature with the fuser's drift.
-    #
-    # 27 Oct, and it replaces a 20 m fallback that was costing the aircraft its
-    # hold at every height. That 20 m was MapFuser.fix_var - the MAP's own
-    # error - standing in because the origin's accuracy was unknown. It was
-    # written on 20 Oct after three flights with a STALE SCR_USER1/2 origin
-    # whose true error was 151 m while 14 m was declared, and for that case it
-    # was right.
-    #
-    # It is wrong for how this aircraft is flown now. The pilot types the point
-    # from a survey-grade handheld before each flight, and the only thing
-    # between that and the EKF is float32. Measured 27 Oct, typed against
-    # stored:
-    #
-    #     typed  30.8957905   stored 30.895790100   0.04 m
-    #     typed  74.6140336   stored 74.614036560   0.28 m
-    #
-    # So the origin is good to about 0.3 m and we were declaring 20. Mission
-    # Planner showing "xx.xxx" is its display rounding, not the stored value.
-    #
-    # 0.5 m is also what the pre-26-Sep marker system declared - see
-    # aruco_flow_rpi/flight_daemon.py, MARKER_POS_ERR_M - on the flights the
-    # pilot remembers holding like GPS, and it took its origin from the same
-    # SCR_USER1/2.
-    #
-    # NOTHING HERE COMES FROM THE GNSS RECEIVER, and nothing may. A spoofed
-    # M9N reports a confident h_acc while being completely wrong, and feeding
-    # that in would tighten the EKF onto a lie - the exact failure this whole
-    # project exists to avoid. This is the pilot's own number about their own
-    # typed point. RAISE IT if the origin is stale, borrowed or guessed.
-    origin_sigma_m: float = 0.5
-
     map_min_alt_m: float = 50.0    # 3 Oct: 80 -> 60 m. Flown, kept. At 80 m the
                                    # map never started. The map runs ABOVE this
                                    # height and NOT below it, which is why the
@@ -429,39 +396,7 @@ class VpsConfig:
     # (1.42 vs 1.44), with corr(error, tilt) +0.109 against corr(error, speed)
     # +0.662. What is left is the flow's own pixel noise: 1.4 m/s at 31 m is
     # 1.2 px per frame, and a longer baseline is the only thing that touches it.
-    # 40 -> 30 ON 27 OCT. The lag is the point, not the noise.
-    #
-    # The pilot held at 10 m with the stick centred and the aircraft swung.
-    # Measured on vps_00248: it wandered 1.27 m sd north, 0.74 m east, 3.50 m
-    # at worst, and the east axis carried a clean 7.0 s oscillation. A control
-    # loop corrects on information one baseline old, and at 40 frames that is
-    # 1.59 s. The same shape was measured at 35 m on flight 245 - a 754 degree
-    # bearing sweep in 24 s with the yaw barely moving, period 11.4 s.
-    #
-    # Swept again on vps_00248's own step_dn/step_de, scored as VECTORS
-    # against the raw receiver:
-    #
-    #     N    lag     angle   slopeN   corrN   noise m/s
-    #     10   0.40 s    18d    0.98     0.76     0.407
-    #     20   0.79 s    10d    1.05     0.89     0.327
-    #     30   1.19 s     7d    1.04     0.95     0.289   <- taken
-    #     40   1.59 s     8d    0.97     0.95     0.257   <- what flew
-    #     60   2.38 s    16d    0.72     0.84     0.192
-    #
-    # 30 is better or equal on direction, slope and correlation AND carries
-    # 0.4 s less lag. The cost is 0.03 m/s of extra noise, which is the
-    # cheaper fault: a velocity pointing the wrong way is flown out, a noisy
-    # one is averaged by the EKF.
-    #
-    # e626f42 reached 30 by its own sweep on flight 245 and was reverted whole
-    # because it shipped beside a hand-set origin and nothing was separable.
-    # This is that one value, brought back alone, on new data.
-    #
-    # What the lag costs beyond the swing: the aircraft is mid-swing when it
-    # touches down. Lateral speed at 1-3 m on these flights was 1.40 m/s p90
-    # and 1.70 max, and the pilot's hexa flipped on landing. The legs are what
-    # saved it.
-    flow_vel_frames: int = 30
+    flow_vel_frames: int = 40
 
     # Above flow_vel_alt_m the baseline lengthens to flow_vel_frames_high.
     #

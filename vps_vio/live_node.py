@@ -31,13 +31,6 @@ import single_instance
 
 M_PER_DEG_LAT = 111_320.0
 
-
-def _cfg():
-    """The live VpsConfig. Imported lazily so this module stays importable
-    from the tests that build a node by hand."""
-    from config import VpsConfig
-    return VpsConfig()
-
 # WHICH MONO CAMERA EVERYTHING IS MEASURED IN. CAM_C since 22 Oct, at the
 # pilot's instruction; it was CAM_B before that.
 #
@@ -990,20 +983,10 @@ class GpsInputSender:
         # after an arm - which is precisely when the aircraft needs it.
         self.gps_id = int(gps_id)
         self.sats = int(sats)
-        # ON by default. This comment said "OFF by default, and it stays off
-        # until someone passes it" until 27 Oct, and that was simply false:
-        # the keyword defaults to True here, main() has set_defaults(
-        # send_vel=True), and the flag is the NEGATIVE one, --no-send-vel.
-        # Nobody had to pass anything to get velocity; they had to pass
-        # something to stop it. I read this comment in flight and told the
-        # pilot the wrong thing about their own aircraft.
-        #
-        # The caution behind it is real and stands: velocity is the channel
-        # that caused four EKF failsafes on 28 Sep by reporting 47.7 m/s
-        # during a 106 m hover, and it is the 54% row the 13 Oct report calls
-        # the largest open fault. What goes out is vel.sent_vn/ve - the flow
-        # blended with the camera accelerometer, then the deadband ramp, the
-        # slew and the 6 m/s cap - not the raw flow.
+        # OFF by default, and it stays off until someone passes it. Velocity is
+        # the channel that caused four EKF failsafes on 28 Sep by reporting
+        # 47.7 m/s during a 106 m hover, and it is the 54% row that the 13 Oct
+        # report still calls the largest open fault.
         self.send_velocity = bool(send_velocity)
         # 4.3 Hz, which is what logs 00000191 and 00000194 actually carried.
         self.send_period_s = 1.0 / 4.3
@@ -1548,36 +1531,8 @@ class SourceWatcher:
 
 
 # --------------------------------------------------------------------------- #
-def accel_to_ne(ax: float, ay: float, yaw_deg: float,
-                az: float = 0.0, roll_deg: float = 0.0,
-                pitch_deg: float = 0.0):
-    """Camera-frame acceleration -> (north, east), m/s^2, using the FULL attitude.
-
-    ROLL AND PITCH ADDED 27 OCT. Until then this rotated by yaw alone and
-    threw az away, which is only correct while the aircraft is level - and an
-    aircraft is never level while it is doing the one thing this measurement
-    is for. To accelerate, a multirotor TILTS. At 20 degrees the body's
-    "forward" axis is twenty degrees out of the horizontal plane, and writing
-    that axis straight into the horizontal plane is simply the wrong rotation.
-    It is worst exactly when LOITER is correcting, which is a loop: LOITER
-    tilts, the tilt corrupts the acceleration, the velocity goes wrong, LOITER
-    tilts further.
-
-    The pilot found this by asking the right question - does it have the roll
-    and pitch to kill the false acceleration at source - after I had tried to
-    treat it by lowering the blend weight instead. The data was there all
-    along: f["roll"] and f["pitch"] are in every frame.
-
-    Gravity itself is NOT the issue and never was: live_node asks for
-    LINEAR_ACCELERATION, so the BNO086's own fusion has taken gravity out
-    before we see it. What was missing is the rotation, not the subtraction.
-
-    Measured on flight 248, this acceleration against the receiver as vectors:
-    106 degrees off truth, correlation -0.49, with 66% of samples at 5-15 m
-    pointing more than ninety degrees wrong. That is not noise.
-
-    The body mapping is config.py's, measured 27 Sep on this camera: cam_z is
-    DOWN - the gravity vector lands on it at 99.8% - the nose points at the TOP
+def accel_to_ne(ax: float, ay: float, yaw_deg: float):
+    """Camera-frame horizontal acceleration -> (north, east), m/s^2.
 
     The body mapping is config.py's, measured 27 Sep on this camera: cam_z is
     DOWN - the gravity vector lands on it at 99.8% - the nose points at the TOP
@@ -1594,20 +1549,10 @@ def accel_to_ne(ax: float, ay: float, yaw_deg: float,
     position and velocity will disagree about which way north is.
     """
     import numpy as _np
-    fwd, right, down = -ay, ax, az
-    r = _np.radians(roll_deg); p = _np.radians(pitch_deg)
-    y = _np.radians(yaw_deg)
-    cr, sr = _np.cos(r), _np.sin(r)
-    cp, sp = _np.cos(p), _np.sin(p)
-    cy, sy = _np.cos(y), _np.sin(y)
-    # Standard 3-2-1 body->NED direction cosine matrix, north and east rows.
-    # At roll = pitch = 0 this reduces to exactly the yaw-only form it
-    # replaces, which is what keeps the older callers and tests honest.
-    north = (cp * cy) * fwd + (sr * sp * cy - cr * sy) * right \
-            + (cr * sp * cy + sr * sy) * down
-    east = (cp * sy) * fwd + (sr * sp * sy + cr * cy) * right \
-           + (cr * sp * sy - sr * cy) * down
-    return float(north), float(east)
+    fwd, right = -ay, ax
+    t = _np.radians(yaw_deg)
+    c, sn = _np.cos(t), _np.sin(t)
+    return float(fwd * c - right * sn), float(fwd * sn + right * c)
 
 
 def should_handover(src_val, src_was, armed_was, armed_now,
@@ -2290,9 +2235,7 @@ class VpsNode:
         drift = float(self.fuser.sigma_m)
         origin = self.origin_sigma_m
         if origin is None:
-            # config.origin_sigma_m, not the map's own error. See that setting
-            # for why 20 m was wrong here and what the typed origin measures.
-            origin = float(getattr(_cfg(), "origin_sigma_m", 0.5))
+            origin = float(np.sqrt(self.fuser.fix_var))
         return float(np.hypot(origin, drift))
 
     def gate_step(self, dn: float, de: float, dt: float | None,
@@ -2540,14 +2483,8 @@ class VpsNode:
         # answer.
         acc = f.get("accel")
         if acc and f.get("yaw") is not None:
-            # Roll and pitch too, and az, because a tilted aircraft's body
-            # axes are not the horizontal plane. See accel_to_ne. They fall
-            # back to 0, which is the yaw-only rotation this replaces, rather
-            # than refusing the sample.
-            _roll = f.get("roll") or 0.0
-            _pitch = f.get("pitch") or 0.0
-            for ts, ax, ay, az in acc:
-                an, ae = accel_to_ne(ax, ay, f["yaw"], az, _roll, _pitch)
+            for ts, ax, ay, _az in acc:
+                an, ae = accel_to_ne(ax, ay, f["yaw"])
                 self.vel.push_accel(ts, an, ae)
 
         # The stereo pair, which until now was computed on the camera's own

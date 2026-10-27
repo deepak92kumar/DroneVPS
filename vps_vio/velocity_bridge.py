@@ -147,7 +147,7 @@ class VelocityBridge:
     accel_e below were added for that reason and nothing else.
     """
 
-    def __init__(self, *, tau_s: float = 0.05, flow_timeout_s: float = 0.6,
+    def __init__(self, *, tau_s: float = 0.35, flow_timeout_s: float = 0.6,
                  deadband_base_mps: float = 0.35,
                  # 0.005 -> 0.010 ON 22 OCT, measured on log 227, which
                  # would not hold in any of four VPS windows.
@@ -378,50 +378,6 @@ class VelocityBridge:
             # Pull toward flow with a time constant. alpha -> 1 as dt grows,
             # so a long gap snaps onto the new measurement rather than
             # creeping; a short gap trusts the integrated state more.
-            #
-            # 0.35 -> 0.05 ON 27 OCT, and this is the number that decides
-            # whether the flight controller gets the flow or gets the
-            # accelerometer. At 30 fps dt is 0.033 s, so alpha was
-            # 1-exp(-0.033/0.35) = 0.09: nine per cent of each flow
-            # measurement, and ninety-one per cent of a state the
-            # accelerometer had been driving in between.
-            #
-            # Measured on flight 248 as VECTORS against the raw receiver,
-            # both sides smoothed over 1 s, at 5-15 m:
-            #
-            #     raw flow        5 deg off truth   slope 0.97 / 0.92
-            #     camera accel  106 deg off truth   slope -0.45, corr -0.49
-            #     what we sent   24 deg off truth   slope 0.75 / 0.77
-            #
-            # The accelerometer is not noisy, it is ANTI-correlated - 66% of
-            # its samples at 5-15 m point more than 90 degrees from truth -
-            # and the blend was mixing that into a flow that was nearly
-            # perfect. The pilot said it first: "flow track kar raha hai but
-            # usse sahi data bana kar fc ko nahi de raha hai."
-            #
-            # Swept offline by re-running this blend on that flight's own
-            # logged flow and accel, scored the same way:
-            #
-            #     tau    5-15 m   15-25 m   45-55 m
-            #     0.35     24       25        20      <- what flew
-            #     0.20     14       16        18
-            #     0.10      9       11        19
-            #     0.05      6        9        20      <- taken
-            #     0.02      5        8        20
-            #     no accel 10       12        18
-            #
-            # 0.05 recovers almost all of it and still leaves the
-            # accelerometer doing its real job, which is carrying the
-            # estimate across a flow gap - and removing it entirely scores
-            # WORSE (10 deg) than keeping it with a fast pull.
-            #
-            # Nothing above 50 m moves, at the pilot's instruction to fix the
-            # low end first. The 18-20 deg up there is a different fault.
-            #
-            # This value was written once before, on 21 Oct, and I reverted
-            # it myself - because the reasoning behind it then was wrong
-            # (flow-only smoothed over 30 samples against a raw output), not
-            # because a flight rejected it. It has never flown.
             alpha = 1.0 - math.exp(-dt / self.tau_s) if dt > 0 else 0.5
             self.vn += alpha * (vn - self.vn)
             self.ve += alpha * (ve - self.ve)
@@ -520,53 +476,11 @@ class VelocityBridge:
             return st
         st.valid = True
         st.reason = "ok"
-        # SOFT, not a cliff. The threshold is SUBTRACTED rather than used to
-        # zero everything below it, so the output is continuous: at exactly
-        # the deadband it is 0, just above it it is small, and a real 3 m/s
-        # still arrives as 3 minus the threshold.
-        #
-        # Flight 245 is why. The phantom finally shrank enough to sit ON the
-        # deadband instead of well above it, and the hard version then
-        # chattered across it: the sent speed crossed zero 307 times in
-        # 634 s, 0.48 times a second, with 39.9% of rows zeroed. Every
-        # crossing is a step from 0 to the full value and back, and the
-        # flight controller answered with tilt commands that saturated at
-        # ATC_ANGLE_MAX and rates to 56.9 deg/s. That is the jerking the
-        # pilot reported, and map fixes were ruled out as the cause - 16% of
-        # the >1 m/s jumps land within 0.3 s of a fix against a 15% base
-        # rate.
-        #
-        # What this does NOT change: the same speeds are still suppressed at
-        # a hover, because at and below the threshold the output is still
-        # zero. It removes the edge, not the deadband. deadbanded still
-        # reports whenever the threshold took anything, so the log reads the
-        # same way.
-        # A RAMP, not a cliff - and not a permanent subtraction either.
-        # Zero at and below the threshold, the full velocity at 1.5x it,
-        # straight line between. Continuous at both ends.
-        #
-        # The ramp is HALF a deadband wide and no wider, because everything
-        # inside it is under-reported and under-reporting real motion is the
-        # fault that flew away on log 229. At 82 m that band is 1.17-1.76 m/s;
-        # above 1.76 the velocity goes out in full. It is wide enough to
-        # cover the chatter, which sat on the threshold itself.
-        #
-        # The first attempt here subtracted the threshold at every speed,
-        # which removes the step but then under-reports real motion for
-        # ever: a genuine 3 m/s went out as 2.34. That is precisely the
-        # fault log 229 flew - an aircraft told it is slower than it is does
-        # not correct, and it ran 11.1 m in 24 s. Two of the bridge's own
-        # tests caught it, which is what they are for.
         if st.speed_mps < st.deadband_mps:
             st.deadbanded = True
             want_n = want_e = 0.0
         else:
-            k = (st.speed_mps - st.deadband_mps) / (0.5 * st.deadband_mps)
-            if k >= 1.0:
-                want_n, want_e = self.vn, self.ve
-            else:
-                st.deadbanded = True
-                want_n, want_e = self.vn * k, self.ve * k
+            want_n, want_e = self.vn, self.ve
 
         # THE OUTPUT SLEW. Restored from the 9 Oct 2026 status report, where
         # it is recorded as flown and kept:

@@ -94,7 +94,7 @@ b.reset_state("again")
 check("a second reset is harmless", b.vn == 0.0 and b.n_resets == 2)
 
 print("\nthe configuration is NOT thrown away with it")
-for k, want in (("tau_s", 0.05), ("max_sent_mps", 6.0),
+for k, want in (("tau_s", 0.35), ("max_sent_mps", 6.0),
                 ("deadband_base_mps", 0.35), ("deadband_per_m", 0.010),
                 ("bias_tau_s", 20.0)):
     check(f"{k} is still {want}", abs(getattr(b, k) - want) < 1e-9,
