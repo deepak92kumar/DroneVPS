@@ -36,7 +36,7 @@ WorkingDirectory=/data/DRONE/vps_vio
 # --send-gps with --gps-id 1 is what makes the estimate arrive as GPS2.
 ExecStart=/usr/bin/python3 /data/DRONE/vps_vio/live_node.py \
     --live \
-    --map /data/DRONE/bhh.tif \
+    --map /data/DRONE/demo_loc.tif \
     --fc-port udpout:127.0.0.1:14650 \
     --send-gps --gps-id 1 \
     --out /data/DRONE/flight_logs/vps \

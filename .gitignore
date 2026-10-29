@@ -37,3 +37,5 @@ chat_backup/
 
 # Status reports are the project record and belong in it; other PDFs do not.
 !DroneVPS_Status_*.pdf
+# GDAL ka statistics sidecar - sheet ke saath apne aap banta hai.
+*.aux.xml
