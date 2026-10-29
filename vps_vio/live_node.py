@@ -3535,38 +3535,11 @@ def main():
                 # absolute_sigma_m reads as the map's own error - and the three
                 # flights that flew on a stale SCR_USER were 147-157 m out.
                 new_sigma = None
-                missing = None
-                # ONE SOURCE PER ARM, and no substituting. The pilot's
-                # instruction, 29 Oct: "jis par arm kare usi ka origin lo na
-                # mille tho batao nahi mila". Armed on the receiver, the
-                # origin is the receiver's fix; armed on the VPS, it is the
-                # point typed on the RC. If that source has nothing, the
-                # origin is not re-taken and the pilot is told which one was
-                # asked and why it was empty.
-                #
-                # WHAT THIS REPLACES, and why it mattered on flight 286. The
-                # test used to read `if src_now == 0 and f["gps"]`, so a
-                # receiver arm with no fix fell straight through into the
-                # SCR_USER1/2 branch below - the wrong source for that arm,
-                # applied silently. The reverse hole was in the elif: a VPS
-                # arm with SCR_USER1/2 unset matched neither branch, so the
-                # origin stayed at whatever the startup fallback had picked
-                # (on 286 that was the receiver, 5 m from the typed point)
-                # and the only trace was a bare "NOT RE-TAKEN AT ARM".
-                #
-                # src_now of None - GPS_PRIMARY could not be read at all -
-                # still lands on SCR_USER1/2, unchanged: this aircraft arms
-                # on the VPS, and the typed point is the right answer there.
-                if src_now == 0:
-                    if f["gps"]:
-                        new_o, why_o = f["gps"], "receiver at arm"
-                        new_sigma = f.get("gps1_hacc")
-                    else:
-                        missing = "armed on receiver, it has no fix"
+                if src_now == 0 and f["gps"]:
+                    new_o, why_o = f["gps"], "receiver at arm"
+                    new_sigma = f.get("gps1_hacc")
                 elif scr_origin is not None:
                     new_o, why_o = scr_origin, "SCR_USER1/2 at arm"
-                else:
-                    missing = "armed on VPS, SCR_USER1/2 not set"
                 if new_o is not None:
                     moved = float(np.hypot(
                         (new_o[1] - node.origin[1]) * M_PER_DEG_LAT,
@@ -3588,12 +3561,8 @@ def main():
                                    Notifier.SEV_INFO if moved < 50
                                    else Notifier.SEV_WARN)
                 else:
-                    # "na mille tho batao nahi mila" - name the source that
-                    # was asked and what it had, not a bare "not re-taken".
-                    why_not = missing or "no origin available"
-                    print(f"ARM: origin NOT re-taken - {why_not}", flush=True)
                     notifier.event("reanchor", "none",
-                                   f"VPS ORIGIN NOT TAKEN: {why_not}"[:50],
+                                   "VPS ORIGIN NOT RE-TAKEN AT ARM",
                                    Notifier.SEV_WARN)
             # THE HANDOVER, IN FLIGHT. The pilot's instruction, 21 Oct, and the
             # reasoning is his own: when the switch goes the other way, from the
