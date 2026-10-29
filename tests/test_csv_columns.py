@@ -136,7 +136,11 @@ check("widths match", len(row) == len(CSV_COLUMNS),
 # because seven columns were once added to the ROW and not to the header, and
 # 1162 rows were written with everything past the 32nd attributed to the wrong
 # name. Adding a column here is meant to be a decision, not an accident.
-check("and there are the columns we expect", len(CSV_COLUMNS) == 80,
+# 80 -> 92 on 29 Oct: the twelve try_*/map_* columns that record a map match
+# ATTEMPT rather than only an accepted fix. The number is hard-coded on
+# purpose - it is the tripwire that catches a column added by accident - so
+# changing it is part of changing the columns, not a nuisance.
+check("and there are the columns we expect", len(CSV_COLUMNS) == 92,
       str(len(CSV_COLUMNS)))
 i = CSV_COLUMNS.index("fc_d_roll")
 check("the three derotation opinions sit together",

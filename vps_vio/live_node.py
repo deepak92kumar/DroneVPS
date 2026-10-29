@@ -1278,7 +1278,31 @@ CSV_COLUMNS = ["t", "north_m", "east_m", "lon", "lat", "sigma_m",
     # FS_EKF_THRESH trips on the WORST of the first three; it is 1.2 on this
     # aircraft against a documented 0.8 default, and nothing has ever measured
     # what they actually reach while flying on the VPS.
-    "ekf_vel_var", "ekf_pos_h_var", "ekf_comp_var", "ekf_flags"]
+    "ekf_vel_var", "ekf_pos_h_var", "ekf_comp_var", "ekf_flags",
+    # EVERY MATCH THE WORKER ANSWERED, not only the accepted ones. 29 Oct.
+    #
+    # Until now the fix_* columns above were all written inside `if res.ok`,
+    # so a rejected match left no trace whatsoever. On vps_00286 fix_score
+    # appeared on 69 rows and all 69 of them were accepts, which makes the
+    # question that flight actually raised unanswerable: map_min_alt_m is 50,
+    # the aircraft crossed 50 m at t 266 and the first fix landed at 65.0 m at
+    # t 272.5, and nothing in the log distinguishes the three possible
+    # reasons - the matcher never ran, it ran and every answer was rejected,
+    # or the band was crossed in 7.5 s and it only got three attempts.
+    #
+    # The worker already computes all of it: FixResult carries ok, score,
+    # margin and a reason string for exactly this purpose ("why a rejected
+    # fix was rejected, for the recorder"). It was simply dropped here. These
+    # columns are the recorder it was written for.
+    "try_ok", "try_score", "try_margin", "try_inliers", "try_alt_m",
+    "try_reason",
+    # The worker's own tally, cumulative, so attempts that never reached a
+    # FixResult are visible too: skipped under min_alt_m, skipped by the fix
+    # period, or dropped because the thread was still busy with the last one.
+    # Without these a row with no try_* is ambiguous between "nothing was
+    # asked" and "something was asked and never came back".
+    "map_submitted", "map_completed", "map_skipped_low", "map_skipped_period",
+    "map_dropped", "map_warm"]
 
 
 # w is only used by the quaternion rows, so it is last and empty elsewhere.
@@ -1384,7 +1408,16 @@ def csv_row(est, f, v, gN, gE, err):
             "" if f.get("ekf_vel_var") is None else f"{f['ekf_vel_var']:.4f}",
             "" if f.get("ekf_pos_h_var") is None else f"{f['ekf_pos_h_var']:.4f}",
             "" if f.get("ekf_comp_var") is None else f"{f['ekf_comp_var']:.4f}",
-            "" if f.get("ekf_flags") is None else int(f["ekf_flags"])]
+            "" if f.get("ekf_flags") is None else int(f["ekf_flags"]),
+            "" if est.get("try_ok") is None else int(est["try_ok"]),
+            "" if est.get("try_score") is None else f"{est['try_score']:.4f}",
+            "" if est.get("try_margin") is None else f"{est['try_margin']:.4f}",
+            "" if est.get("try_inliers") is None else f"{est['try_inliers']:d}",
+            "" if est.get("try_alt_m") is None else f"{est['try_alt_m']:.1f}",
+            est.get("try_reason") or "",
+            est.get("map_submitted", ""), est.get("map_completed", ""),
+            est.get("map_skipped_low", ""), est.get("map_skipped_period", ""),
+            est.get("map_dropped", ""), est.get("map_warm", "")]
 
 
 # --------------------------------------------------------------------------- #
@@ -2852,6 +2885,19 @@ class VpsNode:
         fix_inl = None
         fix_age = None
         fix_dis = None
+        # THE ATTEMPT, accepted or not. Read before the `if res.ok` below,
+        # because that branch is what used to swallow every rejection. A
+        # non-ok FixResult is still a measurement: it says the matcher ran,
+        # at what height, what it scored, and which gate turned it away.
+        try_ok = try_score = try_margin = try_inl = try_alt = None
+        try_reason = ""
+        if res is not None:
+            try_ok = int(bool(res.ok))
+            try_score = float(getattr(res, "score", 0.0) or 0.0)
+            try_margin = float(getattr(res, "margin", 0.0) or 0.0)
+            try_inl = int(getattr(res, "inliers", 0) or 0)
+            try_alt = float(getattr(res, "altitude_m", 0.0)) or None
+            try_reason = str(getattr(res, "reason", "") or "")
         if res is not None and res.ok:
             fN = (res.lat - self.origin[1]) * M_PER_DEG_LAT
             fE = (res.lon - self.origin[0]) * self.mlon
@@ -2891,6 +2937,19 @@ class VpsNode:
                     step_dt_s=getattr(self, "step_dt", None),
                     fix_lon=fix_lon, fix_lat=fix_lat, fix_score=fix_score,
                     fix_inliers=fix_inl, fix_alt_m=fix_alt,
+                    try_ok=try_ok, try_score=try_score,
+                    try_margin=try_margin, try_inliers=try_inl,
+                    try_alt_m=try_alt, try_reason=try_reason,
+                    # getattr for the same reason the counters above use it:
+                    # the tests build VpsNode through __new__ and it has no
+                    # worker. A missing tally writes blank, not a crash.
+                    map_submitted=getattr(self.worker, "submitted", ""),
+                    map_completed=getattr(self.worker, "completed", ""),
+                    map_skipped_low=getattr(self.worker, "skipped_low", ""),
+                    map_skipped_period=getattr(self.worker,
+                                               "skipped_period", ""),
+                    map_dropped=getattr(self.worker, "dropped", ""),
+                    map_warm=getattr(self.worker, "warm_runs", ""),
                     north=float(self.fuser.pos[0]), east=float(self.fuser.pos[1]),
                     lon=lon, lat=lat, sigma=self.fuser.sigma_m,
                     # Two sigmas, and the difference is the whole 20 Oct
@@ -3476,11 +3535,38 @@ def main():
                 # absolute_sigma_m reads as the map's own error - and the three
                 # flights that flew on a stale SCR_USER were 147-157 m out.
                 new_sigma = None
-                if src_now == 0 and f["gps"]:
-                    new_o, why_o = f["gps"], "receiver at arm"
-                    new_sigma = f.get("gps1_hacc")
+                missing = None
+                # ONE SOURCE PER ARM, and no substituting. The pilot's
+                # instruction, 29 Oct: "jis par arm kare usi ka origin lo na
+                # mille tho batao nahi mila". Armed on the receiver, the
+                # origin is the receiver's fix; armed on the VPS, it is the
+                # point typed on the RC. If that source has nothing, the
+                # origin is not re-taken and the pilot is told which one was
+                # asked and why it was empty.
+                #
+                # WHAT THIS REPLACES, and why it mattered on flight 286. The
+                # test used to read `if src_now == 0 and f["gps"]`, so a
+                # receiver arm with no fix fell straight through into the
+                # SCR_USER1/2 branch below - the wrong source for that arm,
+                # applied silently. The reverse hole was in the elif: a VPS
+                # arm with SCR_USER1/2 unset matched neither branch, so the
+                # origin stayed at whatever the startup fallback had picked
+                # (on 286 that was the receiver, 5 m from the typed point)
+                # and the only trace was a bare "NOT RE-TAKEN AT ARM".
+                #
+                # src_now of None - GPS_PRIMARY could not be read at all -
+                # still lands on SCR_USER1/2, unchanged: this aircraft arms
+                # on the VPS, and the typed point is the right answer there.
+                if src_now == 0:
+                    if f["gps"]:
+                        new_o, why_o = f["gps"], "receiver at arm"
+                        new_sigma = f.get("gps1_hacc")
+                    else:
+                        missing = "armed on receiver, it has no fix"
                 elif scr_origin is not None:
                     new_o, why_o = scr_origin, "SCR_USER1/2 at arm"
+                else:
+                    missing = "armed on VPS, SCR_USER1/2 not set"
                 if new_o is not None:
                     moved = float(np.hypot(
                         (new_o[1] - node.origin[1]) * M_PER_DEG_LAT,
@@ -3502,8 +3588,12 @@ def main():
                                    Notifier.SEV_INFO if moved < 50
                                    else Notifier.SEV_WARN)
                 else:
+                    # "na mille tho batao nahi mila" - name the source that
+                    # was asked and what it had, not a bare "not re-taken".
+                    why_not = missing or "no origin available"
+                    print(f"ARM: origin NOT re-taken - {why_not}", flush=True)
                     notifier.event("reanchor", "none",
-                                   "VPS ORIGIN NOT RE-TAKEN AT ARM",
+                                   f"VPS ORIGIN NOT TAKEN: {why_not}"[:50],
                                    Notifier.SEV_WARN)
             # THE HANDOVER, IN FLIGHT. The pilot's instruction, 21 Oct, and the
             # reasoning is his own: when the switch goes the other way, from the
