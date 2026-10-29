@@ -2576,19 +2576,32 @@ class VpsNode:
         # and stamped "now" is read by the flight controller as motion: at
         # 3 m/s that is half a metre of invented travel, and it feeds the
         # velocity that ends every window.
+        # The gyro's rotation goes IN, so each track is derotated
+        # before the fit reduces them. See flow_odom.gyro_shift_px_at:
+        # the old path subtracted one centre-valued shift from the
+        # result, which is exact only at the optical centre and left
+        # 16-32% of the rotation behind on this 77.7 degree field.
+        #
+        # THESE THREE ARE SET BEFORE THE BRANCH, not inside it, and that is
+        # the whole of the 29 Oct fix. They used to live in the `else` below,
+        # while the SECOND camera's call - outside the branch - read _use_pp
+        # unconditionally. So a stale frame took the `if`, left _use_pp
+        # unassigned, and the partner's line raised UnboundLocalError and took
+        # the node down. 109 crashes are in vps_stderr.log and the last 25 are
+        # all this one; five of those are the build flying now.
+        #
+        # Hoisting them changes nothing else: both cameras sit on one airframe
+        # and turn together, so whatever rotation is removed from one has to
+        # be removed from the other, and the partner now gets exactly the
+        # value it would have got had the frame been fresh.
+        _gr, _gp = f.get("gyro_d_roll"), f.get("gyro_d_pitch")
+        _use_pp = (self.derotate != "fc" and _gr is not None
+                   and _gp is not None)
         _age = float(f.get("frame_age_s") or 0.0)
         if _age > getattr(self, "frame_age_max_s", 0.12):
             self.n_frame_stale = getattr(self, "n_frame_stale", 0) + 1
             d, ntrk = None, 0
         else:
-            # The gyro's rotation goes IN, so each track is derotated
-            # before the fit reduces them. See flow_odom.gyro_shift_px_at:
-            # the old path subtracted one centre-valued shift from the
-            # result, which is exact only at the optical centre and left
-            # 16-32% of the rotation behind on this 77.7 degree field.
-            _gr, _gp = f.get("gyro_d_roll"), f.get("gyro_d_pitch")
-            _use_pp = (self.derotate != "fc" and _gr is not None
-                       and _gp is not None)
             d, ntrk = self.tracker.step(
                 f["img"], depth=f.get("depth"),
                 derot_deg=((_gr, _gp) if _use_pp else None))
