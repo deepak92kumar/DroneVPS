@@ -1,0 +1,94 @@
+# DroneVPS - back to the flight 238 configuration.
+#
+# Every line here is a parameter MEASURED to differ between the FC
+# as it stands and the configuration that flew as flight 238 with no
+# failsafe. Nothing is in here because I thought it mattered.
+#
+# LEFT OUT (2) - today's level calibration:
+#     AHRS_TRIM_X  AHRS_TRIM_Y
+# LEFT OUT (1) - it SKIPS arming checks. The GPS pre-arm has to be answered by injecting, not by switching the check off:
+#     ARMING_SKIPCHK
+# LEFT OUT (2) - barometer hardware id:
+#     BARO1_DEVID  BARO2_DEVID
+# LEFT OUT (2) - ground pressure, set at every boot - an old one makes altitude wrong:
+#     BARO1_GND_PRESS  BARO2_GND_PRESS
+# LEFT OUT (32) - today's compass calibration:
+#     COMPASS_CAL_FIT  COMPASS_DEC  COMPASS_DIA2_X  COMPASS_DIA2_Y
+#     COMPASS_DIA2_Z  COMPASS_DIA3_X  COMPASS_DIA3_Y  COMPASS_DIA3_Z
+#     COMPASS_DIA_X  COMPASS_DIA_Y  COMPASS_DIA_Z  COMPASS_ODI2_X
+#     COMPASS_ODI2_Y  COMPASS_ODI2_Z  COMPASS_ODI3_X  COMPASS_ODI3_Y
+#     COMPASS_ODI3_Z  COMPASS_ODI_X  COMPASS_ODI_Y  COMPASS_ODI_Z
+#     COMPASS_OFS2_X  COMPASS_OFS2_Y  COMPASS_OFS2_Z  COMPASS_OFS3_X
+#     COMPASS_OFS3_Y  COMPASS_OFS3_Z  COMPASS_OFS_X  COMPASS_OFS_Y
+#     COMPASS_OFS_Z  COMPASS_SCALE  COMPASS_SCALE2  COMPASS_SCALE3
+# LEFT OUT (3) - internal compass stays off, at the pilot's word:
+#     COMPASS_ORIENT3  COMPASS_USE2  COMPASS_USE3
+# LEFT OUT (1) - the RC switch owns this, not a file:
+#     GPS_PRIMARY
+# LEFT OUT (22) - today's accelerometer and gyro calibration:
+#     INS_ACC1_CALTEMP  INS_ACC2OFFS_X  INS_ACC2OFFS_Y  INS_ACC2OFFS_Z
+#     INS_ACC2SCAL_X  INS_ACC2SCAL_Y  INS_ACC2SCAL_Z  INS_ACC2_CALTEMP
+#     INS_ACCOFFS_X  INS_ACCOFFS_Y  INS_ACCOFFS_Z  INS_ACCSCAL_X
+#     INS_ACCSCAL_Y  INS_ACCSCAL_Z  INS_GYR1_CALTEMP  INS_GYR2OFFS_X
+#     INS_GYR2OFFS_Y  INS_GYR2OFFS_Z  INS_GYR2_CALTEMP  INS_GYROFFS_X
+#     INS_GYROFFS_Y  INS_GYROFFS_Z
+# LEFT OUT (5) - the speeds changed on 30 Oct, on purpose:
+#     LOIT_SPEED_MS  PILOT_SPD_UP  WP_SPD  WP_SPD_DN
+#     WP_SPD_UP
+# LEFT OUT (1) - a different mission:
+#     MIS_TOTAL
+# LEFT OUT (1) - the FC learns this in flight:
+#     MOT_THST_HOVER
+# LEFT OUT (6) - today's RC calibration - an old one breaks the sticks and the switch:
+#     RC14_MAX  RC14_MIN  RC14_TRIM  RC2_MAX
+#     RC3_TRIM  RC4_MIN
+# LEFT OUT (2) - the demo site, typed on the RC:
+#     SCR_USER1  SCR_USER2
+# LEFT OUT (5) - counters - boot count, flight time:
+#     STAT_BOOTCNT  STAT_DISTFLWN  STAT_FLTCNT  STAT_FLTTIME
+#     STAT_RUNTIME
+
+AHRS_GPS_USE,0      # abhi 1
+ATC_ACC_P_MAX,740      # abhi 1100
+ATC_ACC_R_MAX,740      # abhi 1100
+ATC_ACC_Y_MAX,140      # abhi 270
+ATC_ANGLE_MAX,15      # abhi 30
+ATC_RAT_PIT_D,0.003      # abhi 0.0036
+ATC_RAT_PIT_FLTD,14      # abhi 20
+ATC_RAT_PIT_FLTT,14      # abhi 20
+ATC_RAT_PIT_I,0.09      # abhi 0.135
+ATC_RAT_PIT_P,0.09      # abhi 0.135
+ATC_RAT_RLL_D,0.003      # abhi 0.0036
+ATC_RAT_RLL_FLTD,14      # abhi 20
+ATC_RAT_RLL_FLTT,14      # abhi 20
+ATC_RAT_RLL_I,0.09      # abhi 0.135
+ATC_RAT_RLL_P,0.09      # abhi 0.135
+ATC_RAT_YAW_FLTD,0      # abhi 20
+ATC_RAT_YAW_FLTE,2      # abhi 2.5
+ATC_RAT_YAW_FLTT,14      # abhi 20
+BRD_SER1_RTSCTS,0      # abhi 2
+BRD_SER2_RTSCTS,0      # abhi 2
+DISARM_DELAY,2      # abhi 10
+EK3_MAG_CAL,2      # abhi 3
+EK3_RNG_USE_SPD,6      # abhi 2
+EK3_SRC2_POSZ,0      # abhi 1
+EK3_VEL_I_GATE,300      # abhi 500
+FENCE_TYPE,4      # abhi 7
+GPS_HDOP_GOOD,250      # abhi 140
+INITIAL_MODE,2      # abhi 0
+INS_ACCEL_FILTER,10      # abhi 20
+INS_GYRO_FILTER,28      # abhi 20
+INS_LOG_BAT_MASK,1      # abhi 0
+INS_USE3,0      # abhi 1
+LOIT_ACC_MAX_M,2.62768      # abhi 2.62768
+LOIT_BRK_DELAY,0.1      # abhi 1
+MAV1_EXT_STAT,0      # abhi 2
+MOT_BAT_VOLT_MAX,25.2      # abhi 0
+MOT_BAT_VOLT_MIN,21      # abhi 0
+MOT_SPIN_ARM,0.14      # abhi 0.1
+MOT_THST_EXPO,0.67      # abhi 0.65
+PSC_ANGLE_MAX,15      # abhi 0
+RNGFND_FILT,1      # abhi 0.5
+SERIAL6_BAUD,115      # abhi 57
+SURFTRAK_MODE,0      # abhi 1
+TERRAIN_ENABLE,0      # abhi 1
