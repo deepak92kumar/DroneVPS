@@ -41,6 +41,12 @@ print(f"{len(want)} parameters {'LIKHNE' if a.apply else 'DEKHNE (dry run)'} ke 
 
 m = mavutil.mavlink_connection(a.port, baud=115200,
                                source_system=255, source_component=198)
+# Say hello before listening. A UDP router learns a client's address from the
+# first packet it RECEIVES, so a client that only listens is never registered
+# and waits for a heartbeat that cannot arrive. On a serial device this is
+# harmless; through the router it is the difference between working and
+# "FC se heartbeat nahi aaya" with the FC sitting right there.
+m.mav.heartbeat_send(6, 8, 0, 0, 0)   # MAV_TYPE_GCS, INVALID
 if m.wait_heartbeat(timeout=15) is None:
     sys.exit("FC se heartbeat nahi aaya")
 print(f"FC mila on {a.port}  (sys {m.target_system}, comp {m.target_component})\n")

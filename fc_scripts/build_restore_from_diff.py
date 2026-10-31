@@ -47,6 +47,13 @@ EXCLUDE = [
   "the FC learns this in flight"),
  (re.compile(r"^(WP_SPD|WP_SPD_UP|WP_SPD_DN|LOIT_SPEED_MS|PILOT_SPD_UP)$"),
   "the speeds changed on 30 Oct, on purpose"),
+ # Measured on 31 Oct with motor_spin_cal.py, props off: all six start at
+ # PWM 1145 and run steadily at 1160. The 0.140/0.150 in the snapshot came
+ # across from the quadcopter this flight controller used to fly and had
+ # never been measured on 4008s with 16 inch props. Restoring them would
+ # put a guess back over a measurement.
+ (re.compile(r"^MOT_SPIN_(ARM|MIN)$"),
+  "measured 31 Oct by spinning the motors, not the quad's inherited guess"),
  (re.compile(r"^SCR_USER[12]$"),
   "the demo site, typed on the RC"),
  (re.compile(r"^COMPASS_(USE2|USE3|ORIENT3)$"),
