@@ -25,10 +25,20 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--apply", action="store_true")
 ap.add_argument("--port", default=PORT)
 ap.add_argument("--only", default=None, help="sirf is prefix wale")
+# 1 NOV: the file was hard-coded, and that is how reports/new_fc_setup.parm -
+# written on 31 Oct FOR the X7 -> X7+ swap, with the notch, the rate gains and
+# EK3_SRC1_VELZ all correct in it - sat on disk unloaded while the aircraft
+# flew three times on ArduPilot defaults. A tool that can only write one file
+# is a tool nobody reaches for with a different one.
+ap.add_argument("--file", default=PARM,
+                help="the .parm to write (default: %(default)s). "
+                     "reports/new_fc_setup.parm is the full X7+ setup; "
+                     "reports/restore_from_diff.parm is the measured diff "
+                     "against flight 238")
 a = ap.parse_args()
 
 want = []
-for line in open(PARM):
+for line in open(a.file):
     line = line.split("#")[0].strip()
     if not line or "," not in line:
         continue
@@ -37,6 +47,7 @@ for line in open(PARM):
     if a.only and not k.startswith(a.only):
         continue
     want.append((k, float(v)))
+print(f"file: {a.file}")
 print(f"{len(want)} parameters {'LIKHNE' if a.apply else 'DEKHNE (dry run)'} ke liye\n")
 
 m = mavutil.mavlink_connection(a.port, baud=115200,
