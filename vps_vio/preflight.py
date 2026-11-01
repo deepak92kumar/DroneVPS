@@ -66,7 +66,9 @@ LIDAR_MAX_M = 1.5
 # Expected after 20 Oct. A power cycle keeps these (they are in flash), but a
 # parameter reset or someone else's session does not.
 EXPECT = {
-    "RNGFND1_RMETRIC": (0.0, "a current loop does not scale with the 5 V rail"),
+    # RNGFND1_RMETRIC was here until 1 Nov. It only exists when
+    # RNGFND1_TYPE is non-zero, and this aircraft has no rangefinder, so the
+    # check could only ever report "absent" about hardware that is not fitted.
     "INS_HNTCH_FREQ": (47.0, "the measured prop fundamental"),
     "INS_HNTCH_REF": (0.331, "the measured hover throttle"),
     "INS_HNTCH_BW": (24.0, "FREQ/2"),
@@ -285,9 +287,14 @@ def flight_controller(port):
                   ("" if mean > rmin_now + 0.1 else
                    " - too low; EK3 will drop it for height near the ground"),
                   soft=True)
+    elif (fc.get("RNGFND1_TYPE") or 0) == 0:
+        ok("no rangefinder fitted, and none configured",
+           "height is the barometer at every altitude - it reads 5-7 m high "
+           "near the ground, and nothing will auto-disarm on a lidar zero")
     else:
         bad("lidar is reporting",
-            "no RANGEFINDER or DISTANCE_SENSOR messages in the window")
+            "RNGFND1_TYPE is set but no RANGEFINDER or DISTANCE_SENSOR "
+            "messages arrived - either the sensor is gone or its wiring is")
 
     # MOT_HOVER_LEARN=2 means the FC updates MOT_THST_HOVER itself after every
     # flight, so an exact expectation here would go stale on its own and cry
@@ -428,22 +435,33 @@ FC_WANTS = [
     ("RC6_OPTION", 0, False,
      "Do Nothing. OUR node reads the channel and decides whether to inject; "
      "ArduPilot must not also act on it. The vendor's guide says the same"),
-    # THE TWO PARENTS. EXPECT above already checks INS_HNTCH_FREQ/REF/BW and
-    # RNGFND1_RMETRIC, but when these two read 0 ArduPilot does not create the
-    # children at all, so those checks report "absent" and the cause is never
-    # named. On 1 Nov all four read absent for exactly this reason.
+    # THE PARENT. EXPECT above checks INS_HNTCH_FREQ/REF/BW, but when
+    # INS_HNTCH_ENABLE reads 0 ArduPilot does not create those children at
+    # all, so the checks report "absent" and the cause is never named. On
+    # 1 Nov all three read absent for exactly this reason.
     ("INS_HNTCH_ENABLE", 1, True,
      "The harmonic notch is OFF. 47 Hz of prop fundamental then goes straight "
      "into the gyros, and the flow's derotation reads those gyros. Measured "
      "on flight 378 this did NOT correlate with flow_disagree (r = +0.08), so "
      "it is not the altitude problem - but it is tuning that flew and is now "
      "gone"),
-    ("RNGFND1_TYPE", 1, True,
-     "1 = Analog. The TF03 is a 4-20 mA loop on the X7's ADC pin 103. With 0 "
-     "there is no rangefinder at all: flight 378's log has zero RFND rows and "
-     "rngfnd_m is NaN in every row of every run since the board swap. Height "
-     "below 60 m is then the barometer alone, which reads 5-7 m high, and the "
-     "lidar zero that lets the aircraft auto-disarm is gone with it"),
+    # 0, because THERE IS NO LIDAR ON THIS AIRCRAFT. The pilot said so on
+    # 1 Nov, and the logs agree: 00000111.BIN has zero RFND rows and
+    # rngfnd_m is NaN in every row of every run. I read that as a board-swap
+    # regression and wrote a check wanting 1; it was not a regression, it is
+    # the airframe. A rangefinder configured for hardware that is absent
+    # reports a clamped 0.000 m, which every threshold below 2 m waves
+    # through - see the note above EXPECT.
+    #
+    # What follows from it, and is NOT a fault to chase: height is the
+    # barometer at every altitude (EK3_SRC1_POSZ = BARO above), the barometer
+    # reads 5-7 m high near the ground, and there is no lidar zero, so the
+    # aircraft will not auto-disarm on the sensor - the pilot disarms it.
+    ("RNGFND1_TYPE", 0, True,
+     "0 = none, and that is correct: this aircraft carries no rangefinder. "
+     "Setting it to anything else makes ArduPilot read an ADC pin that "
+     "nothing drives and floor the result at 0.000 m, which reads as a "
+     "perfect ground lock"),
 ]
 
 

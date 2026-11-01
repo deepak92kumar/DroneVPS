@@ -6,18 +6,22 @@ flights later - a full read showed what had quietly gone:
 
     EK3_SRC1_VELZ       3        should be 0 (NONE)
     INS_HNTCH_ENABLE    0        the harmonic notch, off
-    RNGFND1_TYPE        0        no rangefinder configured at all
     ATC_RAT_RLL_P/I     0.135    the tuning that flew was 0.09
     ATC_RAT_RLL_D       0.0036   flew 0.0030
     DISARM_DELAY        10       flew 2
 
-None of it announced itself. flight_logs/00000111.BIN has zero RFND rows and
-every rngfnd_m in every run since the swap is NaN, and nothing said so.
+None of it announced itself.
+
+RNGFND1_TYPE = 0 is NOT in that list, and the first version of this test said
+it was. 00000111.BIN has zero RFND rows and every rngfnd_m in every run is
+NaN, which looked like the same regression - but the pilot says the aircraft
+carries no rangefinder at all, so 0 is the right value and the absence is the
+airframe, not the board swap. Height is the barometer at every altitude.
 
 EXPECT already covered the tuning. What it could not do is name a CAUSE:
-when INS_HNTCH_ENABLE and RNGFND1_TYPE read 0, ArduPilot does not create
-INS_HNTCH_FREQ or RNGFND1_RMETRIC at all, so those checks report "absent" and
-the pilot is told a symptom. Both parents are now checked by name.
+when INS_HNTCH_ENABLE reads 0, ArduPilot does not create INS_HNTCH_FREQ,
+_REF or _BW at all, so those checks report "absent" and the pilot is told a
+symptom. The parent is now checked by name.
 
 FC_WANTS is OUR list, not a vendor's. Where it differs from the Stride
 Dynamics integration guide the difference is deliberate - GPS_AUTO_SWITCH
@@ -41,9 +45,9 @@ def check(name, ok, detail=""):
 
 W = {name: (want, blocker, why) for name, want, blocker, why in preflight.FC_WANTS}
 
-print("the six that a board swap takes, and did")
+print("what the board swap took, and the one thing it did not")
 for name, want in (("EK3_SRC1_VELZ", 0), ("INS_HNTCH_ENABLE", 1),
-                   ("RNGFND1_TYPE", 1)):
+                   ("RNGFND1_TYPE", 0)):
     check(f"{name} is checked, wanting {want}",
           name in W and abs(W[name][0] - want) < 1e-9,
           f"found {W[name][0]}" if name in W else "NOT CHECKED")
