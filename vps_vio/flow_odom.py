@@ -436,7 +436,7 @@ class FlowTracker:
     def __init__(self, *, max_corners: int = 300, quality: float = 0.01,
                  min_dist: int = 8, min_tracks: int = 30,
                  redetect_below: float = 0.6, redetect_every: int = 30,
-                 K=None, D=None):
+                 K=None, D=None, use_gpu: bool = True):
         self.max_corners, self.quality, self.min_dist = max_corners, quality, min_dist
         self.min_tracks = min_tracks
         self.K = None if K is None else np.asarray(K, np.float64).reshape(3, 3)
@@ -457,6 +457,35 @@ class FlowTracker:
         self.redetections = 0
         self.depth_med_m = None
         self.depth_dropped = 0
+        # THE GPU PATH, decided once here rather than per frame. See _track
+        # for what it is worth: 85% of the CPU a flow step costs, agreeing
+        # with OpenCV to 0.231 px over the points both keep.
+        #
+        # VPI NEEDS DISPLAY UNSET. With one set it reaches for the X server's
+        # EGL instead of the device's and every backend fails with
+        # EGL_BAD_DISPLAY - under TigerVNC, which is how this Jetson is
+        # driven, nothing works at all. The flying service has no DISPLAY in
+        # its environment, so the aircraft is fine; a shell is not, and an
+        # hour went into finding that out.
+        #
+        # Import failure is not an error. A machine without VPI, or with a
+        # driver that will not initialise, simply tracks on the CPU exactly
+        # as it always has.
+        self._vpi = None
+        self.vpi_error = ""
+        if use_gpu:
+            try:
+                import vpi as _vpi
+                with _vpi.Backend.CUDA:
+                    _vpi.asimage(np.zeros((32, 32), np.uint8)).gaussian_pyramid(2)
+                self._vpi = _vpi
+            except Exception as exc:
+                self.vpi_error = f"{type(exc).__name__}: {exc}"
+
+    @property
+    def gpu(self) -> bool:
+        """Is the flow on the GPU right now? False after a fallback."""
+        return self._vpi is not None
 
     def _undistort(self, pts):
         """Raw pixel points -> undistorted pixel points, in the same K units.
@@ -539,6 +568,95 @@ class FlowTracker:
             return None
         return keep, med, tol
 
+    # THE WINDOW AND THE LEVELS, in one place because two backends read them.
+    # 31 px and 4 levels is what has always flown; the numbers are repeated in
+    # _cv_track and _vpi_track only as arguments, never redefined.
+    LK_WIN = 31
+    LK_LEVELS = 4
+    LK_ITERS = 30
+    LK_EPS = 0.01
+
+    def _track(self, prev, cur, pts):
+        """Forward and backward LK. Returns (p1, st, p0r, st2), OpenCV's shapes.
+
+        THE FLOW IS WHAT EATS THE CPU, and on this aircraft that is what
+        costs frames. Measured on two real 1280x800 frames from flight 382,
+        300 corners, 31 px window, 4 levels, forward and backward:
+
+            OpenCV, 6 threads   wall 53.39 ms   CPU 98.21 ms   1.84 cores
+            VPI CUDA            wall 25.70 ms   CPU 15.01 ms   0.58 cores
+
+        85% of the CPU goes away, because the arithmetic moves to the GPU and
+        the CPU only waits. At 25 Hz with two trackers that is 491% of a core
+        against 75% - and the node was measured at 246% with frames dropping
+        at 3.67 a second on 382.
+
+        They agree: over the 253 points both tracked, the median difference
+        is 0.231 px and p95 is 0.817. That is the same 0.23 px this file's own
+        FlowTracker docstring recorded when the comparison was first made.
+
+        VPI's DEFAULTS ARE NOT OURS and that difference is not cosmetic. Its
+        winsize defaults to 11 and maxiter to 6; run that way it tracked 15 of
+        300 points and the ones it kept were 72 px out. Passed 31 and 30 it
+        tracks 253 and agrees to a fifth of a pixel. Anyone changing these
+        numbers should re-measure both together.
+        """
+        if self._vpi is not None:
+            try:
+                return self._vpi_track(prev, cur, pts)
+            except Exception as exc:          # pragma: no cover - hardware
+                # One failure and the GPU path is done for this flight. A
+                # backend that throws once will throw again, and a tracker
+                # that retries it every frame would pay the exception cost at
+                # 25 Hz while still landing on the CPU path anyway.
+                self._vpi = None
+                self.vpi_error = f"{type(exc).__name__}: {exc}"
+        return self._cv_track(prev, cur, pts)
+
+    def _cv_track(self, prev, cur, pts):
+        p1, st, _ = cv2.calcOpticalFlowPyrLK(prev, cur, pts, None,
+                                             winSize=(self.LK_WIN, self.LK_WIN),
+                                             maxLevel=self.LK_LEVELS)
+        if p1 is None:
+            return None, None, None, None
+        p0r, st2, _ = cv2.calcOpticalFlowPyrLK(cur, prev, p1, None,
+                                               winSize=(self.LK_WIN, self.LK_WIN),
+                                               maxLevel=self.LK_LEVELS)
+        return p1, st, p0r, st2
+
+    def _vpi_track(self, prev, cur, pts):
+        """The same two passes on the GPU, returned in OpenCV's shapes.
+
+        VPI reports status the other way round from OpenCV: 0 means the point
+        was tracked, non-zero means it was lost. Getting that backwards gives
+        a tracker that keeps exactly the points it should have dropped, so the
+        inversion is done here, once, where it can be seen.
+        """
+        vpi = self._vpi
+        n = len(pts)
+        flat = np.ascontiguousarray(pts.reshape(n, 2), dtype=np.float32)
+        with vpi.Backend.CUDA:
+            pyr_a = vpi.asimage(np.ascontiguousarray(prev)).gaussian_pyramid(
+                self.LK_LEVELS + 1)
+            pyr_b = vpi.asimage(np.ascontiguousarray(cur)).gaussian_pyramid(
+                self.LK_LEVELS + 1)
+            kp0 = vpi.asarray(flat, type=vpi.Type.KEYPOINT_F32)
+            fwd, sf = vpi.OpticalFlowPyrLK(pyr_a, kp0)(
+                pyr_b, winsize=self.LK_WIN, maxiter=self.LK_ITERS,
+                epsilon=self.LK_EPS)
+            with fwd.rlock_cpu() as d, sf.rlock_cpu() as s_:
+                p1 = np.array(d, copy=True).reshape(n, 1, 2).astype(np.float32)
+                st = (np.array(s_, copy=True).ravel() == 0).astype(np.uint8)
+            kp1 = vpi.asarray(np.ascontiguousarray(p1.reshape(n, 2)),
+                              type=vpi.Type.KEYPOINT_F32)
+            back, sb = vpi.OpticalFlowPyrLK(pyr_b, kp1)(
+                pyr_a, winsize=self.LK_WIN, maxiter=self.LK_ITERS,
+                epsilon=self.LK_EPS)
+            with back.rlock_cpu() as d2, sb.rlock_cpu() as s2_:
+                p0r = np.array(d2, copy=True).reshape(n, 1, 2).astype(np.float32)
+                st2 = (np.array(s2_, copy=True).ravel() == 0).astype(np.uint8)
+        return p1, st.reshape(n, 1), p0r, st2.reshape(n, 1)
+
     def step(self, img: np.ndarray, depth: np.ndarray | None = None,
              derot_deg=None):
         """Returns (median pixel shift, track count), or (None, n) if it failed.
@@ -553,13 +671,10 @@ class FlowTracker:
             self.prev = img
             return None, self.n_seed
 
-        p1, st, _ = cv2.calcOpticalFlowPyrLK(self.prev, img, self.pts, None,
-                                             winSize=(31, 31), maxLevel=4)
+        p1, st, p0r, st2 = self._track(self.prev, img, self.pts)
         if p1 is None:
             self._detect(img); self.prev = img
             return None, 0
-        p0r, st2, _ = cv2.calcOpticalFlowPyrLK(img, self.prev, p1, None,
-                                               winSize=(31, 31), maxLevel=4)
         good = (st.ravel() == 1) & (st2.ravel() == 1) & \
                (np.linalg.norm(self.pts - p0r, axis=2).ravel() < 1.0)
         # One surface, if the stereo pair can tell us which one.

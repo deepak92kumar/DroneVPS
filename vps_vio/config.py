@@ -275,6 +275,27 @@ class VpsConfig:
     # back.
     camera_yaw_offset_deg: float = 0.0
 
+    # THE FLOW RUNS ON THE GPU. Measured on two real 1280x800 frames from
+    # flight 382, 300 corners, 31 px window, 4 levels, forward and backward:
+    #
+    #     OpenCV, 6 threads   wall 53.39 ms   CPU 98.21 ms   1.84 cores
+    #     VPI CUDA            wall 25.70 ms   CPU 15.01 ms   0.58 cores
+    #
+    # 85% of the CPU goes away. At 25 Hz with two trackers that is 491% of a
+    # core against 75%, against a node measured at 246% while dropping 3.67
+    # frames a second.
+    #
+    # WHAT IT COSTS: from the same 300 seeds, the GPU keeps 251 tracks where
+    # OpenCV keeps 285 - 12% fewer - and the median shift agrees to 0.26 px
+    # in x and 0.03 in y. Fewer tracks is not free: corr(tracks, phantom) was
+    # -0.233 on 382. The trade is 12% of the tracks for 85% of the CPU, and
+    # the CPU is what the frames come out of.
+    #
+    # False puts the flow back on OpenCV. A machine without VPI, or whose
+    # driver will not initialise, falls back on its own and says so in
+    # FlowTracker.vpi_error.
+    flow_gpu: bool = True
+
     # THE MATCHER RUNS IN ITS OWN PROCESS. Flight 382, the first whose
     # matcher ever actually ran, took the loop from 23.86 Hz to 21.20 and
     # dropped frames from 1.06 to 3.67 a second - 5.3 frames per fix against

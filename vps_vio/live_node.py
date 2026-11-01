@@ -2127,7 +2127,16 @@ class VpsNode:
         # which is 1.8 cm per 100 m travelled. It is carried because it is free
         # and correct, NOT because it is a fix for anything.
         self.focal_y = float(focal_px if focal_y_px is None else focal_y_px)
-        self.tracker = FlowTracker(max_corners=max_corners, K=K, D=D)
+        # use_gpu PASSED, not defaulted - the same rule the map worker's
+        # four settings each had to learn. See VpsConfig.flow_gpu for what
+        # the GPU path is worth and what it costs.
+        # _vps_config() here rather than the _c0 read twenty lines down: the
+        # tracker is built before either of this method's config reads, and
+        # reaching forward to one of them is the UnboundLocalError the test
+        # suite caught the moment this line was added.
+        self.tracker = FlowTracker(
+            max_corners=max_corners, K=K, D=D,
+            use_gpu=bool(getattr(_vps_config(), "flow_gpu", True)))
         # The partner camera's own tracker, with ITS OWN intrinsics. See
         # VpsConfig.dual_flow. It is built only when the reader actually has
         # the partner open and calibrated - cam.dual_flow is already False if
@@ -3304,7 +3313,13 @@ def main():
     # that silently ran on the primary's K would be worse than none.
     if getattr(src, "dual_flow", False) and getattr(src, "K_partner", None) is not None:
         node.tracker_b = FlowTracker(max_corners=a.corners,
-                                     K=src.K_partner, D=src.D_partner)
+                                     K=src.K_partner, D=src.D_partner,
+                                     use_gpu=node.tracker.gpu)
+        print(f"FLOW BACKEND: primary "
+              f"{'GPU (VPI CUDA)' if node.tracker.gpu else 'CPU'}"
+              + ("" if node.tracker.gpu
+                 else f" - VPI unavailable: {node.tracker.vpi_error}"),
+              flush=True)
         print(f"DUAL FLOW ON: {STEREO_PARTNER_NAME} has its own tracker and its "
               f"own intrinsics. Shifts are averaged weighted by track count, "
               f"and their disagreement is written to every row.", flush=True)
