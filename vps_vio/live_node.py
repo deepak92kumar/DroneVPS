@@ -2183,6 +2183,11 @@ class VpsNode:
             # fault that left map_window_alt_frac and map_query_shape dead.
             # All three defaults read 1.0 now and a test holds them together.
             fix_period_s=float(fix_period_s),
+            # PASSED, for the fourth time and the same reason as the three
+            # above. The worker defaults to a process; leaving this out would
+            # make VpsConfig.matcher_process dead the moment anyone set it.
+            use_process=bool(getattr(_cfg, "matcher_process", True)),
+            worker_core=getattr(_cfg, "matcher_core", None),
             principal_xy=(None if K is None
                           else (float(np.asarray(K).reshape(3, 3)[0, 2]),
                                 float(np.asarray(K).reshape(3, 3)[1, 2]))))

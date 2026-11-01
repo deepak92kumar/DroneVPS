@@ -275,6 +275,22 @@ class VpsConfig:
     # back.
     camera_yaw_offset_deg: float = 0.0
 
+    # THE MATCHER RUNS IN ITS OWN PROCESS. Flight 382, the first whose
+    # matcher ever actually ran, took the loop from 23.86 Hz to 21.20 and
+    # dropped frames from 1.06 to 3.67 a second - 5.3 frames per fix against
+    # 84 ms of measured work, so most of it was the GIL rather than the
+    # arithmetic. Reproduced on the bench with a 25 Hz loop and one fix a
+    # second: a thread ran 23.1% of ticks late, a process 9.3%, and no
+    # matcher at all 11.8%. The process costs the loop nothing measurable.
+    #
+    # False puts it back in a thread. Kept because a process is harder to
+    # debug and a bench may want the simple path.
+    matcher_process: bool = True
+    # A core to pin the child to, or None to let the scheduler place it.
+    # None on purpose: six cores is enough room, and a pin that lands on a
+    # core the flow threads want is worse than no pin.
+    matcher_core: int | None = None
+
     fix_period_s: float = 1.0      # 1 NOV, at the pilot's instruction, with no
                                    # argument asked for and none made here.
                                    #
