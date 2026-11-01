@@ -257,6 +257,32 @@ class VpsConfig:
                                    # while the drift it exists to catch is
                                    # 0.15-0.37 m/s. At 2 s it pushes 0.26, and the
                                    # worker drops from 75% of a core to 17%.
+                                   #
+                                   # 1 NOV: the pilot asked for 1.0 again. NOT
+                                   # done, and the reason is in
+                                   # test_map_matcher_values: 1.0 has now been
+                                   # flown TWICE and reverted twice. Log 227
+                                   # took XKF4.SP max from 0.13 to 1.17 at
+                                   # 82-83 m against a 1.2 gate, and flight
+                                   # 238 took the error against GPS_RAW_INT
+                                   # from 4.08 to 8.79 m at 60-80 m and 6.16
+                                   # to 10.00 above 80, while fixes went
+                                   # 39 -> 113.
+                                   #
+                                   # Flight 378 says the same thing from the
+                                   # other end: matched offline against the
+                                   # sheet that does cover the site, NCC
+                                   # passes 57% of attempts and lands 33.9 m
+                                   # out, only 2.2% inside 10 m. Asking a
+                                   # 34 m matcher twice as often is twice the
+                                   # error, not twice the correction, and
+                                   # map_fuse moves position without touching
+                                   # velocity, so the EKF is told the aircraft
+                                   # jumped without moving - which is what
+                                   # 227's SP measured.
+                                   #
+                                   # Revisit only after the matcher's own
+                                   # error is measured inside 10 m.
 
     # --- recorder ---
     image_hz: float = 2.0          # 5 Oct: JPEGs gated separately from CSV rows

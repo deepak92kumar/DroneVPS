@@ -55,17 +55,21 @@ def _socket(name: str):
     """Named here so a typo is an AttributeError at startup, not a wrong frame."""
     import depthai as dai
     return getattr(dai.CameraBoardSocket, name)
-# The only map on this machine after the SSD was lost. It was
-# /data/DRONE/ap/site_2km.tif, which no longer exists.
+# THE MAP IS maps/active.tif, THE SYMLINK STUDIO REPOINTS. studio/flightsheet.py
+# moves it to whichever sheet the pilot loads, so it is the one name that
+# follows the aircraft to a new site; a sheet named in the source does not.
 #
-# BEWARE: this sheet does not cover the point the FC last flew from. It spans
-# 30.88411-30.90332 N, 74.59762-74.63224 E, while SCR_USER1/2 in log
-# 00000195.BIN reads 30.7844, 74.6072 - 11.1 km south of it. Going by the
-# 13 Oct report ("today's ground - 12.7 km north of it"), this is the 13 Oct
-# site and SCR_USER holds the newer southern one. A take-off point outside the
-# sheet means no map fixes for the whole flight, which that report lists as its
-# first item to confirm before flying. Pass --map explicitly per site.
-DEFAULT_MAP = "/data/DRONE/bhh.tif"
+# It used to name bhh.tif here - "the only map on this machine after the SSD
+# was lost" - and that sheet spans 30.88411-30.90332 N, 74.59762-74.63224 E,
+# nowhere near where this aircraft now flies. A take-off point outside the
+# sheet means no map fixes for the whole flight, and on 1 Nov that is exactly
+# what happened: flight 378 ran 764 s with a sheet that stopped at lon
+# 74.1195 while the aircraft sat at 74.1254. MapFixWorker's covers() was
+# false the whole time, the matcher never ran once, every fix_*/try_* column
+# in all 18225 rows is null, and the radio read f0 from start to finish.
+#
+# preflight.py checks this same path against SCR_USER1/2 before a flight.
+DEFAULT_MAP = "/data/DRONE/maps/active.tif"
 
 
 # --------------------------------------------------------------------------- #

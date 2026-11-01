@@ -362,7 +362,12 @@ def flight_controller(port):
     return fc
 
 
-def sheet_covers(lon, lat, path="/data/DRONE/bhh.tif"):
+def sheet_covers(lon, lat, path="/data/DRONE/maps/active.tif"):
+    """Default is the symlink Studio repoints, same as live_node's DEFAULT_MAP.
+
+    Checking a sheet the node will not open is a check that passes while the
+    flight gets no fixes - flight 378, 1 Nov.
+    """
     try:
         from osgeo import gdal
         ds = gdal.Open(path)
