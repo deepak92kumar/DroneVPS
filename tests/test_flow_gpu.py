@@ -1,4 +1,4 @@
-"""The flow tracks on the GPU, and the CPU gets its cores back.
+"""The GPU flow path: what it is worth, and why it is OFF.
 
 WHY. The flow is what eats the CPU on this aircraft, and CPU is what frames
 come out of. Flight 382 measured the node at 246% of a core while dropping
@@ -15,10 +15,22 @@ window, 4 levels, forward and backward:
 85% of the CPU goes away - the arithmetic moves to the GPU and the CPU waits.
 At 25 Hz with two trackers that is 491% of a core against 75%.
 
-WHAT IT COSTS, because it is not free. From the same 300 seed points the GPU
-keeps 251 tracks where OpenCV keeps 285, 12% fewer, and corr(tracks, phantom)
-was -0.233 on 382. Against that, the median shift the two produce from those
-same seeds agrees to 0.26 px in x and 0.03 px in y.
+AND IT IS OFF ANYWAY, because one step is not eight. From identical seeds the
+median shift agrees to 0.26 px in x and 0.03 in y, and per point to 0.003 px.
+Tracking frame to frame it does not hold:
+
+    OpenCV    109  99  92 130 105 128 125 108
+    VPI        95  71  58  71  55  45  49  37
+
+On the aircraft, on a close low-contrast ground scene, it went 300, 235, 101,
+47, 23, 11, 5, 3, 1, 0 and sat at 0 for 99% of a 100 s run where the CPU path
+holds 287-305. Each step is a fraction of a pixel short and the points walk
+off their corners.
+
+It cannot be tuned out. maxiter caps at 32, and a sweep that sets 60 is
+measuring the CPU through _track's fallback - which is exactly the wrong
+conclusion this test exists to stop anyone drawing twice. At the cap,
+tightening epsilon makes it worse: 0.001 and below give 4 tracks of 300.
 
 VPI'S DEFAULTS ARE NOT OURS and the difference is not cosmetic: winsize
 defaults to 11 and maxiter to 6, and run that way it tracked 15 of 300 points
@@ -48,8 +60,10 @@ def check(name, ok, detail=""):
         fails.append(name)
 
 
-print("the setting exists, defaults on, and the node PASSES it")
-check("VpsConfig.flow_gpu is True", VpsConfig().flow_gpu is True)
+print("the setting exists, defaults OFF, and the node PASSES it")
+check("VpsConfig.flow_gpu is False", VpsConfig().flow_gpu is False,
+      "one step agrees to 0.26 px and costs 85% less CPU; eight steps fall "
+      "from 95 tracks to 37 while OpenCV holds 108")
 live = open(os.path.join(os.path.dirname(__file__), "..", "vps_vio",
                          "live_node.py"), encoding="utf-8").read()
 check("the primary tracker is given it",
@@ -67,7 +81,13 @@ print("\nthe window and the iterations are OURS, not VPI's")
 src = open(os.path.join(os.path.dirname(__file__), "..", "vps_vio",
                         "flow_odom.py"), encoding="utf-8").read()
 check("LK_WIN is 31", "LK_WIN = 31" in src, "VPI defaults to 11")
-check("LK_ITERS is 30", "LK_ITERS = 30" in src, "VPI defaults to 6")
+check("LK_ITERS is 32", "LK_ITERS = 32" in src,
+      "VPI defaults to 6 and CAPS at 32 - 60 raises "
+      "VPI_ERROR_INVALID_ARGUMENT, which _track catches and falls back on, "
+      "so a sweep above the cap silently measures the CPU")
+check("LK_EPS is 0.01, the loosest useful value", "LK_EPS = 0.01" in src,
+      "0.001 and below drop VPI to 4 tracks of 300 - its epsilon does not "
+      "mean what OpenCV's means")
 check("and _vpi_track passes them",
       "winsize=self.LK_WIN" in src and "maxiter=self.LK_ITERS" in src)
 

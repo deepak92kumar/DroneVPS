@@ -294,7 +294,34 @@ class VpsConfig:
     # False puts the flow back on OpenCV. A machine without VPI, or whose
     # driver will not initialise, falls back on its own and says so in
     # FlowTracker.vpi_error.
-    flow_gpu: bool = True
+    # FALSE. The GPU path is built, measured, and does not hold its tracks.
+    #
+    # ONE STEP IS FINE. From identical seeds the median shift agrees with
+    # OpenCV to 0.26 px in x and 0.03 in y, and per point to 0.003 px, and it
+    # costs 85% less CPU - 98.21 ms against 15.01 ms, 1.84 cores against 0.58.
+    #
+    # EIGHT STEPS ARE NOT. Tracking frame to frame, the count falls away while
+    # OpenCV holds steady:
+    #
+    #     OpenCV    109  99  92 130 105 128 125 108
+    #     VPI        95  71  58  71  55  45  49  37
+    #
+    # On the aircraft, on a close low-contrast ground scene, it went 300, 235,
+    # 101, 47, 23, 11, 5, 3, 1, 0 and then sat at 0 for 99% of a 100 s run
+    # where the CPU path holds 287-305. Under-convergence: each step is a
+    # fraction of a pixel short, and the points walk off their corners.
+    #
+    # IT CANNOT BE TUNED OUT with what VPI exposes. maxiter is capped at 32 -
+    # setting 60 raises VPI_ERROR_INVALID_ARGUMENT, which _track catches and
+    # falls back on, so a sweep at 60 silently measures the CPU and looks like
+    # a fix. It is not. At the cap, 32 iterations, tightening epsilon makes it
+    # worse rather than better: 0.001 and below drop it to 4 tracks of 300.
+    # 32/0.01 is the best VPI will do and it is the table above.
+    #
+    # What would change this: VPI 4 if it raises the iteration cap, or a
+    # tracker that re-seeds hard enough that per-step accuracy stops
+    # compounding. The 85% is worth coming back for.
+    flow_gpu: bool = False
 
     # THE MATCHER RUNS IN ITS OWN PROCESS. Flight 382, the first whose
     # matcher ever actually ran, took the loop from 23.86 Hz to 21.20 and

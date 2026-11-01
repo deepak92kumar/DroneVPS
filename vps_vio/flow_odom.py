@@ -573,7 +573,16 @@ class FlowTracker:
     # _cv_track and _vpi_track only as arguments, never redefined.
     LK_WIN = 31
     LK_LEVELS = 4
-    LK_ITERS = 30
+    # VPI ONLY, and both are at the edge of what it allows. maxiter is
+    # capped at 32 by the library - 60 raises
+    # "VPI_ERROR_INVALID_ARGUMENT: Maximum number of iteration is 32", which
+    # _track catches and falls back on, so a sweep that sets it higher is
+    # silently measuring the CPU. That cost an hour and a wrong conclusion.
+    #
+    # eps 0.01 is the LOOSEST useful value, not the tightest: tightening it
+    # to 0.001 or below drops VPI to 4 tracks of 300. Its epsilon does not
+    # mean what OpenCV's means.
+    LK_ITERS = 32
     LK_EPS = 0.01
 
     def _track(self, prev, cur, pts):
