@@ -1,0 +1,25 @@
+# Let the desktop user mount removable media without a password.
+#
+# .pkla, NOT .rules: this Jetson runs polkit 0.105 (pkaction --version), which
+# predates the JavaScript rules engine. /etc/polkit-1/rules.d does not exist
+# on it and creating it does nothing - 0.105 reads pkla files out of
+# /etc/polkit-1/localauthority/50-local.d/ instead. A .rules file written here
+# first simply failed to copy, which is how this was found.
+#
+# WHY IT IS NEEDED. The Jetson is driven over VNC, and a VNC login gets a
+# systemd session with NO SEAT: `loginctl list-sessions` shows c1 for abc with
+# the seat column empty while gdm's c2 holds seat0. udisks2 treats a seatless
+# session as inactive, so filesystem-mount falls through to auth_admin and
+# there is no desktop to show the prompt in. The card then sits unmounted with
+# /media/abc/<LABEL> left behind as an empty root-owned directory - exactly
+# what 1 Nov looked like, with udisksctl answering "Not authorized" and
+# findmnt showing nothing.
+#
+# Removable media only. filesystem-mount-system is deliberately NOT listed, so
+# the root disk and the NVMe are untouched.
+[Mount removable media without a password]
+Identity=unix-group:plugdev
+Action=org.freedesktop.udisks2.filesystem-mount;org.freedesktop.udisks2.filesystem-unmount-others;org.freedesktop.udisks2.eject-media;org.freedesktop.udisks2.power-off-drive
+ResultAny=yes
+ResultInactive=yes
+ResultActive=yes

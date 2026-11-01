@@ -250,39 +250,70 @@ class VpsConfig:
     # against the receiver gave +3.05, +6.21, -1.19, +5.43 deg across three
     # flights with an interquartile spread of 15-49 deg - the phantom
     # velocity swamps it. One place at a time, where it is measured.
-    camera_yaw_offset_deg: float = -1.95
+    # 1 NOV: -1.95 -> 0.0, at the pilot's instruction to put it right.
+    #
+    # PUTTING IT RIGHT MEANT TAKING IT OUT. -1.95 was measured on logs 240 and
+    # 242 - a different site, a different sheet - as the offset that gained
+    # fixes: 23 against 19 at 0, and 16 against 14. That is a fix-count
+    # argument, and the error moved 1-3%.
+    #
+    # Flight 382 was swept for it directly, 81 frames, window centred on
+    # GPS_RAW_INT so the drifting prior could not colour it, and with
+    # map_match_ncc's own +-6 deg yaw search DISABLED so the sweep measured
+    # the offset instead of smearing it:
+    #
+    #     offset  -16  -12   -8   -4    0   +4   +8  +12  +16
+    #     err p50  32   32   36   32   35   33   32   34   30   m
+    #
+    # Flat. A real mounting offset puts a well at its own value and climbs on
+    # both sides of it; this has no well anywhere in 32 degrees. The matcher's
+    # error does not depend on yaw here, which is the same thing every other
+    # test of this sheet has said: there is no match to align.
+    #
+    # So the honest value is 0 - no claim the data does not carry. If a sheet
+    # ever matches, sweep it again on that sheet and put the measured number
+    # back.
+    camera_yaw_offset_deg: float = 0.0
 
-    fix_period_s: float = 2.0      # 5 Oct: 0.4 -> 2.0 s. At 0.4 s the map pushed
-                                   # a STATIONARY aircraft at 1.18 m/s above 80 m
-                                   # while the drift it exists to catch is
-                                   # 0.15-0.37 m/s. At 2 s it pushes 0.26, and the
-                                   # worker drops from 75% of a core to 17%.
+    fix_period_s: float = 1.0      # 1 NOV, at the pilot's instruction, with no
+                                   # argument asked for and none made here.
                                    #
-                                   # 1 NOV: the pilot asked for 1.0 again. NOT
-                                   # done, and the reason is in
-                                   # test_map_matcher_values: 1.0 has now been
-                                   # flown TWICE and reverted twice. Log 227
-                                   # took XKF4.SP max from 0.13 to 1.17 at
-                                   # 82-83 m against a 1.2 gate, and flight
-                                   # 238 took the error against GPS_RAW_INT
-                                   # from 4.08 to 8.79 m at 60-80 m and 6.16
-                                   # to 10.00 above 80, while fixes went
-                                   # 39 -> 113.
+                                   # WHAT IS KNOWN AGAINST IT, recorded so the
+                                   # next flight can be read against it rather
+                                   # than rediscovering it. 1.0 has flown twice
+                                   # and been reverted twice: log 227 took
+                                   # XKF4.SP max from 0.13 to 1.17 at 82-83 m
+                                   # against a 1.2 gate, and flight 238 took
+                                   # the error against GPS_RAW_INT from 4.08
+                                   # to 8.79 m at 60-80 m while fixes went
+                                   # 39 -> 113. 5 Oct's 0.4 s pushed a
+                                   # stationary aircraft at 1.18 m/s.
                                    #
-                                   # Flight 378 says the same thing from the
-                                   # other end: matched offline against the
-                                   # sheet that does cover the site, NCC
-                                   # passes 57% of attempts and lands 33.9 m
-                                   # out, only 2.2% inside 10 m. Asking a
-                                   # 34 m matcher twice as often is twice the
-                                   # error, not twice the correction, and
-                                   # map_fuse moves position without touching
-                                   # velocity, so the EKF is told the aircraft
-                                   # jumped without moving - which is what
-                                   # 227's SP measured.
+                                   # And flight 382, 1 Nov, the first flight
+                                   # whose matcher ever actually ran: its own
+                                   # fixes were 38 m from the receiver (200 of
+                                   # them, window centred on GPS_RAW_INT), 28
+                                   # of 41 applied fixes made the position
+                                   # worse, and the net was +17.3 m of the
+                                   # 51 m total drift. Doubling the rate of a
+                                   # 38 m fix doubles that arithmetic.
                                    #
-                                   # Revisit only after the matcher's own
-                                   # error is measured inside 10 m.
+                                   # The cost side is the other half: the
+                                   # matcher took the loop from 23.86 Hz on
+                                   # 378 (where covers() was false and it did
+                                   # nothing) to 21.20 Hz on 382, and dropped
+                                   # frames from 1.06 to 3.67 a second. That
+                                   # is 5.3 frames per fix against 84 ms of
+                                   # measured work, so most of it is
+                                   # contention rather than arithmetic. At
+                                   # 1.0 s it doubles again unless the matcher
+                                   # moves out of this process.
+                                   #
+                                   # Frames matter because the phantom tracks
+                                   # them: measured on 382, flow minus the
+                                   # receiver went +0.770 m/s p50 where fewer
+                                   # than 3 frames a second were dropped and
+                                   # +3.705 where 6-10 were.
 
     # --- recorder ---
     image_hz: float = 2.0          # 5 Oct: JPEGs gated separately from CSV rows

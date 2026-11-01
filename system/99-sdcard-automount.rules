@@ -1,0 +1,15 @@
+# Mount a removable card the moment it appears, with no desktop and no polkit.
+#
+# "sd card lagate hi apne aap mount ho jana chiye" - the Jetson is driven over
+# VNC, and that session has no seat, so udisks refuses to mount for it. udev's
+# RUN+= runs as root and needs no authorisation, so the mount is done there
+# instead. See system/sdcard-automount.sh for the whole reason.
+#
+# ENV{ID_FS_USAGE}=="filesystem" keeps this off partition tables, empty card
+# slots and the swap partitions. ID_BUS=="usb" keeps it off the internal eMMC
+# and the NVMe, which must never be touched by this.
+#
+# systemd-run --no-block: udev kills a RUN+= that takes more than a moment,
+# and a mount of a slow card can. This hands it to systemd and returns.
+ACTION=="add", SUBSYSTEM=="block", ENV{ID_BUS}=="usb", ENV{ID_FS_USAGE}=="filesystem", \
+  RUN+="/bin/systemd-run --no-block /data/DRONE/system/sdcard-automount.sh %k"

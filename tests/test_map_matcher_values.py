@@ -215,10 +215,16 @@ print("\nthe fix period - 2.0, and 1.0 was flown and reverted on 22 Oct")
 # GPS_RAW_INT, 60-80 m went 4.08 -> 8.79 m and above 80 m 6.16 -> 10.00 m,
 # while fixes went 39 -> 113. More correction towards a map whose own error
 # is 2.6-7.5 m is not better correction. Both directions have now been flown.
-check("MapFixWorker's default is 2.0", W["fix_period_s"].default == 2.0)
+# 1 NOV: 2.0 -> 1.0 at the pilot's instruction. Everything above still
+# stands as the record of what 1.0 cost the two times it flew, and flight 382
+# added a third reason against it - a matcher whose own fixes are 38 m out,
+# asked twice as often. It is pinned here at the value that flies, not at the
+# value the measurements prefer, because the pin exists to keep the three
+# defaults equal to each other, which is how 0.5 once survived.
+check("MapFixWorker's default is 1.0", W["fix_period_s"].default == 1.0)
 check("the CLI agrees",
-      'ap.add_argument("--fix-period", type=float, default=2.0,' in live)
-check("and so does VpsNode", "fix_period_s: float = 2.0" in live,
+      'ap.add_argument("--fix-period", type=float, default=1.0,' in live)
+check("and so does VpsNode", "fix_period_s: float = 1.0" in live,
       "three defaults for one number is how 0.5 survived")
 check("and VpsNode actually passes it to the worker",
       "fix_period_s=float(fix_period_s)" in live,

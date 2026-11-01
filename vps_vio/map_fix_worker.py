@@ -166,7 +166,7 @@ class MapFixWorker:
     def __init__(self, cache, *, focal_px: float, matcher: str = "xfeat",
                  radius_m: float = 150.0, window_alt_frac: float = 0.60,
                  query_shape: str = "full",
-                 min_alt_m: float = 60.0, fix_period_s: float = 2.0,
+                 min_alt_m: float = 60.0, fix_period_s: float = 1.0,
                  min_score: float | None = None,
                  min_margin: float | None = None,
                  principal_xy=None):
@@ -447,6 +447,7 @@ class MapFixWorker:
         return float(np.clip(r, 40.0, self.radius_m))
 
     def _loop(self):
+        """Drive _run_job from a THREAD. The fallback when use_process is off."""
         self._warm()
         while self._run:
             self._wake.wait(0.2)
@@ -455,75 +456,86 @@ class MapFixWorker:
                 job = self._job
             if job is None:
                 continue
-            img, plon, plat, alt, yaw, roll, pitch, t0, discard = job
-            res = None
-            got = {}
-            try:
-                if self.cache.covers(plon, plat):
-                    for mname in self._pair:
-                        # Each matcher gets the window IT needs: NCC slides
-                        # the template inside the window and starves on
-                        # XFeat's radius. See _radius_for.
-                        win, wg = self.cache.window(
-                            plon, plat, self._radius_for(alt, mname),
-                            kind=self._window_kind)
-                        ms, mm = self._gate[mname]
-                        r_ = self._all_locate[mname](
-                            img, win, wg, altitude_m=alt, focal_px=self.focal_px,
-                            yaw_deg=yaw, map_gsd_m=self.cache.gsd,
-                            map_gsd_x_m=getattr(self.cache, "gsd_x", None),
-                            min_score=ms, min_margin=mm,
-                            window_is_edges=(self._window_kind == "edges"),
-                            principal_xy=self.principal_xy,
-                            query_shape=self.query_shape)
-                        if r_ is not None and r_.ok:
-                            got[mname] = r_
-                        if res is None or (r_ is not None and r_.ok and not res.ok):
-                            res = r_
-            except Exception:
-                pass
-            # How far apart the two answers are, when both produced one. The
-            # ONLY measured predictor of a bad fix: corr +0.928 against the
-            # error, where score manages -0.10 and inlier count +0.20.
-            # Logged, not enforced.
-            # Both matchers get the SAME tilt shift, so it cancels out of
-            # their disagreement entirely - this number is unaffected by the
-            # correction above and still means what it meant.
-            disagree = None
-            if len(got) == 2:
-                a, b = (got[k] for k in self._pair)
-                disagree = float(math.hypot(
-                    (a.lat - b.lat) * 111320.0,
-                    (a.lon - b.lon) * 111320.0
-                    * math.cos(math.radians(a.lat))))
-            # THE TILT CORRECTION. The matcher answers "the middle of this
-            # frame is here"; the aircraft is nadir of that, not at it. Both
-            # matchers report the same centre, so this is applied once, here,
-            # rather than inside either of them.
-            dN, dE = self.nadir_offset_m(alt, roll, pitch, yaw)
-            self.last_tilt_shift_m = float(math.hypot(dN, dE))
-            if res is not None and res.ok and (dN or dE):
-                res.lat = res.lat - dN / 111320.0
-                res.lon = res.lon - dE / (111320.0
-                                          * math.cos(math.radians(res.lat)))
-            out = None
-            if res is not None:
-                out = FixResult(res.lon, res.lat, res.score, res.margin, res.ok,
-                                time.monotonic() - t0, plon, plat,
-                                disagree,
-                                getattr(res, "inliers", 0),
-                                getattr(res, "total_matches", 0),
-                                getattr(res, "reason", ""),
-                                float(alt))
+            out, warm, _tilt = self._run_job(job)
             with self._lock:
-                if discard:
-                    # Ran to keep the path warm and visible. The answer does
-                    # not go to the fuser - nothing below min_alt_m ever has.
+                if warm:
                     self.warm_runs += 1
                 else:
                     self._result = out
                     self.completed += 1
                 self._job = None
+
+    def _run_job(self, job):
+        """One match, start to finish. Returns (FixResult|None, warm, tilt_m).
+
+        Pure with respect to the worker's bookkeeping: it reads self.cache
+        and the gates, and the CALLER counts what comes back. That split is
+        what lets the same code run in a thread or in a child process - see
+        _proc_loop and the note on use_process in __init__.
+        """
+        img, plon, plat, alt, yaw, roll, pitch, t0, discard = job
+        res = None
+        got = {}
+        try:
+            if self.cache.covers(plon, plat):
+                for mname in self._pair:
+                    # Each matcher gets the window IT needs: NCC slides
+                    # the template inside the window and starves on
+                    # XFeat's radius. See _radius_for.
+                    win, wg = self.cache.window(
+                        plon, plat, self._radius_for(alt, mname),
+                        kind=self._window_kind)
+                    ms, mm = self._gate[mname]
+                    r_ = self._all_locate[mname](
+                        img, win, wg, altitude_m=alt, focal_px=self.focal_px,
+                        yaw_deg=yaw, map_gsd_m=self.cache.gsd,
+                        map_gsd_x_m=getattr(self.cache, "gsd_x", None),
+                        min_score=ms, min_margin=mm,
+                        window_is_edges=(self._window_kind == "edges"),
+                        principal_xy=self.principal_xy,
+                        query_shape=self.query_shape)
+                    if r_ is not None and r_.ok:
+                        got[mname] = r_
+                    if res is None or (r_ is not None and r_.ok and not res.ok):
+                        res = r_
+        except Exception:
+            pass
+        # How far apart the two answers are, when both produced one. The
+        # ONLY measured predictor of a bad fix: corr +0.928 against the
+        # error, where score manages -0.10 and inlier count +0.20.
+        # Logged, not enforced.
+        # Both matchers get the SAME tilt shift, so it cancels out of
+        # their disagreement entirely - this number is unaffected by the
+        # correction above and still means what it meant.
+        disagree = None
+        if len(got) == 2:
+            a, b = (got[k] for k in self._pair)
+            disagree = float(math.hypot(
+                (a.lat - b.lat) * 111320.0,
+                (a.lon - b.lon) * 111320.0
+                * math.cos(math.radians(a.lat))))
+        # THE TILT CORRECTION. The matcher answers "the middle of this
+        # frame is here"; the aircraft is nadir of that, not at it. Both
+        # matchers report the same centre, so this is applied once, here,
+        # rather than inside either of them.
+        dN, dE = self.nadir_offset_m(alt, roll, pitch, yaw)
+        self.last_tilt_shift_m = float(math.hypot(dN, dE))
+        if res is not None and res.ok and (dN or dE):
+            res.lat = res.lat - dN / 111320.0
+            res.lon = res.lon - dE / (111320.0
+                                      * math.cos(math.radians(res.lat)))
+        out = None
+        if res is not None:
+            out = FixResult(res.lon, res.lat, res.score, res.margin, res.ok,
+                            time.monotonic() - t0, plon, plat,
+                            disagree,
+                            getattr(res, "inliers", 0),
+                            getattr(res, "total_matches", 0),
+                            getattr(res, "reason", ""),
+                            float(alt))
+        # discard: the run happened to keep the path warm and visible. The
+        # answer does not go to the fuser - nothing below min_alt_m ever has.
+        return out, bool(discard), float(self.last_tilt_shift_m)
 
     def stop(self):
         self._run = False

@@ -9,6 +9,25 @@ SIGN, which the first attempt got wrong by testing +1.95 only:
 
     log 240:  -1.95 -> 23 fixes, 11.22 m | 0 -> 19, 11.38 | +1.95 -> 12, 12.58
     log 242:  -1.95 -> 16 fixes,  9.41 m | 0 -> 14,  9.70 | +1.95 -> 10,  8.19
+
+1 NOV: BACK TO 0, at the pilot's instruction to put it right, and putting it
+right meant taking it out. Both measurements above are a different site and a
+different sheet. Flight 382 was swept for the offset directly - 81 frames,
+window centred on GPS_RAW_INT so the drifting prior could not colour it, and
+with locate()'s own +-6 deg yaw search disabled so the sweep measured the
+offset instead of smearing it across it:
+
+    offset  -16  -12   -8   -4    0   +4   +8  +12  +16
+    err p50  32   32   36   32   35   33   32   34   30   m
+
+Flat across 32 degrees. A real mounting offset digs a well at its own value
+and climbs on both sides; there is no well anywhere here. The matcher's error
+on this sheet does not depend on yaw at all, which is what every other test of
+it has said - there is no match to align. 0 is the value that claims nothing
+the data does not carry.
+
+The mount has not moved since 23 Oct, so if a sheet ever matches, sweep it on
+that sheet and put the measured number back.
 """
 import os
 import sys
@@ -26,12 +45,11 @@ def check(name, ok, detail=""):
 
 
 c = VpsConfig()
-print("the offset is configured, and it is the measured sign")
+print("the offset is configured, and it claims only what was measured")
 check("the field exists", hasattr(c, "camera_yaw_offset_deg"))
-check("it is the measured value", abs(c.camera_yaw_offset_deg + 1.95) < 1e-9,
+check("it is 0 - flight 382's sweep found no well in 32 degrees",
+      abs(c.camera_yaw_offset_deg) < 1e-9,
       f"{c.camera_yaw_offset_deg} deg")
-check("NEGATIVE - positive halved the fix count on both flights",
-      c.camera_yaw_offset_deg < 0)
 check("and it is a mount angle, not a large correction",
       abs(c.camera_yaw_offset_deg) < 10.0,
       "anything bigger is a mounting error to fix with a spanner")

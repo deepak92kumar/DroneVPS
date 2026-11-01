@@ -2085,7 +2085,7 @@ class VpsNode:
     STEP_ESCAPE_N = 5
 
     def __init__(self, cache: MapCache, focal_px: float, *,
-                 fix_period_s: float = 2.0, radius_m: float = 150.0,
+                 fix_period_s: float = 1.0, radius_m: float = 150.0,
                  max_corners: int = 300, K=None, D=None, focal_y_px=None,
                  derotate: str = "auto"):
         self.cache = cache
@@ -3044,7 +3044,7 @@ def main():
                     help="camera IMU report rate in Hz for all three sensors "
                          "(default from VpsConfig.imu_rate, 100). They share "
                          "one packet, so this sets them together.")
-    ap.add_argument("--fix-period", type=float, default=2.0,
+    ap.add_argument("--fix-period", type=float, default=1.0,
                     help="seconds between map fixes. 1.0 was tried on 22 Oct "
                          "because the pilot's archived 11 Oct reports record "
                          "'0.500 m per fix at 1 fix/s' - later evidence than "
