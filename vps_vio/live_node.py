@@ -992,8 +992,32 @@ class GpsInputSender:
         # 47.7 m/s during a 106 m hover, and it is the 54% row that the 13 Oct
         # report still calls the largest open fault.
         self.send_velocity = bool(send_velocity)
-        # 4.3 Hz, which is what logs 00000191 and 00000194 actually carried.
-        self.send_period_s = 1.0 / 4.3
+        # 10 Hz since 1 Nov. It was 4.3, "which is what logs 00000191 and
+        # 00000194 actually carried" - a figure copied from what the old
+        # configuration happened to do, never one that was chosen.
+        #
+        # WHY IT MOVED. A QGC telemetry log off another aircraft - a quad on
+        # 4.6.3 with its own X7, flying a different VPS at the old site -
+        # shows that unit injecting GPS_INPUT at 9.83 Hz, and its EKF running
+        # with velocity_variance 0.006 and never once over the gate. Ours ran
+        # at 4.30 with the variance at 0.846 and over the gate 40% of the
+        # time on flight 382.
+        #
+        # The rate is not why their estimate is better - theirs sits 0.52 m
+        # from the receiver against our 44.49 - but it is free. Replayed
+        # against the real frame timestamps of four flights, a 1/10 gate
+        # delivers 9.74 to 10.00 Hz, mean 9.93, because the loop runs at
+        # 21-24 Hz and there is always a frame to send on:
+        #
+        #     flight    loop Hz   at 1/4.3   at 1/10
+        #       368      23.47      4.30      10.00
+        #       373      22.74      4.30       9.97
+        #       378      24.00      4.30      10.00
+        #       382      21.03      4.30       9.74
+        #
+        # GPS2_RATE_MS on the flight controller should be 100 to match; it
+        # was 200, which was right for 4.3 and is now half the rate we send.
+        self.send_period_s = 1.0 / 10.0
         # Seeded on the first send, then advanced by exactly one period each
         # time - see the gate in send() for why that distinction is worth 0.4 Hz.
         self._next_send = None

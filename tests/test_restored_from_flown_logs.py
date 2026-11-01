@@ -46,9 +46,18 @@ src = open(os.path.join(HERE, "vps_vio", "live_node.py")).read()
 print("GPS_INPUT goes out at a receiver's cadence, not the flow loop's")
 check("there is a rate gate at all", "self._next_send" in src,
       "without one it sends on every frame, 30 Hz")
-check("the period is the 4.3 Hz the working flights carried",
-      "self.send_period_s = 1.0 / 4.3" in src,
-      "logs 00000191 and 00000194 measured 4.28 and 4.31 Hz")
+# 1 NOV: 4.3 -> 10. The 4.3 was never chosen - it is what logs 00000191 and
+# 00000194 happened to carry, measured at 4.28 and 4.31 Hz, and copied. A QGC
+# telemetry log off another aircraft running a different VPS shows that unit
+# injecting GPS_INPUT at 9.83 Hz with its EKF's velocity_variance at 0.006,
+# never over the gate; ours ran 4.30 with 0.846 and over the gate 40% of the
+# time on flight 382. The rate is not why theirs is better - theirs sits
+# 0.52 m from the receiver against our 44.49 - but it is free: replayed on
+# four flights' own frame timestamps a 1/10 gate gives 9.74-10.00 Hz, because
+# the loop runs at 21-24 and there is always a frame to send on.
+check("the period is 10 Hz",
+      "self.send_period_s = 1.0 / 10.0" in src,
+      "GPS2_RATE_MS on the FC is 100 to match, from 200")
 check("skipped sends are counted, not silent", "self.skipped_rate" in src)
 check("and the gate returns BEFORE building the message",
       src.index("self.skipped_rate += 1") < src.index("gps_input_send"),
