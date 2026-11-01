@@ -1330,7 +1330,16 @@ CSV_COLUMNS = ["t", "north_m", "east_m", "lon", "lat", "sigma_m",
     # Without these a row with no try_* is ambiguous between "nothing was
     # asked" and "something was asked and never came back".
     "map_submitted", "map_completed", "map_skipped_low", "map_skipped_period",
-    "map_dropped", "map_warm"]
+    "map_dropped", "map_warm",
+    # WHAT WE ACTUALLY SENT, not what we meant to. Added 1 Nov, when the rate
+    # went 4.3 -> 10 Hz and there was no way to check it had: the flight
+    # controller reports GPS2_RAW to a GCS at its own stream rate, which caps
+    # around 5 Hz for both receivers, so an outside observer counting distinct
+    # time_usec sees 4.97 Hz whether we send 5 or 50. gps_sent is the sender's
+    # own counter and its slope is the rate, measurable from any flight log.
+    # gps_skipped_rate is what the period gate turned away, so the two
+    # together say whether the gate or the loop is the limit.
+    "gps_sent", "gps_skipped_rate"]
 
 
 # w is only used by the quaternion rows, so it is last and empty elsewhere.
@@ -1445,7 +1454,8 @@ def csv_row(est, f, v, gN, gE, err):
             est.get("try_reason") or "",
             est.get("map_submitted", ""), est.get("map_completed", ""),
             est.get("map_skipped_low", ""), est.get("map_skipped_period", ""),
-            est.get("map_dropped", ""), est.get("map_warm", "")]
+            est.get("map_dropped", ""), est.get("map_warm", ""),
+            est.get("gps_sent", ""), est.get("gps_skipped_rate", "")]
 
 
 # --------------------------------------------------------------------------- #
@@ -3767,6 +3777,13 @@ def main():
                     else "VPS FRAMES OFF - DISARMED",
                     Notifier.SEV_INFO)
             if wr:
+                # The sender is main()'s, not the node's, so its tallies are
+                # put on the estimate here rather than where the rest are
+                # gathered. Blank when there is no sender at all, which is
+                # every bench run that does not inject.
+                if gps_sender is not None:
+                    est["gps_sent"] = gps_sender.sent
+                    est["gps_skipped_rate"] = gps_sender.skipped_rate
                 wr.writerow(csv_row(est, f, v, gN, gE, err))
             if imu_wr is not None:
                 imu_wr.writerows(imu_rows(f))

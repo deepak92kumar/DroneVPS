@@ -140,7 +140,12 @@ check("widths match", len(row) == len(CSV_COLUMNS),
 # ATTEMPT rather than only an accepted fix. The number is hard-coded on
 # purpose - it is the tripwire that catches a column added by accident - so
 # changing it is part of changing the columns, not a nuisance.
-check("and there are the columns we expect", len(CSV_COLUMNS) == 92,
+# 92 -> 94 on 1 Nov: gps_sent and gps_skipped_rate. The send rate went 4.3 ->
+# 10 Hz and there was no way to check it had - the flight controller reports
+# GPS2_RAW to a GCS at its own stream rate, which caps near 5 Hz for both
+# receivers, so counting distinct time_usec from outside gives 4.97 Hz
+# whether the node sends 5 or 50. The sender's own counter is the instrument.
+check("and there are the columns we expect", len(CSV_COLUMNS) == 94,
       str(len(CSV_COLUMNS)))
 i = CSV_COLUMNS.index("fc_d_roll")
 check("the three derotation opinions sit together",
