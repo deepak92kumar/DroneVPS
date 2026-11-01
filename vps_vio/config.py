@@ -615,7 +615,30 @@ class VpsConfig:
     #
     # It only works while both cameras are running. With one, there is
     # nothing to compare and the veto cannot fire - see dual_flow.
-    flow_disagree_max_px: float = 0.5
+    #
+    # 1 NOV: 0.5 -> 0.15, because the failure mode above is no longer the one
+    # that flies. On 238 a broken tracker disagreed by 30-36 px and 0.5 caught
+    # it with a hundredfold margin. On flight 373 the bursts disagree by 0.160
+    # px p50 and 0.470 p95 - under 0.5 - so the veto fired on 1.1% of the leg
+    # and stopped 4% of them. The bursts themselves did not get smaller: 16 of
+    # them, median 0.300 s and up to 1.7 s, flow to 23.46 m/s while the M9N
+    # had the aircraft at 2.10 p90. They are SUSTAINED, so no median filter
+    # reaches them, and step_action was "ok" on all 1856 rows - the step gate
+    # rejected nothing all leg.
+    #
+    # Scored on that leg, spike = flow > 4 m/s, truth = GPS_RAW_INT:
+    #
+    #     threshold   spikes stopped   good rows lost   phantom p90
+    #       0.50            4%              1%             1.650
+    #       0.20           40%              2%             1.260
+    #       0.15           54%              4%             1.208
+    #       0.10           66%             11%             1.181
+    #
+    # 0.15 is where the curve turns: below it the good rows lost climbs 4 ->
+    # 11% to buy 0.027 m/s. WHAT THIS DOES NOT DO: phantom p90 1.208 still
+    # sits on the deadband, which is 1.170 at 82 m. It takes half the bursts
+    # out, it does not make the velocity honest. UNFLOWN.
+    flow_disagree_max_px: float = 0.15
     # How old the frame the loop acted on may be. The queue is drained to the
     # newest now, so this is a backstop rather than the mechanism: if the
     # newest frame available is itself this old, the camera or the link is in
