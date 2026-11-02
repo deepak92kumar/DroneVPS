@@ -2768,6 +2768,14 @@ class VpsNode:
         _use_pp = (self.derotate != "fc" and _gr is not None
                    and _gp is not None)
         _age = float(f.get("frame_age_s") or 0.0)
+        # _fe BEFORE the branch, not inside it. It was assigned only in the
+        # else, and the partner block below reads it on every frame - so the
+        # first stale frame raised UnboundLocalError and killed the node.
+        # That is what flight 2 Nov was: not a hang, a crash loop. The node
+        # died, systemd restarted it, the next stale frame killed it again,
+        # and by the time the pilot switched at 30 m the RC switch had been
+        # calling the VPS dead for 49 seconds.
+        _fe = None
         if _age > getattr(self, "frame_age_max_s", 0.12):
             self.n_frame_stale = getattr(self, "n_frame_stale", 0) + 1
             d, ntrk = None, 0
