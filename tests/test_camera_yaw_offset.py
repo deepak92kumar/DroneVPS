@@ -47,8 +47,19 @@ def check(name, ok, detail=""):
 c = VpsConfig()
 print("the offset is configured, and it claims only what was measured")
 check("the field exists", hasattr(c, "camera_yaw_offset_deg"))
-check("it is 0 - flight 382's sweep found no well in 32 degrees",
-      abs(c.camera_yaw_offset_deg) < 1e-9,
+# 2 NOV: back to -1.95, at the pilot's instruction, because that is what the
+# 27 Oct flights - the ones whose matcher worked, 73 fixes with the two
+# matchers 2.0 m apart - actually flew. It had been set to 0 on 1 Nov after a
+# sweep found no well across 32 degrees.
+#
+# What the sweep on 27 Oct's own frames says, replayed through today's code:
+# 0.00 gives 9 of 20 fixes within 15 m and -1.95 gives 8, so the position is
+# a wash - but the two matchers' DISAGREEMENT is 7.0 m at -1.95 against
+# 13.9 m at 0.00, and 2.0 m is what 27 Oct recorded. The offset is not proven
+# to matter for position; it is being restored because the flight that worked
+# had it and because flow derotation reads the same number.
+check("it is the measured mount offset the working flights used",
+      abs(c.camera_yaw_offset_deg + 1.95) < 1e-9,
       f"{c.camera_yaw_offset_deg} deg")
 check("and it is a mount angle, not a large correction",
       abs(c.camera_yaw_offset_deg) < 10.0,

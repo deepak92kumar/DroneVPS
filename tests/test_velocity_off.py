@@ -34,8 +34,22 @@ import config as C  # noqa: E402
 
 cfg = C.VpsConfig()
 print("the setting")
-check("send_velocity is OFF", cfg.send_velocity is False,
-      str(cfg.send_velocity))
+# 2 NOV, later the same day: send_velocity is back ON at the pilot's
+# instruction, and vel_send_max_alt_m is what now decides. Turning the
+# channel off entirely was the first answer to log 116's five ALT_HOLDs; the
+# measurement that followed is sharper than that. The sent velocity's
+# per-axis p90 against gps1 is 0.63 m/s below 15 m - inside EKF3's ~1.0 m/s
+# GPS-quality threshold, so the glitch cannot be tripped - and 1.12 by 25 m,
+# 4.11 by 70. So the channel is good near the ground and noise at height, and
+# height is the thing that decides rather than a flight-wide switch.
+#
+# What this file still holds is the part that cannot regress: wherever
+# velocity is refused, BOTH ignore flags are set and no speed accuracy is
+# declared, because declaring one is what pulls the trigger.
+check("send_velocity is on, with the altitude gate deciding",
+      cfg.send_velocity is True, str(cfg.send_velocity))
+check("and the gate is inside the band the measurement supports",
+      2.0 <= cfg.vel_send_max_alt_m <= 20.0, str(cfg.vel_send_max_alt_m))
 
 print("\nthe node reads it")
 src = open(os.path.join(ROOT, "vps_vio", "live_node.py"),

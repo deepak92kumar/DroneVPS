@@ -134,7 +134,12 @@ class VpsConfig:
     # controller with no velocity aiding is at its worst.
     vel_send_max_alt_m: float = 15.0
 
-    send_velocity: bool = False
+    # 2 NOV: WAPAS True, pilot ke kehne par. Ab vel_send_max_alt_m iska
+    # matlab tay karta hai - 15 m se neeche velocity jati hai, upar nahi.
+    # Neeche naapi hui p90 0.63 m/s hai, jo EKF3 ke ~1.0 m/s gate ke andar
+    # hai, to glitch trigger nahi ho sakti; upar 1.12 se 4.11 tak jati hai
+    # aur wahi log 116 ki paanch ALT_HOLD ki wajah thi.
+    send_velocity: bool = True
 
     send_rate_hz: float = 20.0     # how often we push VISION_POSITION_ESTIMATE
 
@@ -342,7 +347,13 @@ class VpsConfig:
     # So the honest value is 0 - no claim the data does not carry. If a sheet
     # ever matches, sweep it again on that sheet and put the measured number
     # back.
-    camera_yaw_offset_deg: float = 0.0
+    # 2 NOV, WAPAS -1.95, pilot ke kehne par - 27 Oct ki haalat. Ise 0.0
+    # 1 Nov ko kiya gaya tha. Naap kehti hai ki matcher ki position par iska
+    # faisla-kun asar NAHI hai (27 Oct ke frames par 0.00 se 9/20 fix 15 m ke
+    # andar, -1.95 se 8/20) - par dono matcher ki aapsi sehmati -1.95 par
+    # behtar thi (7.0 m vs 13.9 m), aur wahi wo number hai jo 27 Oct ko 2.0 m
+    # tha. Flow ki derotation bhi isi offset se hoti hai.
+    camera_yaw_offset_deg: float = -1.95
 
     # THE FLOW RUNS ON THE CAMERA. Measured 2 Nov, same camera, same
     # resolution, 20 s each:
@@ -769,7 +780,12 @@ class VpsConfig:
     # What to read: if the aircraft swings at 35-40 m the way 411 swung at
     # 70 m, this is the first thing to put back to 40 - and that would be
     # the FIRST honest test of it.
-    flow_vel_frames_high: int = 60
+    # 2 NOV, WAPAS 40, pilot ke kehne par - 27 Oct ki haalat. 60 aaj hi
+    # lagaya gaya tha aur ek hi flight (418) dekha hai; us flight me VIO 17 m
+    # par 0.003 m/s drift par tha, par usme aur bhi bahut kuch badla hua tha,
+    # to 60 ka apna yogdan alag se naapa nahi gaya. Ek saath do cheez badalna
+    # hi wo galti hai jisse bachna hai.
+    flow_vel_frames_high: int = 40
     flow_vel_alt_m: float = 25.0
 
     # Stereo depth: ON, and for VIO ONLY.
@@ -894,7 +910,29 @@ class VpsConfig:
     # 11% to buy 0.027 m/s. WHAT THIS DOES NOT DO: phantom p90 1.208 still
     # sits on the deadband, which is 1.170 at 82 m. It takes half the bursts
     # out, it does not make the velocity honest. UNFLOWN.
-    flow_disagree_max_px: float = 0.15
+    # 2 NOV, WAPAS 0.5, pilot ke kehne par: 27 Oct ki kaam karne wali
+    # flights isi par udi thi aur ise 0.15 karne ka faisla naap se nahi aaya
+    # tha. Jo 0.15 ne kiya, wo naapa gaya:
+    #
+    #     run                 disagree p50   0.15 par   0.50 par
+    #     238 (27 Oct)           0.050          23%        5%
+    #     406 (2 Nov am)         0.070          17%        3%
+    #     411 (2 Nov pm)         0.080          31%        9%
+    #     418 (2 Nov pm)         0.050          15%        5%
+    #
+    # Aur run 411 ke VPS leg par wo 48% tha: flow 20.3 Hz se 10.7 Hz gir gaya
+    # aur FC ko bheji gayi velocity 1.77 se 3.96 m/s ho gayi, jabki per-step
+    # size, step dt aur directional bias teeno lagbhag wahi rahe. Yaani
+    # baseline ke paas aadhe samples bache, aur shor ka average nahi hua.
+    #
+    # Aur disagreement ALTITUDE se nahi, TRACKS se chalti hai: 450-700 tracks
+    # par 15% frames 0.15 ke upar, 300-450 par 43%, 150-300 par 92%. Yaani
+    # 0.15 theek us waqt sabse zyada frames khata hai jab tracker ke paas
+    # pehle hi kam features hai - jo ulta hai.
+    #
+    # 0.5 par n_flow_vetoed ab CSV me hai, to agli flight khud bata degi ki
+    # is gate ne kitna kaam kiya.
+    flow_disagree_max_px: float = 0.5
     # How old the frame the loop acted on may be. The queue is drained to the
     # newest now, so this is a backstop rather than the mechanism: if the
     # newest frame available is itself this old, the camera or the link is in
