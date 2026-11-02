@@ -67,6 +67,46 @@ class VpsConfig:
 
     # --- VIO health gating ---
     min_vio_rate_hz: float = 15.0  # below this we stop trusting X/Y
+    # 2 NOV: VELOCITY OFF, at the pilot's instruction, after log 116.
+    #
+    # WHY. GPS_INPUT carries a speed accuracy and live_node declares it
+    # honestly: 0.6 + 0.048 x altitude + 2.0 x age, which is 1.42 m/s at
+    # 17 m, 2.37 at 37 m and 4.56 at 83 m. EKF3's calcGpsGoodForFlight()
+    # marks a GPS bad once its low-passed speed accuracy passes about
+    # 1.0 m/s, and that sets filterStatus.flags.gps_glitching. EVERY
+    # altitude above about 8 m crosses it, so every VPS leg this aircraft
+    # has flown has been flagged as a glitching GPS.
+    #
+    # Log 116 is the measurement, 3 for 3 and in both directions:
+    #
+    #     leg    declared   glitch came after   took to clear
+    #     17 m   1.42 m/s        5.8 s              3.8 s
+    #     37 m   2.37 m/s        4.7 s              8.7 s
+    #     83 m   4.56 m/s        1.5 s             16.6 s
+    #
+    # The more we declared, the sooner it tripped and the longer it took to
+    # clear - a first-order filter crossing a fixed threshold. On the third
+    # leg it had not cleared when the pilot asked for GPS back, so the EKF
+    # trusted no position, EKFCHECK and FS_EKFINAV fired, and
+    # FS_EKF_ACTION=2 put the aircraft in ALT_HOLD five times. The same flag
+    # is why it would not anchor: a glitching GPS is discounted and the EKF
+    # dead-reckons, so Loiter had no firm feedback.
+    #
+    # WHAT THIS GIVES UP. The flow velocity is good and on log 116 it was the
+    # best yet - sent 0.48 m/s against a true 0.95 at 37 m, under-reporting
+    # rather than over. We are not dropping it because it is wrong. We are
+    # dropping it because declaring its accuracy honestly is what trips the
+    # check, and declaring it dishonestly is not on the table.
+    #
+    # Position goes on exactly as before, with horiz_accuracy carrying the
+    # fuser's sigma, and on log 116 that position was 1.9 m at 17 m. The
+    # older measurement agrees about which channel matters: SP never reached
+    # its gate while SV failed 266 times.
+    #
+    # --no-send-vel on the command line still forces this off whatever is
+    # set here; this is the setting that travels with the repo.
+    send_velocity: bool = False
+
     send_rate_hz: float = 20.0     # how often we push VISION_POSITION_ESTIMATE
 
     # ---------------------------------------------------------------------

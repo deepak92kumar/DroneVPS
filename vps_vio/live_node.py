@@ -3494,10 +3494,19 @@ def main():
 
     gps_sender = None
     if a.send_gps:
+        # BOTH have to agree, and the config is passed rather than defaulted
+        # for the same reason map_window_alt_frac and map_query_shape had to
+        # be: a setting the node never reads is a setting that silently does
+        # nothing. --no-send-vel still forces it off.
+        _send_vel = bool(a.send_vel) and bool(
+            getattr(_vps_config(), "send_velocity", True))
         gps_sender = GpsInputSender(a.fc_port, a.fc_baud, gps_id=a.gps_id,
-                                    send_velocity=a.send_vel)
+                                    send_velocity=_send_vel)
         print(f"GPS INPUT SENDER ON - the estimate will arrive as GPS{a.gps_id+1}.\n"
               f"   (horiz_accuracy carries the fuser's own sigma)")
+        print("   VELOCITY: " + ("ON" if _send_vel else
+              "OFF - position only, so no speed accuracy is declared and "
+              "EKF3's GPS quality check cannot be tripped (log 116)"))
 
     sender = None
     if a.send_fc:
