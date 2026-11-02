@@ -60,10 +60,11 @@ class Feat:
         self.position = type("P", (), {"x": float(x), "y": float(y)})()
 
 
-print("on, at the pilot's instruction, and not yet flown")
-check("flow_device is True", VpsConfig().flow_device is True,
-      "the case against it - no forward-backward check, and every number "
-      "measured on a camera standing still - has no answer without a flight")
+print("off: it flew once and cost the flight")
+check("flow_device is False", VpsConfig().flow_device is False,
+      "2 Nov: flow_dual went to 0 in the air, disagree 0.02 -> 2.085 "
+      "against a 0.15 veto, the node stopped, and the EKF dropped the "
+      "aircraft to ALT_HOLD at 30 m")
 check("and it asks for 300 features",
       VpsConfig().flow_device_features == 300,
       "the board clamps to about 51; asking for more costs nothing")

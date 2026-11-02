@@ -302,20 +302,37 @@ class VpsConfig:
     # frame and features live 300 frames; at night, on a low-texture scene,
     # the identical configuration carried 30%. The air is neither scene.
     #
-    # TRUE at the pilot's instruction, 2 Nov, to be flown. What is known
-    # against it is above and is not an argument that was skipped - it is an
-    # argument that has no answer without a flight, because every number
-    # here comes from a camera standing still on the ground.
+    # FALSE. It flew once, on 2 Nov, and cost the flight.
     #
-    # The choice is per FRAME: a frame whose features did not arrive falls
-    # back to the host path for that step, and both cameras always use the
-    # same backend on the same frame. So the worst case is the flow we
-    # already had, not a gap.
+    # On the ground it was everything it promised: loop 21.85 -> 24.65 Hz,
+    # frames dropped 3.09 -> 0.37 a second, CPU 285% -> 129%. In the air it
+    # came apart the moment the aircraft left the ground:
     #
-    # Read flow_disagree_px and frames_skipped on the first flight. The
-    # baseline to beat is flight 382: loop 21.03 Hz, 3.98 frames a second
-    # dropped, disagree p50 0.050 and p95 0.460.
-    flow_device: bool = True
+    #     t       loop    tracks  disagree  alt    flow_dual
+    #     0-70    25.0 Hz    575     0.02    0.0       1
+    #     70-80   19.9       501     0.620   0.4       1
+    #     80-90   20.9       411     2.085  14.1       0
+    #     90-100  18.4       356     1.085  14.3       0
+    #
+    # flow_dual went to 0 - the partner camera stopped contributing - and
+    # flow_disagree_px went to 2.085 against a 0.15 veto, so the velocity was
+    # vetoed on essentially every frame. The node then stopped producing, the
+    # RC switch said "VPS stalled 49s ago - switching anyway" and switched,
+    # and 7.7 s later the EKF ran out of variance: "EKF Failsafe: changed to
+    # Altitude Hold Mode", at 30 m.
+    #
+    # THE FAULT IS IN THE WIRING, not in the device tracker. The node skipped
+    # the partner entirely whenever the primary had device features and the
+    # partner's had not arrived - db, ntrk_b = None, 0 - and in the air that
+    # was most frames. The rule it was protecting is real (flight 163: two
+    # cameras on different backends made flow_disagree_px measure the
+    # backends), but dropping the partner is not the way to keep it.
+    #
+    # What has to be true before this comes back: the partner must fall back
+    # to the HOST path on a frame where its features are missing, with the
+    # primary doing the same, so the pair is never split. That is a change to
+    # live_node, not to this flag.
+    flow_device: bool = False
     flow_device_features: int = 300
 
     # THE FLOW RUNS ON THE GPU. Measured on two real 1280x800 frames from
