@@ -81,8 +81,19 @@ check("and the total is the two frames, not three",
 print("\nthe node wires it the way this models it")
 src = open(os.path.join(os.path.dirname(__file__), "..",
                         "vps_vio", "live_node.py")).read()
+# Three conditions now, not one. ts is bound to None before the packet loop
+# since 2 Nov - it was assigned only inside the accel branch or after the
+# gyro's `continue`, so a frame with no usable IMU packet left it unbound and
+# this very line raised UnboundLocalError and killed the node. The `ts is not
+# None` term is that fix, so the check is for all three terms rather than for
+# one line of source.
 check("the window is bounded by the previous FRAME, not the drain",
-      "if self._ts_prev_frame is not None and ts > self._ts_prev_frame:" in src)
+      all(t in src for t in ("ts is not None",
+                             "self._ts_prev_frame is not None",
+                             "ts > self._ts_prev_frame")))
+check("ts cannot be read unbound when a frame carries no IMU packet",
+      "        ts = None\n" in src
+      and "        if ts is not None:\n            self._ts_prev_frame = ts" in src)
 check("samples are weighted by overlap, not all-or-nothing",
       "ov = min(b, w1) - max(a, w0)" in src)
 check("a sample reaching past the window is KEPT for the next frame",

@@ -16,7 +16,7 @@ and that is refused unless the aircraft is disarmed, so the first transmission
 can only ever happen on a bench.
 """
 from __future__ import annotations
-import argparse, collections, csv, io, math, os, sys, time
+import argparse, collections, csv, io, math, os, sys, time, traceback
 import numpy as np, cv2
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -693,6 +693,19 @@ class LiveSource:
         # quaternion goes to the IMU log.
         q_roll = q_pitch = 0.0
         quat = []
+        # ts BEFORE the packet loop, for the third time in this file. It is
+        # the gyro sample's device timestamp and it is assigned only inside
+        # `if la is not None` or after the gyro's `continue` - so a frame that
+        # arrives with NO usable IMU packet left it unbound, and the frame
+        # window below reads it on every frame. That is the same shape as
+        # _use_pp (76 crashes) and _fe (4 crashes, 2 Nov, ALT_HOLD at 30 m),
+        # and bench/unbound_locals.py is what found it before it flew.
+        #
+        # None is the honest value: with no IMU sample there is no device
+        # timestamp, so there is no frame window to integrate over and the
+        # drain integral is all this frame has. That is exactly what the else
+        # branch below already does.
+        ts = None
         pk = self.q_imu.tryGet()
         while pk is not None:
             for packet in pk.packets:
@@ -778,7 +791,8 @@ class LiveSource:
         # directly comparable - that is the whole reason this is possible.
         drain_roll, drain_pitch = d_roll, d_pitch
         gyro_win_s = 0.0
-        if self._ts_prev_frame is not None and ts > self._ts_prev_frame:
+        if (ts is not None and self._ts_prev_frame is not None
+                and ts > self._ts_prev_frame):
             w0, w1 = self._ts_prev_frame, ts
             wr = wp = 0.0
             for (a, b, r_rate, p_rate) in self._gyro_buf:
@@ -795,7 +809,11 @@ class LiveSource:
             # No previous frame to bound the window: the drain integral is
             # all there is, and the buffer is spent.
             self._gyro_buf = []
-        self._ts_prev_frame = ts
+        # Only when there WAS a sample. Writing None here would make the
+        # next frame take the else branch too, so one IMU-less frame would
+        # cost two frames of window integration instead of one.
+        if ts is not None:
+            self._ts_prev_frame = ts
 
         depth = None
         if self.q_depth is not None:
@@ -3658,363 +3676,416 @@ def main():
     _src_was = [None]
     errs, t_start, n = [], time.perf_counter(), 0
     last_sync = 0.0
+    # Frame-level failure state. consec is what tells a bug on one frame
+    # apart from a camera that is gone.
+    CONSEC_MAX = 50
+    _frame_err_consec = 0
+    _frame_err_total = 0
+    _frame_err_kinds: dict[str, int] = {}
     try:
         while True:
-            f = src.read()
-            if f is None:
-                break
-            if node.origin is None:
-                # Precedence, and the order is the 13 Oct fix: an explicitly
-                # passed origin, then the point the PILOT TYPED on the RC, and
-                # only then the live receiver. It used to be the receiver that
-                # won whenever it had a fix, which is how the aircraft picked
-                # up a stale site by itself after the pilot drove to a new one.
-                #
-                # Every start says which of the three it was and whether that
-                # point is inside the loaded sheet, because a take-off point
-                # outside it means no map fixes for the whole flight - the
-                # first item on the 13 Oct list of things to confirm.
-                cli = None
-                if a.origin:
-                    lo, la = (float(x) for x in a.origin.split(","))
-                    cli = (lo, la)
-                chosen, why = choose_origin(cli, scr_origin, gps_primary,
-                                            f["gps"])
-                if chosen is None:
-                    if not _origin_refused[0]:
-                        _origin_refused[0] = True
-                        print(f"NO ORIGIN: {why}. The receiver cannot be used "
-                              f"here.")
-                        print("  Set SCR_USER1/2 from the RC, or pass "
-                              "--origin lon,lat. Waiting.")
-                        notifier.event("noorigin", True,
-                                       "VPS NO ORIGIN - SET SCR_USER1/2",
-                                       Notifier.SEV_CRIT)
-                    continue
-                # Only the live receiver states its own accuracy. --origin and
-                # SCR_USER1/2 are both typed, so they get None and
-                # absolute_sigma_m falls back to the map's own error.
-                boot_sigma = (f.get("gps1_hacc")
-                              if why.startswith("the live receiver") else None)
-                node.set_origin(*chosen, sigma_m=boot_sigma)
-                _armed_was[0] = f.get("armed")
-                olon, olat = node.origin
-                covered = cache.covers(olon, olat)
-                print(f"origin from {why}: {olat:.6f}, {olon:.6f}")
-                print(f"  this point is known to "
-                      f"{'no stated accuracy' if boot_sigma is None else f'{boot_sigma:.1f} m'}"
-                      f", so the FC is told {node.absolute_sigma_m:.1f} m at the start")
-                notifier.event("origin", why, f"VPS ORIGIN {why}"[:50],
-                               Notifier.SEV_INFO)
-                notifier.event("sheet", covered,
-                               "VPS SHEET OK" if covered
-                               else "VPS SHEET MISS - NO MAP FIX",
-                               Notifier.SEV_INFO if covered else Notifier.SEV_CRIT)
-                print(f"  sheet covers this point: "
-                      f"{'YES' if covered else 'NO - there will be NO map fixes'}")
-                if not covered:
-                    print(f"  loaded sheet: {a.map}")
-            est = node.step(f)
-            if est is None:
-                continue
-            n += 1
-
-            # Which source the aircraft is actually navigating on, NOW, not at
-            # startup. The pilot's rule: on the real receiver nothing of ours
-            # reaches the flight controller, and either way the change is
-            # announced on the radio.
-            watcher.poll(est["t"])
-            on_vps = watcher.on_vps()
-            est["src"] = ("VPS" if watcher.value == 1
-                          else "GPS1" if watcher.value == 0 else "?")
-            notifier.event(
-                "source", est["src"],
-                "VPS ON - injecting as GPS2" if watcher.value == 1
-                else "GPS1 ON - VPS data blocked" if watcher.value == 0
-                else "SOURCE UNKNOWN - cannot read GPS_PRIMARY",
-                Notifier.SEV_INFO if watcher.value == 1 else Notifier.SEV_CRIT)
-
-            # The lidar's ZERO, announced on the radio while still on the
-            # ground. ArduPilot will not declare the aircraft landed unless
-            # the rangefinder reads under 2 m in absolute terms, and this
-            # sensor's zero wanders by one to two metres between power cycles
-            # (0.82, 2.53 and 0.96 m on the same ground on 20 Oct). On the
-            # 20 Oct flight it sat at 2.53 m, the land detector never fired,
-            # DISARM_DELAY never ran and the battery had to be pulled. This
-            # changes nothing and blocks nothing - it only says so, before
-            # take-off, while there is still time to run lidar_zero.py.
-            rng = f.get("rngfnd")
-            if rng is not None and f.get("armed") is False:
-                notifier.event(
-                    "lidarzero", rng < 1.5,
-                    f"VPS LIDAR ZERO OK {rng:.2f}m" if rng < 1.5
-                    else f"LIDAR ZERO {rng:.1f}m - NO AUTO-DISARM"[:50],
-                    Notifier.SEV_INFO if rng < 1.5 else Notifier.SEV_WARN)
-
-            # THE ORIGIN IS RE-TAKEN AT ARM. The pilot's instruction, and
-            # three flights of evidence behind it: SCR_USER1/2 was left 147,
-            # 148 and 157 m from where the aircraft actually stood, because it
-            # is typed by hand and the aircraft moves. Every VPS position is
-            # measured from the origin, so flipping to the VPS with the origin
-            # 150 m out hands the flight controller a 150 m step.
+            # EVERY frame in its own try, and this is the whole answer to
+            # "stop the VPS from dying". Until now the 350 lines below ran
+            # bare inside `while True`: one frame that raised took the
+            # PROCESS down, and systemd brought it back cold. Measured cost
+            # of one such death on 2 Nov: the gap between consecutive run
+            # folders was 8.4 s, 9.7 s, 16.4 s, 19.7 s and 37.2 s - not the
+            # unit's RestartSec=5, because the restart also pays for the
+            # DepthAI pipeline boot and a fresh N-frame flow baseline. Four
+            # frames out of 46333 raised that day and they cost the whole
+            # VPS leg: no GPS_INPUT for tens of seconds, GPS2 went stale,
+            # and the aircraft was in ALT_HOLD at 30 m.
             #
-            # At the moment of arming the aircraft is standing still on the
-            # ground at the place it is about to fly from, which is the one
-            # moment its position is certainly known. So:
+            # Contained, the same four frames cost one loop tick each - 45 ms
+            # - and nothing else. Nothing is sent for a frame that raised,
+            # because every send is inside this block, so a failing node
+            # still goes quiet and the FC still falls back. That behaviour
+            # is unchanged and it is the behaviour the pilot asked to keep.
             #
-            #   on the receiver (GPS_PRIMARY 0) -> take the receiver's fix
-            #   on the VPS                      -> take SCR_USER1/2
-            #
-            # and the VIO's accumulated displacement goes back to zero,
-            # because it was measured from the origin that just moved.
-            # Anchoring is the VIO's job; the map only corrects it afterwards.
-            armed_now = f.get("armed")
-            if (armed_now is True and _armed_was[0] is not True
-                    and node.origin is not None):
-                src_now = watcher.value
-                new_o = why_o = None
-                # The receiver states its own accuracy and SCR_USER1/2 cannot:
-                # one is a measurement, the other is typed. Measured in the
-                # recent logs, GPS1 reported 1.08 to 3.01 m with a lock and
-                # UINT32_MAX without one (the reader discards that), so taking
-                # the origin from the receiver is worth about 2 m of declared
-                # uncertainty. A hand-typed point gets None, which
-                # absolute_sigma_m reads as the map's own error - and the three
-                # flights that flew on a stale SCR_USER were 147-157 m out.
-                new_sigma = None
-                if src_now == 0 and f["gps"]:
-                    new_o, why_o = f["gps"], "receiver at arm"
-                    new_sigma = f.get("gps1_hacc")
-                elif scr_origin is not None:
-                    new_o, why_o = scr_origin, "SCR_USER1/2 at arm"
-                if new_o is not None:
-                    moved = float(np.hypot(
-                        (new_o[1] - node.origin[1]) * M_PER_DEG_LAT,
-                        (new_o[0] - node.origin[0]) * node.mlon))
-                    node.set_origin(*new_o, sigma_m=new_sigma)
-                    node.fuser.reset_displacement()
-                    # Same reason as the handover below: the origin moved, so
-                    # anything measured from the old one is meaningless, and
-                    # that includes the velocity the bridge had integrated
-                    # while the aircraft sat on the ground before arming.
-                    node.vel.reset_state("origin re-taken at arm")
-                    print(f"ARM: origin re-taken from {why_o}: "
-                          f"{new_o[1]:.6f}, {new_o[0]:.6f} "
-                          f"(moved {moved:.0f} m, origin known to "
-                          f"{'unmeasured' if new_sigma is None else f'{new_sigma:.1f} m'}"
-                          f", declaring {node.absolute_sigma_m:.1f} m)", flush=True)
-                    notifier.event("reanchor", round(moved),
-                                   f"VPS ORIGIN {why_o} {moved:.0f}m"[:50],
-                                   Notifier.SEV_INFO if moved < 50
-                                   else Notifier.SEV_WARN)
-                else:
-                    notifier.event("reanchor", "none",
-                                   "VPS ORIGIN NOT RE-TAKEN AT ARM",
-                                   Notifier.SEV_WARN)
-            # THE HANDOVER, IN FLIGHT. The pilot's instruction, 21 Oct, and the
-            # reasoning is his own: when the switch goes the other way, from the
-            # VPS back to GPS, the flight controller does not drag the aircraft
-            # across whatever error had built up - "man lo error 50 mtr hai tho
-            # gps drone ko 50 mtr lekar correct nahi karta, wo direct apne
-            # current position inject kar deta hai aur wahi stable ho jata hai".
-            # Handing over TO the VPS has to behave the same way.
-            #
-            # It did not. The origin was only ever re-taken at the ARM edge, so
-            # a flight that armed on GPS, flew, and then switched to the VPS at
-            # altitude started sending `takeoff origin + every metre of VIO
-            # drift accumulated during the whole GPS phase`. Measured on the
-            # three flights with real travel below 60 m: 5.73 m and 5.24 m of
-            # drift on two of them, and a single-sample 20.55 m jump on
-            # vps_00016 at 41 m altitude. The EKF holds the GPS position at that
-            # instant, so it sees a step of exactly that size.
-            #
-            # So on the transition INTO the VPS, while armed, the origin is
-            # re-taken from where the flight controller currently believes it is
-            # and the VIO's displacement goes back to zero. The first position
-            # the VPS then sends equals what the EKF already holds, which is a
-            # handover with no jump and no drift carried across it. Nothing is
-            # corrected, nothing is flown - exactly as the pilot described.
-            #
-            # DISARMED is deliberately excluded. A switch flipped on the ground
-            # is case one - take off on the VPS - and there the origin must come
-            # from SCR_USER1/2, which the arm edge above already does.
-            #
-            # f["gps"] is GLOBAL_POSITION_INT, which is the EKF's own fused
-            # position rather than the raw receiver. That is the right source
-            # HERE and not a compromise: the whole point is to start from what
-            # the flight controller believes, because that is what makes the
-            # step zero. While the aircraft is on GPS that belief is GPS-driven.
-            # It is read once, at this edge, so nothing loops.
-            src_val = watcher.value
-            # _armed_was[0] is True, not armed_now: the aircraft has to have
-            # ALREADY been armed on the previous frame. That is what "in flight"
-            # means here, and it also stops this colliding with the arm edge
-            # above if the pilot flips to the VPS and arms in the same frame -
-            # that is case one, and the arm edge's SCR_USER1/2 must stand.
-            if should_handover(src_val, _src_was[0], _armed_was[0],
-                               armed_now, node.origin is not None):
-                if f["gps"]:
-                    moved = float(np.hypot(
-                        (f["gps"][1] - node.origin[1]) * M_PER_DEG_LAT,
-                        (f["gps"][0] - node.origin[0]) * node.mlon))
-                    carried = float(np.hypot(*node.fuser.pos))
-                    node.set_origin(*f["gps"], sigma_m=f.get("gps1_hacc"))
-                    node.fuser.reset_displacement()
-                    # AND THE VELOCITY, at the pilot's instruction, 23 Oct:
-                    # nothing from before the switch crosses it. Where the GPS
-                    # is, that is where the VPS starts.
+            # What this must NOT do is make a dead camera look alive. If
+            # src.read() itself is the thing raising, every frame raises, and
+            # a contained loop would spin on it for ever while the liveness
+            # file went on being rewritten. So consecutive failures are
+            # counted and at CONSEC_MAX the exception is let go: the process
+            # exits, systemd restarts it cold, and that is the only thing
+            # that can reopen a camera. 50 ticks is 2.3 s at 22 Hz.
+            try:
+                f = src.read()
+                if f is None:
+                    break
+                if node.origin is None:
+                    # Precedence, and the order is the 13 Oct fix: an explicitly
+                    # passed origin, then the point the PILOT TYPED on the RC, and
+                    # only then the live receiver. It used to be the receiver that
+                    # won whenever it had a fix, which is how the aircraft picked
+                    # up a stale site by itself after the pilot drove to a new one.
                     #
-                    # reset_displacement above has always zeroed the POSITION
-                    # and the variance - measured over ten switches on flight
-                    # 00000233, displacement went from up to 74.5 m down to
-                    # 0.4-2.0 m every time. The bridge was the half nobody
-                    # reset, because it had no reset to call: the integrated
-                    # velocity, the learned bias, the last flow and accel
-                    # samples, the slew reference and every timer ran
-                    # continuously from node start, through however long the
-                    # aircraft sat on GPS, and straight into the first
-                    # GPS_INPUT packet after the switch.
-                    node.vel.reset_state("handover to VPS")
-                    print(f"HANDOVER to VPS in flight: origin re-taken from the "
-                          f"FC's own position {f['gps'][1]:.6f}, {f['gps'][0]:.6f} "
-                          f"(origin moved {moved:.1f} m, {carried:.1f} m of VIO "
-                          f"displacement discarded, declaring "
-                          f"{node.absolute_sigma_m:.1f} m)", flush=True)
-                    notifier.event("handover", round(carried),
-                                   f"VPS HANDOVER - dropped {carried:.0f}m drift"[:50],
-                                   Notifier.SEV_INFO)
-                else:
-                    # No fix to hand over from - which is the jammed case this
-                    # aircraft exists for. Keep the origin and the displacement
-                    # we have: they carry whatever drift has built up, and that
-                    # is far better than falling back to SCR_USER1/2, which on
-                    # three flights sat 147-157 m from the aircraft.
-                    notifier.event("handover", "noloc",
-                                   "VPS HANDOVER - NO FIX, drift carried",
-                                   Notifier.SEV_WARN)
-                    print("HANDOVER to VPS in flight: the FC had no position to "
-                          "hand over, so the existing origin and displacement "
-                          "are kept (drift is carried across)", flush=True)
-            _src_was[0] = src_val
-            _armed_was[0] = armed_now
-
-            gN = gE = err = None
-            if f["gps"]:
-                gN = (f["gps"][1] - node.origin[1]) * M_PER_DEG_LAT
-                gE = (f["gps"][0] - node.origin[0]) * node.mlon
-                err = float(np.hypot(est["north"] - gN, est["east"] - gE))
-                errs.append(err)
-            # And the same against the RAW receiver, which is a different
-            # measurement and the only independent one. err above is against
-            # GLOBAL_POSITION_INT, the EKF's own fused position; once the
-            # aircraft flies on the VPS that is partly our own output returning,
-            # and comparing against it flatters us. This pair does not.
-            est["g1_north"] = est["g1_east"] = est["g1_err"] = None
-            if f.get("gps1_raw"):
-                g1 = f["gps1_raw"]
-                est["g1_north"] = (g1[1] - node.origin[1]) * M_PER_DEG_LAT
-                est["g1_east"] = (g1[0] - node.origin[0]) * node.mlon
-                est["g1_err"] = float(np.hypot(est["north"] - est["g1_north"],
-                                               est["east"] - est["g1_east"]))
-            v = est["vel"]
-            if fwriter is not None:
-                # ARMED ONLY, at the pilot's instruction (20 Oct). Images are
-                # wanted for the flight, not for the hour the aircraft sits on
-                # the ground with the services up: that hour is where the 29 MB
-                # a minute and the bench frames at alt 0.1 m come from, and
-                # every one of them is a frame offline matching has to be told
-                # to ignore.
-                #
-                # `armed` is the FC's own flag out of the telemetry snapshot.
-                # Three states, and the direction of each is deliberate:
-                # True keeps saving, False stops, and None - no FC, or a link
-                # that never carried a heartbeat - does NOT save, because
-                # "cannot tell" on the bench is the common case and a flight
-                # always has a link. If the link dies mid-flight the snapshot
-                # FREEZES rather than emptying (see Telemetry), so armed stays
-                # True and the recording continues, which is the safe way for
-                # that failure to fall.
-                armed = f.get("armed")
-                if armed is True:
-                    # After n, so the name carries the index of the row about
-                    # to be written, and before csv_row, so that row names its
-                    # own image. offer() encodes nothing and waits for
-                    # nothing: if the writer is behind, this returns None and
-                    # the frame is gone.
-                    est["frame_file"] = fwriter.offer(f["img"], n) or ""
-                elif not a.frames_any_time:
-                    est["frame_file"] = ""
-                else:
-                    est["frame_file"] = fwriter.offer(f["img"], n) or ""
-                notifier.event(
-                    "frames", bool(armed) or a.frames_any_time,
-                    f"VPS FRAMES ON {fwriter.hz:g}Hz" if (bool(armed)
-                                                          or a.frames_any_time)
-                    else "VPS FRAMES OFF - DISARMED",
-                    Notifier.SEV_INFO)
-            if wr:
-                # The sender is main()'s, not the node's, so its tallies are
-                # put on the estimate here rather than where the rest are
-                # gathered. Blank when there is no sender at all, which is
-                # every bench run that does not inject.
-                if gps_sender is not None:
-                    est["gps_sent"] = gps_sender.sent
-                    est["gps_skipped_rate"] = gps_sender.skipped_rate
-                wr.writerow(csv_row(est, f, v, gN, gE, err))
-            if imu_wr is not None:
-                imu_wr.writerows(imu_rows(f))
-            # A row in the page cache is not a row on the disk. The battery
-            # comes out of this aircraft by hand, and when it did on 20 Oct
-            # the last block of two runs came back as NUL bytes.
-            if a.sync_every > 0 and est["t"] - last_sync >= a.sync_every:
-                last_sync = est["t"]
-                for h_ in (fh, imu_fh):
-                    if h_ is None:
+                    # Every start says which of the three it was and whether that
+                    # point is inside the loaded sheet, because a take-off point
+                    # outside it means no map fixes for the whole flight - the
+                    # first item on the 13 Oct list of things to confirm.
+                    cli = None
+                    if a.origin:
+                        lo, la = (float(x) for x in a.origin.split(","))
+                        cli = (lo, la)
+                    chosen, why = choose_origin(cli, scr_origin, gps_primary,
+                                                f["gps"])
+                    if chosen is None:
+                        if not _origin_refused[0]:
+                            _origin_refused[0] = True
+                            print(f"NO ORIGIN: {why}. The receiver cannot be used "
+                                  f"here.")
+                            print("  Set SCR_USER1/2 from the RC, or pass "
+                                  "--origin lon,lat. Waiting.")
+                            notifier.event("noorigin", True,
+                                           "VPS NO ORIGIN - SET SCR_USER1/2",
+                                           Notifier.SEV_CRIT)
                         continue
+                    # Only the live receiver states its own accuracy. --origin and
+                    # SCR_USER1/2 are both typed, so they get None and
+                    # absolute_sigma_m falls back to the map's own error.
+                    boot_sigma = (f.get("gps1_hacc")
+                                  if why.startswith("the live receiver") else None)
+                    node.set_origin(*chosen, sigma_m=boot_sigma)
+                    _armed_was[0] = f.get("armed")
+                    olon, olat = node.origin
+                    covered = cache.covers(olon, olat)
+                    print(f"origin from {why}: {olat:.6f}, {olon:.6f}")
+                    print(f"  this point is known to "
+                          f"{'no stated accuracy' if boot_sigma is None else f'{boot_sigma:.1f} m'}"
+                          f", so the FC is told {node.absolute_sigma_m:.1f} m at the start")
+                    notifier.event("origin", why, f"VPS ORIGIN {why}"[:50],
+                                   Notifier.SEV_INFO)
+                    notifier.event("sheet", covered,
+                                   "VPS SHEET OK" if covered
+                                   else "VPS SHEET MISS - NO MAP FIX",
+                                   Notifier.SEV_INFO if covered else Notifier.SEV_CRIT)
+                    print(f"  sheet covers this point: "
+                          f"{'YES' if covered else 'NO - there will be NO map fixes'}")
+                    if not covered:
+                        print(f"  loaded sheet: {a.map}")
+                est = node.step(f)
+                if est is None:
+                    continue
+                n += 1
+
+                # Which source the aircraft is actually navigating on, NOW, not at
+                # startup. The pilot's rule: on the real receiver nothing of ours
+                # reaches the flight controller, and either way the change is
+                # announced on the radio.
+                watcher.poll(est["t"])
+                on_vps = watcher.on_vps()
+                est["src"] = ("VPS" if watcher.value == 1
+                              else "GPS1" if watcher.value == 0 else "?")
+                notifier.event(
+                    "source", est["src"],
+                    "VPS ON - injecting as GPS2" if watcher.value == 1
+                    else "GPS1 ON - VPS data blocked" if watcher.value == 0
+                    else "SOURCE UNKNOWN - cannot read GPS_PRIMARY",
+                    Notifier.SEV_INFO if watcher.value == 1 else Notifier.SEV_CRIT)
+
+                # The lidar's ZERO, announced on the radio while still on the
+                # ground. ArduPilot will not declare the aircraft landed unless
+                # the rangefinder reads under 2 m in absolute terms, and this
+                # sensor's zero wanders by one to two metres between power cycles
+                # (0.82, 2.53 and 0.96 m on the same ground on 20 Oct). On the
+                # 20 Oct flight it sat at 2.53 m, the land detector never fired,
+                # DISARM_DELAY never ran and the battery had to be pulled. This
+                # changes nothing and blocks nothing - it only says so, before
+                # take-off, while there is still time to run lidar_zero.py.
+                rng = f.get("rngfnd")
+                if rng is not None and f.get("armed") is False:
+                    notifier.event(
+                        "lidarzero", rng < 1.5,
+                        f"VPS LIDAR ZERO OK {rng:.2f}m" if rng < 1.5
+                        else f"LIDAR ZERO {rng:.1f}m - NO AUTO-DISARM"[:50],
+                        Notifier.SEV_INFO if rng < 1.5 else Notifier.SEV_WARN)
+
+                # THE ORIGIN IS RE-TAKEN AT ARM. The pilot's instruction, and
+                # three flights of evidence behind it: SCR_USER1/2 was left 147,
+                # 148 and 157 m from where the aircraft actually stood, because it
+                # is typed by hand and the aircraft moves. Every VPS position is
+                # measured from the origin, so flipping to the VPS with the origin
+                # 150 m out hands the flight controller a 150 m step.
+                #
+                # At the moment of arming the aircraft is standing still on the
+                # ground at the place it is about to fly from, which is the one
+                # moment its position is certainly known. So:
+                #
+                #   on the receiver (GPS_PRIMARY 0) -> take the receiver's fix
+                #   on the VPS                      -> take SCR_USER1/2
+                #
+                # and the VIO's accumulated displacement goes back to zero,
+                # because it was measured from the origin that just moved.
+                # Anchoring is the VIO's job; the map only corrects it afterwards.
+                armed_now = f.get("armed")
+                if (armed_now is True and _armed_was[0] is not True
+                        and node.origin is not None):
+                    src_now = watcher.value
+                    new_o = why_o = None
+                    # The receiver states its own accuracy and SCR_USER1/2 cannot:
+                    # one is a measurement, the other is typed. Measured in the
+                    # recent logs, GPS1 reported 1.08 to 3.01 m with a lock and
+                    # UINT32_MAX without one (the reader discards that), so taking
+                    # the origin from the receiver is worth about 2 m of declared
+                    # uncertainty. A hand-typed point gets None, which
+                    # absolute_sigma_m reads as the map's own error - and the three
+                    # flights that flew on a stale SCR_USER were 147-157 m out.
+                    new_sigma = None
+                    if src_now == 0 and f["gps"]:
+                        new_o, why_o = f["gps"], "receiver at arm"
+                        new_sigma = f.get("gps1_hacc")
+                    elif scr_origin is not None:
+                        new_o, why_o = scr_origin, "SCR_USER1/2 at arm"
+                    if new_o is not None:
+                        moved = float(np.hypot(
+                            (new_o[1] - node.origin[1]) * M_PER_DEG_LAT,
+                            (new_o[0] - node.origin[0]) * node.mlon))
+                        node.set_origin(*new_o, sigma_m=new_sigma)
+                        node.fuser.reset_displacement()
+                        # Same reason as the handover below: the origin moved, so
+                        # anything measured from the old one is meaningless, and
+                        # that includes the velocity the bridge had integrated
+                        # while the aircraft sat on the ground before arming.
+                        node.vel.reset_state("origin re-taken at arm")
+                        print(f"ARM: origin re-taken from {why_o}: "
+                              f"{new_o[1]:.6f}, {new_o[0]:.6f} "
+                              f"(moved {moved:.0f} m, origin known to "
+                              f"{'unmeasured' if new_sigma is None else f'{new_sigma:.1f} m'}"
+                              f", declaring {node.absolute_sigma_m:.1f} m)", flush=True)
+                        notifier.event("reanchor", round(moved),
+                                       f"VPS ORIGIN {why_o} {moved:.0f}m"[:50],
+                                       Notifier.SEV_INFO if moved < 50
+                                       else Notifier.SEV_WARN)
+                    else:
+                        notifier.event("reanchor", "none",
+                                       "VPS ORIGIN NOT RE-TAKEN AT ARM",
+                                       Notifier.SEV_WARN)
+                # THE HANDOVER, IN FLIGHT. The pilot's instruction, 21 Oct, and the
+                # reasoning is his own: when the switch goes the other way, from the
+                # VPS back to GPS, the flight controller does not drag the aircraft
+                # across whatever error had built up - "man lo error 50 mtr hai tho
+                # gps drone ko 50 mtr lekar correct nahi karta, wo direct apne
+                # current position inject kar deta hai aur wahi stable ho jata hai".
+                # Handing over TO the VPS has to behave the same way.
+                #
+                # It did not. The origin was only ever re-taken at the ARM edge, so
+                # a flight that armed on GPS, flew, and then switched to the VPS at
+                # altitude started sending `takeoff origin + every metre of VIO
+                # drift accumulated during the whole GPS phase`. Measured on the
+                # three flights with real travel below 60 m: 5.73 m and 5.24 m of
+                # drift on two of them, and a single-sample 20.55 m jump on
+                # vps_00016 at 41 m altitude. The EKF holds the GPS position at that
+                # instant, so it sees a step of exactly that size.
+                #
+                # So on the transition INTO the VPS, while armed, the origin is
+                # re-taken from where the flight controller currently believes it is
+                # and the VIO's displacement goes back to zero. The first position
+                # the VPS then sends equals what the EKF already holds, which is a
+                # handover with no jump and no drift carried across it. Nothing is
+                # corrected, nothing is flown - exactly as the pilot described.
+                #
+                # DISARMED is deliberately excluded. A switch flipped on the ground
+                # is case one - take off on the VPS - and there the origin must come
+                # from SCR_USER1/2, which the arm edge above already does.
+                #
+                # f["gps"] is GLOBAL_POSITION_INT, which is the EKF's own fused
+                # position rather than the raw receiver. That is the right source
+                # HERE and not a compromise: the whole point is to start from what
+                # the flight controller believes, because that is what makes the
+                # step zero. While the aircraft is on GPS that belief is GPS-driven.
+                # It is read once, at this edge, so nothing loops.
+                src_val = watcher.value
+                # _armed_was[0] is True, not armed_now: the aircraft has to have
+                # ALREADY been armed on the previous frame. That is what "in flight"
+                # means here, and it also stops this colliding with the arm edge
+                # above if the pilot flips to the VPS and arms in the same frame -
+                # that is case one, and the arm edge's SCR_USER1/2 must stand.
+                if should_handover(src_val, _src_was[0], _armed_was[0],
+                                   armed_now, node.origin is not None):
+                    if f["gps"]:
+                        moved = float(np.hypot(
+                            (f["gps"][1] - node.origin[1]) * M_PER_DEG_LAT,
+                            (f["gps"][0] - node.origin[0]) * node.mlon))
+                        carried = float(np.hypot(*node.fuser.pos))
+                        node.set_origin(*f["gps"], sigma_m=f.get("gps1_hacc"))
+                        node.fuser.reset_displacement()
+                        # AND THE VELOCITY, at the pilot's instruction, 23 Oct:
+                        # nothing from before the switch crosses it. Where the GPS
+                        # is, that is where the VPS starts.
+                        #
+                        # reset_displacement above has always zeroed the POSITION
+                        # and the variance - measured over ten switches on flight
+                        # 00000233, displacement went from up to 74.5 m down to
+                        # 0.4-2.0 m every time. The bridge was the half nobody
+                        # reset, because it had no reset to call: the integrated
+                        # velocity, the learned bias, the last flow and accel
+                        # samples, the slew reference and every timer ran
+                        # continuously from node start, through however long the
+                        # aircraft sat on GPS, and straight into the first
+                        # GPS_INPUT packet after the switch.
+                        node.vel.reset_state("handover to VPS")
+                        print(f"HANDOVER to VPS in flight: origin re-taken from the "
+                              f"FC's own position {f['gps'][1]:.6f}, {f['gps'][0]:.6f} "
+                              f"(origin moved {moved:.1f} m, {carried:.1f} m of VIO "
+                              f"displacement discarded, declaring "
+                              f"{node.absolute_sigma_m:.1f} m)", flush=True)
+                        notifier.event("handover", round(carried),
+                                       f"VPS HANDOVER - dropped {carried:.0f}m drift"[:50],
+                                       Notifier.SEV_INFO)
+                    else:
+                        # No fix to hand over from - which is the jammed case this
+                        # aircraft exists for. Keep the origin and the displacement
+                        # we have: they carry whatever drift has built up, and that
+                        # is far better than falling back to SCR_USER1/2, which on
+                        # three flights sat 147-157 m from the aircraft.
+                        notifier.event("handover", "noloc",
+                                       "VPS HANDOVER - NO FIX, drift carried",
+                                       Notifier.SEV_WARN)
+                        print("HANDOVER to VPS in flight: the FC had no position to "
+                              "hand over, so the existing origin and displacement "
+                              "are kept (drift is carried across)", flush=True)
+                _src_was[0] = src_val
+                _armed_was[0] = armed_now
+
+                gN = gE = err = None
+                if f["gps"]:
+                    gN = (f["gps"][1] - node.origin[1]) * M_PER_DEG_LAT
+                    gE = (f["gps"][0] - node.origin[0]) * node.mlon
+                    err = float(np.hypot(est["north"] - gN, est["east"] - gE))
+                    errs.append(err)
+                # And the same against the RAW receiver, which is a different
+                # measurement and the only independent one. err above is against
+                # GLOBAL_POSITION_INT, the EKF's own fused position; once the
+                # aircraft flies on the VPS that is partly our own output returning,
+                # and comparing against it flatters us. This pair does not.
+                est["g1_north"] = est["g1_east"] = est["g1_err"] = None
+                if f.get("gps1_raw"):
+                    g1 = f["gps1_raw"]
+                    est["g1_north"] = (g1[1] - node.origin[1]) * M_PER_DEG_LAT
+                    est["g1_east"] = (g1[0] - node.origin[0]) * node.mlon
+                    est["g1_err"] = float(np.hypot(est["north"] - est["g1_north"],
+                                                   est["east"] - est["g1_east"]))
+                v = est["vel"]
+                if fwriter is not None:
+                    # ARMED ONLY, at the pilot's instruction (20 Oct). Images are
+                    # wanted for the flight, not for the hour the aircraft sits on
+                    # the ground with the services up: that hour is where the 29 MB
+                    # a minute and the bench frames at alt 0.1 m come from, and
+                    # every one of them is a frame offline matching has to be told
+                    # to ignore.
+                    #
+                    # `armed` is the FC's own flag out of the telemetry snapshot.
+                    # Three states, and the direction of each is deliberate:
+                    # True keeps saving, False stops, and None - no FC, or a link
+                    # that never carried a heartbeat - does NOT save, because
+                    # "cannot tell" on the bench is the common case and a flight
+                    # always has a link. If the link dies mid-flight the snapshot
+                    # FREEZES rather than emptying (see Telemetry), so armed stays
+                    # True and the recording continues, which is the safe way for
+                    # that failure to fall.
+                    armed = f.get("armed")
+                    if armed is True:
+                        # After n, so the name carries the index of the row about
+                        # to be written, and before csv_row, so that row names its
+                        # own image. offer() encodes nothing and waits for
+                        # nothing: if the writer is behind, this returns None and
+                        # the frame is gone.
+                        est["frame_file"] = fwriter.offer(f["img"], n) or ""
+                    elif not a.frames_any_time:
+                        est["frame_file"] = ""
+                    else:
+                        est["frame_file"] = fwriter.offer(f["img"], n) or ""
+                    notifier.event(
+                        "frames", bool(armed) or a.frames_any_time,
+                        f"VPS FRAMES ON {fwriter.hz:g}Hz" if (bool(armed)
+                                                              or a.frames_any_time)
+                        else "VPS FRAMES OFF - DISARMED",
+                        Notifier.SEV_INFO)
+                if wr:
+                    # The sender is main()'s, not the node's, so its tallies are
+                    # put on the estimate here rather than where the rest are
+                    # gathered. Blank when there is no sender at all, which is
+                    # every bench run that does not inject.
+                    if gps_sender is not None:
+                        est["gps_sent"] = gps_sender.sent
+                        est["gps_skipped_rate"] = gps_sender.skipped_rate
+                    wr.writerow(csv_row(est, f, v, gN, gE, err))
+                if imu_wr is not None:
+                    imu_wr.writerows(imu_rows(f))
+                # A row in the page cache is not a row on the disk. The battery
+                # comes out of this aircraft by hand, and when it did on 20 Oct
+                # the last block of two runs came back as NUL bytes.
+                if a.sync_every > 0 and est["t"] - last_sync >= a.sync_every:
+                    last_sync = est["t"]
+                    for h_ in (fh, imu_fh):
+                        if h_ is None:
+                            continue
+                        try:
+                            h_.flush()
+                            os.fsync(h_.fileno())
+                        except OSError:
+                            pass
+                notifier.tick(est["t"], est, node)
+
+                # Gated on the source. GPS_PRIMARY=0 means the pilot asked for the
+                # real M9N, so the VPS stops injecting entirely - not "sends and is
+                # ignored", stops. Unknown keeps sending; see SourceWatcher for why
+                # the two directions are not symmetrical.
+                if gps_sender is not None and on_vps:
+                    amsl_ref.observe(f.get("gps1_fix"), f.get("gps1_alt"), f["alt"])
+                    amsl = amsl_ref.amsl(f["alt"])
+                    notifier.event("amsl", amsl_ref.source or False,
+                                   f"VPS AMSL from {amsl_ref.source}"[:50]
+                                   if amsl_ref.source
+                                   else "VPS AMSL UNKNOWN - pass --site-alt",
+                                   Notifier.SEV_INFO if amsl_ref.source
+                                   else Notifier.SEV_WARN)
+                    gps_sender.send(est["lon"], est["lat"],
+                                    est["alt"] if amsl is None else amsl,
+                                    est["sigma_abs"], est["yaw"], vel=est["vel"])
+                if sender is not None:
+                    sender.send(est["north"], est["east"], -est["alt"],
+                                f["roll"], f["pitch"], f["yaw"])
+                if a.liveness:
+                    # Written, not just touched: the mtime says the loop ran and
+                    # the contents say what it was doing, so a watchdog log shows
+                    # WHY it stalled rather than only that it did.
                     try:
-                        h_.flush()
-                        os.fsync(h_.fileno())
+                        tmp = a.liveness + ".tmp"
+                        with open(tmp, "w") as lf:
+                            lf.write(f"t={est['t']:.2f} n={n} tracks={est['tracks']} "
+                                     f"sigma={est['sigma']:.1f} fixes={node.n_fix} "
+                                     f"flow={node.n_flow} vel={v.reason}\n")
+                        os.replace(tmp, a.liveness)   # atomic; never a half file
                     except OSError:
                         pass
-            notifier.tick(est["t"], est, node)
-
-            # Gated on the source. GPS_PRIMARY=0 means the pilot asked for the
-            # real M9N, so the VPS stops injecting entirely - not "sends and is
-            # ignored", stops. Unknown keeps sending; see SourceWatcher for why
-            # the two directions are not symmetrical.
-            if gps_sender is not None and on_vps:
-                amsl_ref.observe(f.get("gps1_fix"), f.get("gps1_alt"), f["alt"])
-                amsl = amsl_ref.amsl(f["alt"])
-                notifier.event("amsl", amsl_ref.source or False,
-                               f"VPS AMSL from {amsl_ref.source}"[:50]
-                               if amsl_ref.source
-                               else "VPS AMSL UNKNOWN - pass --site-alt",
-                               Notifier.SEV_INFO if amsl_ref.source
-                               else Notifier.SEV_WARN)
-                gps_sender.send(est["lon"], est["lat"],
-                                est["alt"] if amsl is None else amsl,
-                                est["sigma_abs"], est["yaw"], vel=est["vel"])
-            if sender is not None:
-                sender.send(est["north"], est["east"], -est["alt"],
-                            f["roll"], f["pitch"], f["yaw"])
-            if a.liveness:
-                # Written, not just touched: the mtime says the loop ran and
-                # the contents say what it was doing, so a watchdog log shows
-                # WHY it stalled rather than only that it did.
-                try:
-                    tmp = a.liveness + ".tmp"
-                    with open(tmp, "w") as lf:
-                        lf.write(f"t={est['t']:.2f} n={n} tracks={est['tracks']} "
-                                 f"sigma={est['sigma']:.1f} fixes={node.n_fix} "
-                                 f"flow={node.n_flow} vel={v.reason}\n")
-                    os.replace(tmp, a.liveness)   # atomic; never a half file
-                except OSError:
-                    pass
-            if n % 200 == 0:
-                print(f"  {est['t']:7.1f}s  N {est['north']:8.1f}  E {est['east']:8.1f}  "
-                      f"sigma {est['sigma']:5.1f}  tracks {est['tracks']:4d}  "
-                      f"fixes {node.n_fix:3d}"
-                      + (f"  err {err:6.1f} m" if err is not None else ""), flush=True)
+                if n % 200 == 0:
+                    print(f"  {est['t']:7.1f}s  N {est['north']:8.1f}  E {est['east']:8.1f}  "
+                          f"sigma {est['sigma']:5.1f}  tracks {est['tracks']:4d}  "
+                          f"fixes {node.n_fix:3d}"
+                          + (f"  err {err:6.1f} m" if err is not None else ""), flush=True)
+            except Exception as exc:
+                _frame_err_consec += 1
+                _frame_err_total += 1
+                k = type(exc).__name__
+                _frame_err_kinds[k] = _frame_err_kinds.get(k, 0) + 1
+                if _frame_err_kinds[k] == 1:
+                    # The first of each kind with its traceback; after that
+                    # the count only, or a per-frame bug writes gigabytes.
+                    print(f"FRAME {n}: {k}: {exc} - frame chhoda, "
+                          f"node chal raha hai", flush=True)
+                    traceback.print_exc()
+                elif _frame_err_kinds[k] % 200 == 0:
+                    print(f"FRAME {n}: {k} x{_frame_err_kinds[k]}",
+                          flush=True)
+                if _frame_err_consec >= CONSEC_MAX:
+                    print(f"{_frame_err_consec} frames lagatar fail - "
+                          f"camera hi gaya lagta hai, systemd ko dete hai",
+                          flush=True)
+                    raise
+            else:
+                _frame_err_consec = 0
     except KeyboardInterrupt:
         print("\nstopped")
     except SystemExit:
@@ -4054,6 +4125,10 @@ def main():
               f"({100.0 * node.n_derot_gyro / tot:.1f}% gyro)")
         print("  " + node.val_gyro.describe())
         print("  " + node.val_quat.describe())
+    if _frame_err_total:
+        kinds = ", ".join(f"{k} x{v}" for k, v in
+                          sorted(_frame_err_kinds.items(), key=lambda kv: -kv[1]))
+        print(f"frames jo fail hue: {_frame_err_total} / {n} ({kinds})")
     if gps_sender is not None:
         print(f"GPS_INPUT bheje: {gps_sender.sent}")
     if sender is not None:
