@@ -399,47 +399,26 @@ class VpsConfig:
     # core the flow threads want is worse than no pin.
     matcher_core: int | None = None
 
-    fix_period_s: float = 1.0      # 1 NOV, at the pilot's instruction, with no
-                                   # argument asked for and none made here.
+    fix_period_s: float = 2.0      # 2 NOV, wapis 2.0, pilot ke kehne par, us
+                                   # flight ke baad jisme 1.0 par matcher ne
+                                   # theek kaam nahi kiya. 1.0 ab TEEN baar
+                                   # ud chuka hai aur teeno baar wapis hua.
                                    #
-                                   # WHAT IS KNOWN AGAINST IT, recorded so the
-                                   # next flight can be read against it rather
-                                   # than rediscovering it. 1.0 has flown twice
-                                   # and been reverted twice: log 227 took
-                                   # XKF4.SP max from 0.13 to 1.17 at 82-83 m
-                                   # against a 1.2 gate, and flight 238 took
-                                   # the error against GPS_RAW_INT from 4.08
-                                   # to 8.79 m at 60-80 m while fixes went
-                                   # 39 -> 113. 5 Oct's 0.4 s pushed a
-                                   # stationary aircraft at 1.18 m/s.
+                                   # WHAT IS KNOWN AGAINST 1.0, recorded so
+                                   # nobody sets it a fourth time without
+                                   # reading this. Log 227 took XKF4.SP max
+                                   # from 0.13 to 1.17 at 82-83 m against a
+                                   # 1.2 gate. Flight 238 took the error up
+                                   # as well. 2 Nov is the third.
                                    #
-                                   # And flight 382, 1 Nov, the first flight
-                                   # whose matcher ever actually ran: its own
-                                   # fixes were 38 m from the receiver (200 of
-                                   # them, window centred on GPS_RAW_INT), 28
-                                   # of 41 applied fixes made the position
-                                   # worse, and the net was +17.3 m of the
-                                   # 51 m total drift. Doubling the rate of a
-                                   # 38 m fix doubles that arithmetic.
-                                   #
-                                   # The cost side is the other half: the
-                                   # matcher took the loop from 23.86 Hz on
-                                   # 378 (where covers() was false and it did
-                                   # nothing) to 21.20 Hz on 382, and dropped
-                                   # frames from 1.06 to 3.67 a second. That
-                                   # is 5.3 frames per fix against 84 ms of
-                                   # measured work, so most of it is
-                                   # contention rather than arithmetic. At
-                                   # 1.0 s it doubles again unless the matcher
-                                   # moves out of this process.
-                                   #
-                                   # Frames matter because the phantom tracks
-                                   # them: measured on 382, flow minus the
-                                   # receiver went +0.770 m/s p50 where fewer
-                                   # than 3 frames a second were dropped and
-                                   # +3.705 where 6-10 were.
-
-    # --- recorder ---
+                                   # The matcher is not rate-limited by this
+                                   # number - it is limited by whether the
+                                   # sheet matches the ground at all, which
+                                   # is a different problem and is not fixed
+                                   # by asking it more often. Asking twice as
+                                   # often with the same match quality just
+                                   # puts twice as many bad corrections into
+                                   # the fuser.
     image_hz: float = 2.0          # 5 Oct: JPEGs gated separately from CSV rows
                                    # at 4 Hz; 8 Oct: halved to 2 Hz. index.csv
                                    # still logs EVERY frame - the rows carry the
