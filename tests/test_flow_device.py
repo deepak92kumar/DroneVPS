@@ -29,7 +29,9 @@ forward-backward check on the device path - the maintainer drops a feature on
 its own tracking error, a different test. On the ground in daylight 95% of
 ids carry to the next frame and features live 300 frames; at night on a
 low-texture scene the identical configuration carried 30%. The air is neither
-scene and none of this has flown, which is why flow_device is False.
+scene and none of this has flown. It is ON anyway, at the pilot's
+instruction on 2 Nov: the case against it cannot be settled from the ground,
+and the fallback is per frame, so the worst case is the flow we already had.
 """
 import os
 import sys
@@ -58,9 +60,10 @@ class Feat:
         self.position = type("P", (), {"x": float(x), "y": float(y)})()
 
 
-print("off until it has flown")
-check("flow_device is False", VpsConfig().flow_device is False,
-      "no forward-backward check, and nothing measured in the air")
+print("on, at the pilot's instruction, and not yet flown")
+check("flow_device is True", VpsConfig().flow_device is True,
+      "the case against it - no forward-backward check, and every number "
+      "measured on a camera standing still - has no answer without a flight")
 check("and it asks for 300 features",
       VpsConfig().flow_device_features == 300,
       "the board clamps to about 51; asking for more costs nothing")

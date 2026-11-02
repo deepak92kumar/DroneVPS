@@ -295,13 +295,27 @@ class VpsConfig:
     # 300 answer - and 600 corners differs from 300 by 0.491 px, so most of
     # that is the floor of the comparison rather than a disagreement.
     #
-    # AND WHAT IS NOT MEASURED. There is no forward-backward check on the
-    # device path; the maintainer drops a feature on its own tracking error
-    # instead, which is a different test. On the ground in daylight 95% of
-    # ids carry to the next frame and features live 300 frames; at night, on
-    # a low-texture scene, the same configuration carried 30%. Nothing here
-    # has flown, and the air is neither of those scenes.
-    flow_device: bool = False
+    # AND WHAT IS NOT MEASURED, which is the half to read before a flight.
+    # There is no forward-backward check on the device path; the maintainer
+    # drops a feature on its own tracking error instead, which is a
+    # different test. On the ground in daylight 95% of ids carry to the next
+    # frame and features live 300 frames; at night, on a low-texture scene,
+    # the identical configuration carried 30%. The air is neither scene.
+    #
+    # TRUE at the pilot's instruction, 2 Nov, to be flown. What is known
+    # against it is above and is not an argument that was skipped - it is an
+    # argument that has no answer without a flight, because every number
+    # here comes from a camera standing still on the ground.
+    #
+    # The choice is per FRAME: a frame whose features did not arrive falls
+    # back to the host path for that step, and both cameras always use the
+    # same backend on the same frame. So the worst case is the flow we
+    # already had, not a gap.
+    #
+    # Read flow_disagree_px and frames_skipped on the first flight. The
+    # baseline to beat is flight 382: loop 21.03 Hz, 3.98 frames a second
+    # dropped, disagree p50 0.050 and p95 0.460.
+    flow_device: bool = True
     flow_device_features: int = 300
 
     # THE FLOW RUNS ON THE GPU. Measured on two real 1280x800 frames from
