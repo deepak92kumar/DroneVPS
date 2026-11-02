@@ -673,7 +673,34 @@ class VpsConfig:
     # amount of averaging will reach it, and the whole longer-baseline family
     # is now closed by this aircraft's own data instead of by recollection.
     # Flat, and not to be reopened without a different mechanism.
-    flow_vel_frames_high: int = 40
+    # 2 NOV: 40 -> 60, at the pilot's instruction, for a flight planned at
+    # 35-40 m. With flow_vel_alt_m 25 and the 15 m ramp this gives 53 frames
+    # at 35 m and the full 60 at 40 m, so the velocity is measured over
+    # 0.88-1.00 s instead of 0.67.
+    #
+    # WHAT IS KNOWN FOR IT: the table above, measured across logs
+    # 225/226/227/228 - at 25-40 m the velocity error p90 is 1.98 at N=60
+    # against 2.31 at N=40, 14% better.
+    #
+    # WHAT WAS KNOWN AGAINST IT, and why that is now worth much less: this
+    # exact mechanism was put in on 22 Oct and reverted the same day by
+    # flight. THE PILOT POINTS OUT THAT THE FLIGHT CONTROLLER OF 22 OCT WAS
+    # THE FAULTY ONE - the board was replaced with the X7+ on 31 Oct. So the
+    # 22 Oct revert cannot separate "the longer baseline oscillates" from
+    # "that board oscillated", and it should not be quoted as evidence
+    # against this setting the way it has been. It is one flight on hardware
+    # that was later thrown away.
+    #
+    # The cost that is real and is NOT about the board: lag. A position
+    # controller acting on stale velocity oscillates, and 1.0 s against
+    # 0.67 s is a third more of it. That argument stands on its own and this
+    # setting has never been flown against it on a good board.
+    #
+    # So this is on trial, on the new FC, and the next flight decides it.
+    # What to read: if the aircraft swings at 35-40 m the way 411 swung at
+    # 70 m, this is the first thing to put back to 40 - and that would be
+    # the FIRST honest test of it.
+    flow_vel_frames_high: int = 60
     flow_vel_alt_m: float = 25.0
 
     # Stereo depth: ON, and for VIO ONLY.
