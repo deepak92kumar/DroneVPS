@@ -80,8 +80,13 @@ for name in ("_use_pp", "_gr", "_gp"):
 
 print("\nand the partner's call still reads it, so the check means something")
 src = open(NODE).read()
-check("two trackers are given derot_deg=... if _use_pp else None",
-      src.count("derot_deg=((_gr, _gp) if _use_pp else None))") == 2,
+# FOUR, not two, since 2 Nov. Each tracker now has two ways to be stepped -
+# the host's Lucas-Kanade and the camera's own FeatureTracker - and the
+# rotation has to come off on all of them. The count is deliberately a count
+# and not a check of one call: that is what caught this the moment the
+# device path was added, which is exactly what it is for.
+check("every tracker call is given derot_deg=... if _use_pp else None",
+      src.count("derot_deg=((_gr, _gp) if _use_pp else None))") == 4,
       str(src.count("derot_deg=((_gr, _gp) if _use_pp else None))")))
 
 print("\nALL PASS" if not fails else f"\n{len(fails)} FAILED: {', '.join(fails)}")

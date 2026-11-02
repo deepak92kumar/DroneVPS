@@ -666,6 +666,66 @@ class FlowTracker:
                 st2 = (np.array(s2_, copy=True).ravel() == 0).astype(np.uint8)
         return p1, st.reshape(n, 1), p0r, st2.reshape(n, 1)
 
+    def step_device(self, img, features, depth=None, derot_deg=None):
+        """One step from the CAMERA's own tracker instead of the host's.
+
+        features is a list of dai.TrackedFeature - id, position, age - as the
+        OAK-D's FeatureTracker node emits them. Correspondence comes from the
+        id rather than from Lucas-Kanade: a feature that appears in this frame
+        and the last is the same point, and the device said so.
+
+        WHY. Measured 2 Nov on this board, same camera and resolution:
+
+            host: goodFeatures + two-way LK   62.4 ms CPU a frame, 1.85 cores
+            device: FeatureTracker             1.7 ms CPU a frame, 0.05 cores
+
+        97% less. Two trackers fly, so the host path ceilings at 8.02 Hz and
+        the device at 292 - and on the ground the loop was measured at
+        9.06 Hz against a camera giving 24.7 fps, with the map matcher in its
+        own process and therefore not the cause.
+
+        WHAT IT COSTS. The device holds about 51 features where we ask for
+        300. Scored on 962 of flight 382's saved frames against the
+        300-corner answer on the same pair, 51 features is our 100-corner
+        setting: 90% of pairs answered against 97%, and the shift 0.633 px
+        from the 300 answer - of which about 0.49 is the floor of that
+        comparison, since 600 corners differs from 300 by that much.
+
+        There is NO forward-backward check here, and that is the real
+        difference from the host path rather than the count. The device's own
+        maintainer drops a feature when its tracking error passes
+        lostFeatureErrorThreshold, which is a different test and not a
+        two-way one. Measured on the ground, 95% of ids carry to the next
+        frame and features live 300 frames; at night, on a low-texture scene,
+        the same configuration carried 30%. The depth gate and the affine's
+        own RANSAC are what stand behind it.
+        """
+        if not features:
+            self._dev_prev = None
+            return None, 0
+        cur = {int(f.id): (float(f.position.x), float(f.position.y))
+               for f in features}
+        prev = getattr(self, "_dev_prev", None)
+        self._dev_prev = cur
+        self.prev = img
+        if not prev:
+            self.n_seed = len(cur)
+            return None, len(cur)
+        shared = [i for i in cur if i in prev]
+        if len(shared) < self.min_tracks:
+            self.n_seed = len(cur)
+            return None, len(shared)
+        src = np.array([prev[i] for i in shared], np.float32).reshape(-1, 1, 2)
+        dst = np.array([cur[i] for i in shared], np.float32).reshape(-1, 1, 2)
+        self.pts = src
+        good = np.ones(len(shared), bool)
+        out = self._finish(img, dst, good, depth, derot_deg)
+        # _finish leaves self.pts as the surviving SOURCE points, which is
+        # what the host path carries into its next LK. The device keeps its
+        # own state, so the ids in _dev_prev are the carry and self.pts is
+        # only this frame's working set.
+        return out
+
     def step(self, img: np.ndarray, depth: np.ndarray | None = None,
              derot_deg=None):
         """Returns (median pixel shift, track count), or (None, n) if it failed.
@@ -686,6 +746,20 @@ class FlowTracker:
             return None, 0
         good = (st.ravel() == 1) & (st2.ravel() == 1) & \
                (np.linalg.norm(self.pts - p0r, axis=2).ravel() < 1.0)
+        return self._finish(img, p1, good, depth, derot_deg)
+
+    def _finish(self, img, p1, good, depth, derot_deg):
+        """Everything after the correspondences: depth gate, derotation, affine.
+
+        Split out so the device tracker can reach it. The OAK-D's own
+        FeatureTracker does the detect and the Lucas-Kanade on the Myriad
+        and hands back ids and positions, so the only part it replaces is
+        the head of step(); everything from the depth gate down has to be
+        the same code or the two paths are not comparable.
+
+        src is self.pts, dst is p1, and good selects the pairs that
+        survived whatever produced them.
+        """
         # One surface, if the stereo pair can tell us which one.
         self.depth_med_m = None
         self.depth_dropped = 0

@@ -94,7 +94,10 @@ print("\nBOTH cameras get the same rotation, or the veto eats the flight")
 # stopped, velocity was stale on 41% of rows and the aircraft dropped to
 # ALT_HOLD four times. Both cameras are bolted to one airframe.
 _calls = [ln for ln in node.split("\n") if "derot_deg=((_gr, _gp)" in ln]
-check("the rotation reaches BOTH trackers", len(_calls) == 2,
+# FOUR since 2 Nov: each tracker has a host path and a device path and the
+# rotation comes off on all four. Flight 163 is why this counts rather than
+# checking one call.
+check("the rotation reaches BOTH trackers on BOTH backends", len(_calls) == 4,
       f"{len(_calls)} call(s) pass it - primary and partner")
 _pi = node.index("self.tracker.step(")
 _pb = node.index("tracker_b.step(")

@@ -135,6 +135,12 @@ class LiveSource:
         dual_flow = (getattr(cfg, "dual_flow", False) if dual_flow is None
                      else bool(dual_flow))
         self.dual_flow = bool(dual_flow)
+        # See VpsConfig.flow_device for the measurement. The stream is built
+        # whether or not the trackers end up using it, because the decision
+        # belongs to the node and the pipeline is fixed once the device opens.
+        flow_gpu_device = bool(getattr(cfg, "flow_device", False))
+        device_features = int(getattr(cfg, "flow_device_features", 300))
+        self.flow_device = flow_gpu_device
         imu_rate = cfg.imu_rate if imu_rate is None else int(imu_rate)
         self.imu_rate = imu_rate
         # 921600, not 115200. TELEM2 flies at 921600 - SERIAL2_BAUD reads 921
@@ -197,6 +203,41 @@ class LiveSource:
                 xo = p.create(dai.node.XLinkOut)
                 xo.setStreamName(name)
                 m.out.link(xo.input)
+                # THE CAMERA'S OWN TRACKER, beside the image rather than
+                # instead of it: the frames still cross XLink because the map
+                # matcher and the frame writer both want them, and the
+                # FeatureTracker only adds ids and positions.
+                #
+                # Measured 2 Nov on this board: 1.7 ms of host CPU a frame
+                # against 62.4 for goodFeaturesToTrack plus two-way LK, 97%
+                # less, and two trackers fly so the host path ceilings at
+                # 8.02 Hz where this one is 292. The loop was measured at
+                # 9.06 Hz against a camera giving 24.7 fps.
+                #
+                # setHardwareResources(2, 2) is needed for more than 146
+                # features; 4 shaves is refused on this board. The defaults
+                # of the maintainer are the best setting measured - raising
+                # lostFeatureErrorThreshold kills features rather than
+                # keeping them, down to 5% carried at 5e7 - and the only
+                # knob worth moving is the minimum distance, 50 -> 15, which
+                # buys 40 features to 51 for nothing.
+                if flow_gpu_device:
+                    ft = p.create(dai.node.FeatureTracker)
+                    ft.setHardwareResources(2, 2)
+                    fcfg = ft.initialConfig
+                    fcfg.setCornerDetector(
+                        dai.FeatureTrackerConfig.CornerDetector.Type.HARRIS)
+                    fcfg.setNumTargetFeatures(int(device_features))
+                    fcfg.setMotionEstimator(True)
+                    fcfg.setOpticalFlow()
+                    _raw = fcfg.get()
+                    _raw.featureMaintainer.enable = True
+                    _raw.featureMaintainer.minimumDistanceBetweenFeatures = 15.0
+                    fcfg.set(_raw)
+                    m.out.link(ft.inputImage)
+                    xf = p.create(dai.node.XLinkOut)
+                    xf.setStreamName(name + "_feat")
+                    ft.outputFeatures.link(xf.input)
 
         # The camera's own gyro. 28 Sep moved derotation onto it because flow
         # error DOUBLES when the aircraft tilts - 0.81 m/step under 0.5 deg of
@@ -428,6 +469,15 @@ class LiveSource:
         # the 2.6 s stall all over again.
         self.q_partner = (self.dev.getOutputQueue("mono_partner", 4, False)
                           if self.dual_flow else None)
+        # The device tracker's own output, one list of ids and positions per
+        # frame. Depth 4 non-blocking like the images: features for a frame
+        # the loop has already passed are no use, and a queue that blocks is
+        # the 2.6 s stall again.
+        self.q_feat = (self.dev.getOutputQueue("mono_feat", 4, False)
+                       if self.flow_device else None)
+        self.q_feat_partner = (
+            self.dev.getOutputQueue("mono_partner_feat", 4, False)
+            if self.flow_device and self.dual_flow else None)
         self.fps = int(fps)
         # How many frames arrived with a usable partner, and how many partner
         # frames were thrown away for being too far from the primary in time.
@@ -548,6 +598,24 @@ class LiveSource:
             return float(x), float(y), float(z)
         v = self.R_imu2cam @ np.array([x, y, z], float)
         return float(v[0]), float(v[1]), float(v[2])
+
+    def _shift_features(self, feats):
+        """Device feature positions into the cropped frame's coordinates.
+
+        The FeatureTracker sees the full sensor image; everything downstream
+        sees it after crop_left. One subtraction, here, so no caller has to
+        remember. Features that fall inside the removed strip are dropped
+        rather than given a negative x.
+        """
+        c = int(getattr(self, "crop_left", 0) or 0)
+        if not c:
+            return list(feats)
+        out = []
+        for f in feats:
+            if f.position.x >= c:
+                f.position.x -= c
+                out.append(f)
+        return out
 
     def _crop(self, img):
         return img if self.crop_left <= 0 else img[:, self.crop_left:]
@@ -787,7 +855,38 @@ class LiveSource:
         gps = None
         if s.get("lat") not in (None, 0.0):
             gps = (s["lon"], s["lat"])
-        return dict(img=self._crop(fr.getCvFrame()), img_partner=img_partner,
+        # The device tracker's features for this frame, drained to the newest
+        # exactly as the images are. tryGet: a frame whose features have not
+        # arrived falls back to the host path for that step rather than
+        # waiting, which is the same rule the partner camera and depth live
+        # under.
+        #
+        # NOT cropped. crop_left shifts the image the host tracker sees, and
+        # these positions are in the FULL frame the device tracked - so the
+        # crop is subtracted here, once, rather than left for whoever reads
+        # them. Getting this wrong would be a constant offset in every shift,
+        # which is the kind of fault that looks like a mount angle.
+        feats = feats_partner = None
+        if self.q_feat is not None:
+            pk = self.q_feat.tryGet()
+            while True:
+                nxt = self.q_feat.tryGet()
+                if nxt is None:
+                    break
+                pk = nxt
+            if pk is not None:
+                feats = self._shift_features(pk.trackedFeatures)
+        if self.q_feat_partner is not None:
+            pk = self.q_feat_partner.tryGet()
+            while True:
+                nxt = self.q_feat_partner.tryGet()
+                if nxt is None:
+                    break
+                pk = nxt
+            if pk is not None:
+                feats_partner = self._shift_features(pk.trackedFeatures)
+        return dict(feats=feats, feats_partner=feats_partner,
+                    img=self._crop(fr.getCvFrame()), img_partner=img_partner,
                     alt=s["alt_rel"], yaw=s["yaw"],
                     alt_amsl=s.get("alt_amsl"), rngfnd=s.get("rngfnd"),
                     gps1_alt=s.get("gps1_alt"), gps1_fix=s.get("fix"),
@@ -2654,9 +2753,19 @@ class VpsNode:
             self.n_frame_stale = getattr(self, "n_frame_stale", 0) + 1
             d, ntrk = None, 0
         else:
-            d, ntrk = self.tracker.step(
-                f["img"], depth=f.get("depth"),
-                derot_deg=((_gr, _gp) if _use_pp else None))
+            # The camera's own tracker when it gave features for this frame,
+            # the host's when it did not. Per frame, not per flight: a frame
+            # whose features were late must not stop the flow, and the two
+            # paths share everything from the depth gate down.
+            _fe = f.get("feats")
+            if _fe:
+                d, ntrk = self.tracker.step_device(
+                    f["img"], _fe, depth=f.get("depth"),
+                    derot_deg=((_gr, _gp) if _use_pp else None))
+            else:
+                d, ntrk = self.tracker.step(
+                    f["img"], depth=f.get("depth"),
+                    derot_deg=((_gr, _gp) if _use_pp else None))
         # THE SECOND CAMERA. Averaged into the first when both produced a
         # shift on this frame; ignored entirely when it did not, so a partner
         # that drops out costs nothing but the averaging.
@@ -2682,9 +2791,25 @@ class VpsNode:
             # on 41% of rows, and the aircraft dropped to ALT_HOLD four
             # times. Both cameras are on one airframe and turn together;
             # whatever is removed from one is removed from the other.
-            db, ntrk_b = tracker_b.step(
-                f["img_partner"], depth=f.get("depth"),
-                derot_deg=((_gr, _gp) if _use_pp else None))
+            # BOTH CAMERAS ON ONE BACKEND, or flow_disagree_px stops meaning
+            # what it means. Flight 163 is the lesson: the primary was
+            # derotated per track and the partner was not, and the gap
+            # between them became the rotation - p50 0.06 px to 2.32, the
+            # veto on 95% of frames, four ALT_HOLDs. A primary on the device
+            # and a partner on the host would be the same mistake wearing a
+            # different hat, so the partner follows whatever the primary just
+            # used on THIS frame.
+            _fb = f.get("feats_partner") if _fe else None
+            if _fb:
+                db, ntrk_b = tracker_b.step_device(
+                    f["img_partner"], _fb, depth=f.get("depth"),
+                    derot_deg=((_gr, _gp) if _use_pp else None))
+            elif _fe:
+                db, ntrk_b = None, 0
+            else:
+                db, ntrk_b = tracker_b.step(
+                    f["img_partner"], depth=f.get("depth"),
+                    derot_deg=((_gr, _gp) if _use_pp else None))
             if d is not None and db is not None and (ntrk + ntrk_b) > 0:
                 self.flow_disagree_px = float(np.hypot(*(np.asarray(db, float)
                                                          - np.asarray(d, float))))

@@ -275,6 +275,35 @@ class VpsConfig:
     # back.
     camera_yaw_offset_deg: float = 0.0
 
+    # THE FLOW RUNS ON THE CAMERA. Measured 2 Nov, same camera, same
+    # resolution, 20 s each:
+    #
+    #     host: goodFeatures + two-way LK   62.4 ms CPU/frame   1.85 cores
+    #     device: FeatureTracker             1.7 ms CPU/frame   0.05 cores
+    #
+    # 97% less. Two trackers fly, so the host ceilings at 8.02 Hz and the
+    # device at 292 - and the loop measured 9.06 Hz against a camera giving
+    # 24.7 fps, with the map matcher already in its own process and so not
+    # the cause. Frames are what the velocity is made of: on flight 382 the
+    # phantom was +0.770 m/s p50 where under 3 frames a second were dropped
+    # and +3.705 where 6 to 10 were.
+    #
+    # WHAT IT COSTS. The device holds about 51 features against the 300 we
+    # ask the host for. Scored on 962 of flight 382's saved frames against
+    # the 300-corner answer on the same pair, 51 features is our 100-corner
+    # setting: 90% of pairs answered against 97%, shift 0.633 px from the
+    # 300 answer - and 600 corners differs from 300 by 0.491 px, so most of
+    # that is the floor of the comparison rather than a disagreement.
+    #
+    # AND WHAT IS NOT MEASURED. There is no forward-backward check on the
+    # device path; the maintainer drops a feature on its own tracking error
+    # instead, which is a different test. On the ground in daylight 95% of
+    # ids carry to the next frame and features live 300 frames; at night, on
+    # a low-texture scene, the same configuration carried 30%. Nothing here
+    # has flown, and the air is neither of those scenes.
+    flow_device: bool = False
+    flow_device_features: int = 300
+
     # THE FLOW RUNS ON THE GPU. Measured on two real 1280x800 frames from
     # flight 382, 300 corners, 31 px window, 4 levels, forward and backward:
     #
