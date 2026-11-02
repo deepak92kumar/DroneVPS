@@ -3095,8 +3095,19 @@ class VpsNode:
                 self.n_derot_both += 1
             else:
                 self.derot_dis_roll = self.derot_dis_pitch = None
+            # THE MOUNT OFFSET, which this path never had. Until 2 Nov
+            # camera_yaw_offset_deg went only to the map matcher's submit
+            # below; shift_to_ne got the raw FC yaw, so the camera's rotation
+            # relative to the airframe rotated every metre of flow straight
+            # into the position. Measured three independent ways and they
+            # agree to 0.1 deg: +4.32 on flight 406, +4.41 on 418, and +4.42
+            # from sliding the aircraft on the ground - north leg +3.04,
+            # south leg +5.29. Applying -4.42 to the slide leaves -1.38 and
+            # +0.87. Worth 8.6 m of 406's 88.7 m, 1.6 of 418's 14.5 - about
+            # 6-11% of the drift, systematic and growing with distance.
             dn, de = shift_to_ne(d, altitude_m=f["alt"], focal_px=self.focal,
-                                 yaw_deg=f["yaw"], focal_y_px=self.focal_y)
+                                 yaw_deg=f["yaw"] + self.cam_yaw_offset_deg,
+                                 focal_y_px=self.focal_y)
             # ONE decision for both consumers. Until 21 Oct predict() ran here
             # unconditionally and push_flow() below could then refuse the same
             # displacement on its own physical gate - so the position swallowed

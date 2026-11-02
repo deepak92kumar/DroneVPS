@@ -353,7 +353,20 @@ class VpsConfig:
     # andar, -1.95 se 8/20) - par dono matcher ki aapsi sehmati -1.95 par
     # behtar thi (7.0 m vs 13.9 m), aur wahi wo number hai jo 27 Oct ko 2.0 m
     # tha. Flow ki derotation bhi isi offset se hoti hai.
-    camera_yaw_offset_deg: float = -1.95
+    # 2 NOV: -1.95 -> -4.42, MEASURED, for the mount rebuilt after 27 Oct.
+    # -1.95 was the old mount's number and had been restored by hand.
+    #
+    # Three independent measurements, agreeing to 0.1 deg:
+    #     flight 406, 814 s with full rotations      +4.32
+    #     flight 418, 493 s                          +4.41
+    #     sliding the aircraft on the ground         +4.42
+    # and the slide's two legs agree on their own - north +3.04, south +5.29.
+    # Applying -4.42 to that slide leaves -1.38 and +0.87 deg.
+    #
+    # It had never reached the flow at all: shift_to_ne took the raw FC yaw
+    # while only the matcher's submit added this. So the value this replaces
+    # was not wrong so much as unused on the path that matters.
+    camera_yaw_offset_deg: float = -4.42
 
     # THE FLOW RUNS ON THE CAMERA. Measured 2 Nov, same camera, same
     # resolution, 20 s each:

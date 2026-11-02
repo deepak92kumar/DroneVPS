@@ -58,8 +58,8 @@ check("the field exists", hasattr(c, "camera_yaw_offset_deg"))
 # 13.9 m at 0.00, and 2.0 m is what 27 Oct recorded. The offset is not proven
 # to matter for position; it is being restored because the flight that worked
 # had it and because flow derotation reads the same number.
-check("it is the measured mount offset the working flights used",
-      abs(c.camera_yaw_offset_deg + 1.95) < 1e-9,
+check("it is the measured mount offset for the rebuilt mount",
+      abs(c.camera_yaw_offset_deg + 4.42) < 1e-9,
       f"{c.camera_yaw_offset_deg} deg")
 check("and it is a mount angle, not a large correction",
       abs(c.camera_yaw_offset_deg) < 10.0,
@@ -73,12 +73,32 @@ check("the submit call carries it",
 check("it is read from the config, not written in the node",
       "self.cam_yaw_offset_deg = float(_c.camera_yaw_offset_deg)" in src)
 
-print("\nthe flow's own yaw rotation is left alone, on purpose")
-check("shift_to_ne still gets the raw heading",
-      'yaw_deg=f["yaw"],' in src,
-      "the same offset should physically apply there too, but measuring it "
-      "from flow direction against the receiver gave +3.05/+6.21/-1.19/+5.43 "
-      "deg with an IQR of 15-49 - the phantom swamps it")
+print("\nthe flow path gets it too - 2 Nov, and why this check reversed")
+# This file used to assert the OPPOSITE: that shift_to_ne keeps the raw
+# heading, because measuring the offset from flow direction against the
+# receiver gave +3.05/+6.21/-1.19/+5.43 deg with an IQR of 15-49 and the
+# phantom swamped it. That reasoning was sound and the conclusion was wrong -
+# the noise was in the METHOD, not in the offset.
+#
+# Sliding the aircraft along a known line on the ground removes every source
+# of that noise: no GPS smoothing, no altitude, no phantom. North leg +3.04,
+# south leg +5.29, weighted +4.42 - and the two whole-flight weighted means,
+# unfiltered, had said +4.32 and +4.41 all along.
+# 2 NOV: the offset has to reach BOTH paths. Until today shift_to_ne took the
+# raw FC yaw and only the matcher's submit added camera_yaw_offset_deg, so
+# the mount's rotation went straight into every metre of flow - and nothing
+# caught it because no test compared the two call sites.
+print("\nthe flow path gets it too, not only the matcher")
+check("shift_to_ne is given the offset",
+      'yaw_deg=f["yaw"] + self.cam_yaw_offset_deg,\n'
+      '                                 focal_y_px=self.focal_y)' in src)
+check("the matcher still gets it",
+      'yaw_deg=f["yaw"] + self.cam_yaw_offset_deg,' in src)
+check("no call site is left on the raw yaw",
+      'yaw_deg=f["yaw"],' not in src)
+check("and the value is the measured one",
+      abs(c.camera_yaw_offset_deg + 4.42) < 1e-9,
+      f"{c.camera_yaw_offset_deg} deg")
 
-print("\n" + ("ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}"))
+print("\nALL PASS" if not fails else f"\n{len(fails)} FAILED: {', '.join(fails)}")
 sys.exit(1 if fails else 0)
