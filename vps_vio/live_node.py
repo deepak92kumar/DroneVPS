@@ -599,6 +599,25 @@ class LiveSource:
         v = self.R_imu2cam @ np.array([x, y, z], float)
         return float(v[0]), float(v[1]), float(v[2])
 
+    def close(self):
+        """Close the OAK-D, so its watchdog does not have to.
+
+        dai.Device is held raw here rather than in a with-block, because the
+        source outlives any one scope. That makes closing someone's job, and
+        until 2 Nov it was nobody's: every stop left the device running and
+        its watchdog reset it 1.5 s later, writing a crash dump that the next
+        run reported as its own.
+
+        Safe to call twice, and safe when the device never opened.
+        """
+        dev, self.dev = getattr(self, "dev", None), None
+        if dev is None:
+            return
+        try:
+            dev.close()
+        except Exception:
+            pass
+
     def _shift_features(self, feats):
         """Device feature positions into the cropped frame's coordinates.
 
@@ -3180,7 +3199,31 @@ class VpsNode:
         self.worker.stop()
 
 
+def _exit_on_sigterm(signum, frame):
+    """Turn systemd's SIGTERM into a normal exit, so the finally blocks run.
+
+    WITHOUT THIS THE CAMERA IS NEVER CLOSED. Python's default SIGTERM ends
+    the process outright - no exception, no finally - so dai.Device is
+    abandoned with its pipeline running. The device's watchdog then fires
+    1.5 s later and writes a crash dump, which the NEXT connection reports:
+    that is the "Device has crashed" line that appears at the START of a run
+    and belongs to the previous one.
+
+    Seen on every single stop. The dumps say it plainly - the last healthy
+    line is "WD:1876 TX:89394201" and the next is "WD:1360 TX:0", the host
+    gone and the countdown running out - and they go back to 22 Oct, which
+    is as far as the cache does.
+
+    It also explains why bringing the node back needs the 03e7:2485 dance:
+    a device that reset itself is re-enumerating while the next process is
+    already asking for it.
+    """
+    raise SystemExit(0)
+
+
 def main():
+    import signal
+    signal.signal(signal.SIGTERM, _exit_on_sigterm)
     ap = argparse.ArgumentParser()
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--replay", help="recorded flight folder")
@@ -3966,8 +4009,20 @@ def main():
                       + (f"  err {err:6.1f} m" if err is not None else ""), flush=True)
     except KeyboardInterrupt:
         print("\nstopped")
+    except SystemExit:
+        print("\nstopped (SIGTERM)")
     finally:
         node.stop()
+        # THE CAMERA, FIRST, and before anything that can block. An
+        # abandoned dai.Device is what the watchdog kills, and a watchdog
+        # reset is what makes the next start slow and uncertain. Closing it
+        # is also what lets the file writers below take their time safely.
+        _close = getattr(src, "close", None)
+        if _close is not None:
+            try:
+                _close()
+            except Exception as exc:
+                print(f"camera close: {type(exc).__name__}: {exc}", flush=True)
         if fwriter is not None:
             # Before the CSV closes, and bounded: queued frames get a few
             # seconds to land, and then we stop regardless. A node that hangs
