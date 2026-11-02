@@ -639,6 +639,11 @@ class LiveSource:
     def _crop(self, img):
         return img if self.crop_left <= 0 else img[:, self.crop_left:]
 
+    # How long read() will wait for a frame before giving up and letting
+    # systemd reopen the camera. 2 s is 50 frames at 25 fps; the longest
+    # legitimate gap ever recorded on this camera is 810 ms.
+    FRAME_WAIT_MAX_S = 2.0
+
     def read(self):
         # THE NEWEST FRAME, NOT THE OLDEST, and the age is carried with it.
         #
@@ -654,7 +659,28 @@ class LiveSource:
         #
         # The pilot put it plainly: old frames make the FC run more, so throw
         # the stale ones away and act on the latest.
-        fr = self.q.get()
+        # BOUNDED. This was a blocking q.get() with no timeout, and that is
+        # how the node wedged on 2 Nov: the camera stopped delivering, get()
+        # never returned, and the process sat at 216% CPU with systemctl
+        # still reporting "active" while the CSV stayed frozen at t=300.65
+        # for two minutes. Restart= cannot see that, because nothing
+        # crashed.
+        #
+        # A frame later than this is no use to anyone - the flow baseline
+        # and the velocity are both built on frame-to-frame continuity - so
+        # the wait is bounded and a timeout ENDS THE RUN. main() breaks on a
+        # None and the unit exits cleanly, systemd restarts it in 5 s, and
+        # reopening the camera is the only thing that fixes a camera that
+        # has stopped.
+        deadline = time.monotonic() + self.FRAME_WAIT_MAX_S
+        fr = self.q.tryGet()
+        while fr is None:
+            if time.monotonic() > deadline:
+                print(f"CAMERA: no frame for {self.FRAME_WAIT_MAX_S:.1f}s - "
+                      f"ending the run so systemd can reopen it", flush=True)
+                return None
+            time.sleep(0.002)
+            fr = self.q.tryGet()
         while True:
             nf = self.q.tryGet()
             if nf is None:
