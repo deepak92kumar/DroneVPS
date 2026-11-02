@@ -492,6 +492,10 @@ class LiveSource:
         # Anchor for turning the camera's device clock into an age. Set on
         # the first frame; only the DIFFERENCE is ever used, so the two
         # clocks never have to agree about absolute time.
+        # The window the clock offset is tracked over. 250 frames is 10 s at
+        # 25 fps - long enough that a genuinely late burst cannot define the
+        # minimum, short enough to follow the drift.
+        self._clk_off = collections.deque(maxlen=250)
         self._dev_t0 = None
         self._dev_ts0 = None
         self._partner_last = None
@@ -690,13 +694,33 @@ class LiveSource:
         try:
             ts = fr.getTimestampDevice().total_seconds()
             now = time.monotonic()
-            if self._dev_t0 is None:
-                # First frame anchors the two clocks against each other. Only
-                # the difference is ever used, so they never have to agree
-                # about absolute time - and this frame's own age is unknown,
-                # which is honest: it reads 0.
-                self._dev_t0, self._dev_ts0 = now, ts
-            self._frame_age_s = max(0.0, (now - self._dev_t0) - (ts - self._dev_ts0))
+            # A ROLLING clock offset, not a fixed anchor on the first frame.
+            #
+            # 2 NOV. The anchored form measured CLOCK DRIFT, not frame age.
+            # The host's monotonic clock and the camera's device clock run at
+            # slightly different rates - about 0.05% on this pair - so
+            # (now - t0) - (ts - ts0) walks away from zero at roughly
+            # 0.5 ms per second no matter how fresh the frames are. Run 418
+            # climbed 0.0000 -> 0.3492 s over 495 s in a straight line, and
+            # run 406 FELL 0.2467 -> 0.0000 over 815 s, which is the drift
+            # running the other way. Real latency does not do either, and it
+            # certainly does not sit at exactly 0.0000 for 11% of a flight -
+            # that is the max(0.0, ...) clamp hiding the negative half.
+            #
+            # frame_age_max_s gates the flow on this number, so 8339 of
+            # 12160 rows in 418 were over its 0.12 s limit. (Only 5 of them
+            # actually lost their flow step, so the gate and this column
+            # disagree about something else as well - that is recorded in
+            # FLIGHT_2026-11-02.md and is not fixed here. What IS fixed is
+            # that the number now means what its name says.)
+            #
+            # The minimum of (now - ts) over a window is the best estimate of
+            # the true offset: the fastest frame in the window is the one that
+            # waited least, so anything above that minimum is this frame's own
+            # extra lateness. It tracks drift because the window moves.
+            d = now - ts
+            self._clk_off.append(d)
+            self._frame_age_s = max(0.0, d - min(self._clk_off))
         except Exception:
             self._frame_age_s = 0.0
         # tryGet, never get: the mono frame is what the flow loop is waiting on,
@@ -1154,6 +1178,8 @@ class GpsInputSender:
         # 47.7 m/s during a 106 m hover, and it is the 54% row that the 13 Oct
         # report still calls the largest open fault.
         self.send_velocity = bool(send_velocity)
+        self.vel_send_max_alt_m = float(getattr(_vps_config(),
+                                                "vel_send_max_alt_m", 15.0))
         # 10 Hz since 1 Nov. It was 4.3, "which is what logs 00000191 and
         # 00000194 actually carried" - a figure copied from what the old
         # configuration happened to do, never one that was chosen.
@@ -1213,6 +1239,22 @@ class GpsInputSender:
         ign = self.IGN_VEL_VERT
         if not self.send_velocity:
             return ign | self.IGN_VEL_HORIZ | self.IGN_SPEED_ACC, 0.0, 0.0, 0.0, "off"
+        # ALTITUDE DECIDES, not a flight-wide switch. See
+        # VpsConfig.vel_send_max_alt_m: the sent velocity's measured p90
+        # against gps1 is 0.63 m/s below 15 m and 1.12 by 25 m, and EKF3
+        # calls a GPS bad once its low-passed speed accuracy passes about
+        # 1.0 - so above this height an honest declaration is itself the
+        # thing that trips the glitch that took LOITER away five times on
+        # log 116. Below it, the declaration stays under the threshold and
+        # the aircraft gets its damping back.
+        _alt = None if vel is None else getattr(vel, "altitude_m", None)
+        # getattr, like n_frame_stale below: the velocity tests build a
+        # GpsInputSender without running __init__ so that nothing opens a
+        # serial port, and a bare attribute read breaks them.
+        _max_alt = float(getattr(self, "vel_send_max_alt_m", 15.0))
+        if _alt is not None and float(_alt) > _max_alt:
+            return (ign | self.IGN_VEL_HORIZ | self.IGN_SPEED_ACC, 0.0, 0.0,
+                    0.0, f"above {_max_alt:.0f} m ({float(_alt):.0f} m)")
         if vel is None:
             return ign | self.IGN_VEL_HORIZ | self.IGN_SPEED_ACC, 0.0, 0.0, 0.0, "no estimate"
         if not vel.valid:
@@ -1435,6 +1477,24 @@ CSV_COLUMNS = ["t", "north_m", "east_m", "lon", "lat", "sigma_m",
     # frame. Two independent looks at the same ground is the first thing this
     # project has had that BOUNDS the flow's noise instead of inferring it.
     "flow_disagree_px", "flow_dual", "frame_age_s", "frames_skipped",
+    # n_flow_vetoed: frames whose two cameras disagreed by more than
+    # flow_disagree_max_px, so the step was thrown away. Counted since the
+    # gate was written and never recorded either. It is the companion of
+    # n_frame_stale and the reason both are here is the same: on 2 Nov the
+    # only way to find out that this gate had eaten 48% of run 411's flow -
+    # taking it from 20.3 Hz to 10.7 and doubling the velocity error - was to
+    # infer it from an empty derot_src column.
+    #
+    # It is logged next to flow_disagree_px on purpose: the pair says how
+    # often the gate fired AND how far apart the cameras were when it did,
+    # which is what any future change to the threshold has to be argued from.
+    "n_flow_vetoed",
+    # n_frame_stale: how many frames the age gate has thrown away so far.
+    # It was counted and never written anywhere - not to the CSV, not to the
+    # end-of-run summary - which is why it took a whole day on 2 Nov to notice
+    # that 8339 frames were over the limit and only 5 lost their step. A
+    # counter nobody can read is not a counter.
+    "n_frame_stale",
     "n_dr", "src", "rngfnd_m", "rngfnd_zero_m", "alt_amsl_m",
     # The saved image for THIS row, or empty on the rows where no
     # frame was saved (most of them - the gate saves a couple a
@@ -1593,6 +1653,12 @@ def csv_row(est, f, v, gN, gE, err):
             "1" if est.get("flow_dual") else "0",
             "" if est.get("frame_age_s") is None else f"{est['frame_age_s']:.4f}",
             est.get("frames_skipped") or 0,
+            est.get("n_flow_vetoed") or 0,
+            # Position matters: COLUMNS is positional and n_frame_stale was
+            # inserted directly after frames_skipped. On 20 Oct seven columns
+            # went into the row and not the header and every row was silently
+            # the wrong width; this is the same mistake waiting to happen.
+            est.get("n_frame_stale") or 0,
             est["n_dr"],
             est.get("src") or "",
             "" if f.get("rngfnd") is None else f"{f['rngfnd']:.2f}",
@@ -3234,6 +3300,8 @@ class VpsNode:
                     flow_disagree_px=getattr(self, "flow_disagree_px", None),
                     frame_age_s=f.get("frame_age_s"),
                     frames_skipped=f.get("frames_skipped"),
+                    n_flow_vetoed=getattr(self, "n_flow_vetoed", 0),
+                    n_frame_stale=getattr(self, "n_frame_stale", 0),
                     flow_dual=(tracker_b is not None
                                and f.get("img_partner") is not None),
                     derot_src=("gyro" if self.n_derot_gyro > _dg
@@ -4160,6 +4228,13 @@ def main():
               f"({100.0 * node.n_derot_gyro / tot:.1f}% gyro)")
         print("  " + node.val_gyro.describe())
         print("  " + node.val_quat.describe())
+    # The two gates, in the end-of-run summary as well as the CSV. A counter
+    # that only exists inside a row nobody opens is barely better than one
+    # that exists nowhere - this is the line that would have said, on 2 Nov,
+    # that the age gate had fired 8339 times or not at all.
+    print(f"gates: flow vetoed (cameras disagreed) "
+          f"{getattr(node, 'n_flow_vetoed', 0)}, frames too old "
+          f"{getattr(node, 'n_frame_stale', 0)}, of {n} frames")
     if _frame_err_total:
         kinds = ", ".join(f"{k} x{v}" for k, v in
                           sorted(_frame_err_kinds.items(), key=lambda kv: -kv[1]))

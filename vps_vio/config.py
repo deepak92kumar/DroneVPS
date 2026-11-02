@@ -105,6 +105,35 @@ class VpsConfig:
     #
     # --no-send-vel on the command line still forces this off whatever is
     # set here; this is the setting that travels with the repo.
+    # Where velocity may be sent AT ALL, when send_velocity is on.
+    #
+    # 2 NOV, measured across runs 238, 406, 411 and 418 - the error of what
+    # the bridge actually SENT against gps1's own ground velocity, per axis:
+    #
+    #     altitude      n      p50     p90    we declare
+    #      2-15 m     3996    0.20    0.63      1.01
+    #     15-25 m     6859    0.40    1.12      1.56
+    #     25-40 m     7195    0.64    1.83      2.16
+    #     40-55 m     3133    0.85    2.78      2.88
+    #     55-75 m     8686    1.67    4.11      3.72
+    #
+    # Two things follow. The declaration 0.6 + 0.048 x alt is HONEST - it
+    # sits at 0.9x to 1.6x of the measured p90 and is never dangerously
+    # optimistic, so there is nothing to fix there and nothing to shade. And
+    # the real error only stays inside EKF3's ~1.0 m/s GPS-quality threshold
+    # BELOW ABOUT 15 m.
+    #
+    # So velocity is not something to turn on or off for the whole flight. It
+    # is good near the ground and it is noise at height, and the altitude is
+    # the thing that decides. Below this the declaration stays under the
+    # threshold and calcGpsGoodForFlight() cannot be tripped; above it
+    # nothing is sent, which is what send_velocity = False did everywhere.
+    #
+    # This is what the aircraft gets back by turning velocity on again at
+    # low altitude: damping on approach and in a low hover, where a position
+    # controller with no velocity aiding is at its worst.
+    vel_send_max_alt_m: float = 15.0
+
     send_velocity: bool = False
 
     send_rate_hz: float = 20.0     # how often we push VISION_POSITION_ESTIMATE

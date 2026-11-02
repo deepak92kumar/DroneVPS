@@ -101,9 +101,18 @@ check("and nothing goes on the wire", bool(ign & S.IGN_VEL_HORIZ) and vn == 0.0,
 # because the bridge cannot know the aircraft is hovering - that is the EKF's
 # job with the speed accuracy we declare. What must NOT happen is it arriving
 # with a confident accuracy.
+#
+# 2 NOV: the altitude is now 10 m, not 106. Velocity is only sent below
+# vel_send_max_alt_m, because above that the measured per-axis p90 against
+# gps1 passes EKF3's own ~1.0 m/s GPS-quality threshold and an HONEST
+# declaration is then the thing that marks us a glitching GPS - which took
+# LOITER away five times on log 116. At 106 m the answer now is "not sent at
+# all", so testing the declaration there tests nothing. The question this
+# case exists to ask - is an absurd speed declared rather than asserted - is
+# the same at 10 m.
 b3 = VelocityBridge()
 b3.push_flow(0.0, 25.0, 0.0)
-ign3, vn3, _, acc3, why3 = mk().velocity_fields(b3.value(0.0, 106.0))
+ign3, vn3, _, acc3, why3 = mk().velocity_fields(b3.value(0.0, 10.0))
 check("25 m/s passes but is declared, not asserted",
       not (ign3 & S.IGN_VEL_HORIZ) and acc3 >= 0.4,
       f"vn {vn3:.1f} acc {acc3:.2f} why={why3}")
