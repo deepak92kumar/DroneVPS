@@ -28,7 +28,13 @@ def check(name, ok, detail=""):
 c = VpsConfig()
 print("the offset is configured, and it is the measured sign")
 check("the field exists", hasattr(c, "camera_yaw_offset_deg"))
-check("it is the measured value", abs(c.camera_yaw_offset_deg + 1.95) < 1e-9,
+# 3 NOV: -1.95 -> -4.42, at the pilot's word. -1.95 was measured on logs 240
+# and 242, on the mount as it stood then; the mount was rebuilt after 27 Oct,
+# so that number describes hardware that no longer exists. -4.42 was measured
+# three separate ways on the mount as it is now. The sign check below is
+# untouched and still the thing that matters, because positive halved the fix
+# count on both of those flights.
+check("it is the measured value", abs(c.camera_yaw_offset_deg + 4.42) < 1e-9,
       f"{c.camera_yaw_offset_deg} deg")
 check("NEGATIVE - positive halved the fix count on both flights",
       c.camera_yaw_offset_deg < 0)

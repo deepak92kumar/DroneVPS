@@ -250,7 +250,18 @@ class VpsConfig:
     # against the receiver gave +3.05, +6.21, -1.19, +5.43 deg across three
     # flights with an interquartile spread of 15-49 deg - the phantom
     # velocity swamps it. One place at a time, where it is measured.
-    camera_yaw_offset_deg: float = -1.95
+    # 3 NOV, at the pilot's word: -1.95 -> -4.42. The mount was rebuilt after
+    # 27 Oct, so -1.95 describes a mount that no longer exists. -4.42 was
+    # measured three separate ways on the mount as it stands.
+    #
+    # ON THIS CODE IT REACHES ONE CONSUMER ONLY. Of the three places a
+    # camera-frame measurement is rotated into north-east, only the map
+    # matcher adds it (worker.submit, "f[yaw] + self.cam_yaw_offset_deg").
+    # shift_to_ne, which turns the flow into the position AND the velocity,
+    # and accel_to_ne, which dead-reckons between flow updates, both still
+    # pass the raw f["yaw"]. So this changes where the matcher looks on the
+    # sheet and nothing else.
+    camera_yaw_offset_deg: float = -4.42
 
     fix_period_s: float = 2.0      # 5 Oct: 0.4 -> 2.0 s. At 0.4 s the map pushed
                                    # a STATIONARY aircraft at 1.18 m/s above 80 m
