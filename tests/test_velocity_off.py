@@ -70,8 +70,21 @@ vf = next(n for n in ast.walk(tree)
 first_if = next((n for n in vf.body if isinstance(n, ast.If)), None)
 check("the FIRST branch in velocity_fields is the send_velocity refusal",
       first_if is not None and "send_velocity" in ast.dump(first_if.test))
-check("and it sets both ignore flags when it does",
-      "IGN_VEL_HORIZ | self.IGN_SPEED_ACC" in src)
+# 3 NOV, REVERSED. This used to require that the refusal set
+# IGN_VEL_HORIZ | IGN_SPEED_ACC, and that requirement was wrong, because
+# ArduPilot does not read those flags the way this file assumed.
+# AP_GPS_MAV::handle_msg assigns the velocity only inside
+# "if (have_vel_h) { state.velocity = vel; }" - there is no else and nothing
+# clears it - so the flag freezes the previous velocity rather than
+# withholding one, and with none ever sent the frozen value is (0,0,0).
+# Flight 00000118 is the proof: 200/200 GPS2 samples reported 0.000 m/s on a
+# leg flown at 26.7-36.1 m, above this very gate, while the aircraft really
+# did p50 1.44 and max 6.65 m/s. So the flag asserted a stationary aircraft.
+check("the refusal does NOT set the horizontal ignore flag",
+      "IGN_VEL_HORIZ | self.IGN_SPEED_ACC" not in src,
+      "setting it freezes a zero velocity, it does not withhold one")
+check("the refusal holds the last real measurement instead",
+      "def _hold(" in src and "_last_real_vel" in src)
 
 print("\nposition is untouched - that is the whole point")
 check("horiz_accuracy still carries the fuser's sigma",

@@ -460,7 +460,42 @@ class LiveSource:
                 print(f"*** could not read {STEREO_PARTNER_NAME} intrinsics "
                       f"({e}) - dual flow is OFF ***")
                 self.dual_flow = False
-        self.dev.startPipeline(p)
+        # VALIDITY CHECK AND BACKOFF, because the bare call has failed 145
+        # times in this log's history with
+        #     RuntimeError: Device already closed or disconnected:
+        #                   Input/output error
+        # and every one of those killed the process. systemd restarts in 5 s,
+        # the camera is still gone, and it dies again - a crash loop. That
+        # loop is what was running through BOTH flights of 3 Nov: the node
+        # restarted mid-air at 09:09:49 and again at 09:13:46, the second one
+        # 43 s before the pilot switched to the VPS.
+        #
+        # This does not fix a broken USB link - nothing in software can. What
+        # it fixes is the node burning the camera's recovery window by
+        # hammering it: a device that has just dropped off the bus needs a
+        # moment to re-enumerate, and five tries over fifteen seconds give it
+        # that, while a crash loop never does. If the device is genuinely
+        # gone, this still exits - and says so once, clearly, rather than in
+        # 145 identical tracebacks.
+        _last = None
+        for _try in range(5):
+            try:
+                self.dev.startPipeline(p)
+                if _try:
+                    print(f"camera pipeline started on attempt {_try + 1}",
+                          flush=True)
+                break
+            except Exception as exc:
+                _last = exc
+                print(f"camera pipeline attempt {_try + 1}/5 failed: "
+                      f"{type(exc).__name__}: {exc}", flush=True)
+                if _try < 4:
+                    time.sleep(3.0)
+        else:
+            raise RuntimeError(
+                f"camera did not start after 5 attempts over 15 s "
+                f"({type(_last).__name__}: {_last}). The USB link is the "
+                f"thing to look at, not this process.") from _last
         self.q = self.dev.getOutputQueue("mono", 4, False)
         # The partner's frames, when dual flow is on. Depth 2 and blocking
         # False, like the depth queue: if the partner ever falls behind, the
@@ -1148,8 +1183,28 @@ class GpsInputSender:
     # about how bad it is. The velocity itself is still noise proportional to
     # height, and the fix for that is a longer measurement baseline, not a
     # number here.
+    # 3 NOV: these two stay at 0.6 / 0.048. I refitted them to 0.25 / 0.038
+    # against runs 431/432, where the per-axis p90 against gps1 is only 0.29
+    # below 15 m, and test_velocity_altitude caught it: the lower pair
+    # under-declares three RECORDED rows - 0.44 against a measured 0.56 at
+    # 5 m, 1.58 against 2.09 at 35 m, 3.18 against 4.19 at 77 m. Today's
+    # camera is genuinely about 2.4x better than the thirteen-flight hover
+    # sigma, but a mount degrades and these rows are real flights, so the
+    # declaration covers the worst credible case, not the best measured one.
+    #
+    # The consequence is the whole reason vel_send_max_alt_m exists. With a
+    # 0.6 floor the declaration passes EKF3's ~1.0 m/s speed-accuracy wall
+    # at 8.3 m, so velocity can only be SENT below that; above it both
+    # ignore flags go up and no speed accuracy is declared at all, which is
+    # what keeps our position trusted instead of glitch-flagged.
     VEL_ACC_FLOOR = 0.6
     VEL_ACC_PER_M = 0.048
+    # The widest uncertainty worth declaring. It is max_sent_mps, because a
+    # value we have no current measurement for could be anything the airframe
+    # can do, and the existing capped-sample rule already declares the
+    # ceiling for the same reason. Only reached when nothing has been
+    # measured yet or a held estimate has gone very stale.
+    VEL_HOLD_MAX_ACC = 6.0
     # The vertical accuracy the working flights declared: a constant 3.0 m
     # (GPA.VAcc is exactly 3.00 throughout logs 00000191 and 00000194). It had
     # been sigma_m * 2 here, which at a typical sigma of 21 m declares 42 m of
@@ -1218,6 +1273,20 @@ class GpsInputSender:
         return False if msg is None else bool(
             msg.base_mode & self.mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
 
+    def _remember_real_vel(self, vel):
+        """Keep the last velocity we actually measured, for velocity_fields.
+
+        A tuple rather than the bridge's object so nothing downstream can
+        mutate it under us, and with the wall clock alongside so the declared
+        accuracy can widen by age while it is being held.
+        """
+        try:
+            self._last_real_vel = (float(vel.sent_vn), float(vel.sent_ve),
+                                   time.time(),
+                                   float(getattr(vel, "altitude_m", 0.0) or 0.0))
+        except (TypeError, ValueError, AttributeError):
+            pass
+
     def velocity_fields(self, vel):
         """Decide what to tell the FC about velocity, and say so explicitly.
 
@@ -1228,41 +1297,100 @@ class GpsInputSender:
         00000195.BIN. Height comes from the lidar below 60 m and the barometer
         above it.
 
-        Horizontal velocity is sent only when the bridge says valid AND the
-        value is above the deadband. When the deadband bites we go back to
-        IGNORE rather than sending zero, and that is a deliberate difference
-        from asserting a stationary aircraft: 5 Oct measured the deadband
-        discarding 49% of genuine motion below 25 m, so a zero there would be a
-        confident false statement to the EKF, which follows what it is given on
-        this path. "I do not know" is the honest flag, and "stationary" is not.
+        "I do not know" is the honest flag and "stationary" is not - and the
+        hard lesson of 3 Nov is that IGN_VEL_HORIZ DOES NOT SAY THE FIRST ONE.
+        AP_GPS_MAV::handle_msg only ever assigns the velocity inside
+
+            if (have_vel_h) { state.velocity = vel; ... }
+
+        There is no else, nothing clears state.velocity, and AP_GPS carries no
+        have_horizontal_velocity flag for EK3_SRC1_VELXY=3 to consult. So the
+        flag does not withhold a measurement: it freezes the last one, and
+        when there has never been one the frozen value is (0,0,0). Setting
+        IGN_VEL_HORIZ is how we told EKF3, at 10 Hz, that the aircraft was
+        STANDING STILL. IGN_SPEED_ACC has the identical defect, one branch up.
+
+        Measured, flight 00000118, the 60 s VPS leg at 26.7-36.1 m - above the
+        15 m gate, so by our own design nothing was being sent:
+
+            GPS2 reported speed      0.000 m/s on 200/200 samples
+            the aircraft really did  p50 1.44, p90 3.95, max 6.65 m/s
+            XKF4.SV (vel innovation) crossed 1.0 twice: 1.43, then 2.99
+            XKF4.SP (pos innovation) never passed 0.78 - our position was fine
+
+        Both ERR GPS glitches follow it 4/4: set at a real p50 of 2.95 and
+        4.79 m/s, cleared at 0.25 and 1.12, with EKF3's threshold at 1.0. And
+        a filter fed a confident zero believes the aircraft has not moved,
+        which is exactly the pilot's own account - it thinks it is at A while
+        it has already gone to B - and is the jump that arrives on switching
+        back to the receiver.
+
+        So this method no longer sets either flag while VPS is primary. There
+        is no third state on this path: whatever we send WILL be fused, and
+        staying silent sends a zero. The honest move is therefore to always
+        hand over the best real velocity we have and let the declared accuracy
+        carry the doubt - the age term already widens it while an estimate
+        goes stale - rather than to assert a stillness we never measured.
         """
         ign = self.IGN_VEL_VERT
+        # IGN_VEL_HORIZ / IGN_SPEED_ACC are NEVER returned from here - see the
+        # docstring. _hold is the last velocity we actually measured, and it
+        # is what goes out when the bridge has nothing new, with the age term
+        # widening the declared accuracy for every second it is stale. That is
+        # a real measurement growing less certain, which is what the EKF can
+        # reason about, instead of a zero it cannot tell from a fact.
+        def _hold(why):
+            h = getattr(self, "_last_real_vel", None)
+            if h is None:
+                # Nothing measured yet this flight. There is still no way to
+                # withhold, so send the zero but declare it at the cap, the
+                # widest honest uncertainty, so the EKF gives it no weight.
+                return (ign, 0.0, 0.0, float(self.VEL_HOLD_MAX_ACC),
+                        f"{why}; no measurement yet, declared {self.VEL_HOLD_MAX_ACC:.1f}")
+            vn, ve, t_meas, alt = h
+            age = max(0.0, time.time() - t_meas)
+            acc = min(self.VEL_HOLD_MAX_ACC,
+                      self.VEL_ACC_FLOOR + self.VEL_ACC_PER_M * max(0.0, alt)
+                      + 2.0 * age)
+            return (ign, float(vn), float(ve), float(acc),
+                    f"{why}; holding {age:.1f} s at {acc:.2f}")
+
         if not self.send_velocity:
-            return ign | self.IGN_VEL_HORIZ | self.IGN_SPEED_ACC, 0.0, 0.0, 0.0, "off"
-        # ALTITUDE DECIDES, not a flight-wide switch. See
-        # VpsConfig.vel_send_max_alt_m: the sent velocity's measured p90
-        # against gps1 is 0.63 m/s below 15 m and 1.12 by 25 m, and EKF3
-        # calls a GPS bad once its low-passed speed accuracy passes about
-        # 1.0 - so above this height an honest declaration is itself the
-        # thing that trips the glitch that took LOITER away five times on
-        # log 116. Below it, the declaration stays under the threshold and
-        # the aircraft gets its damping back.
+            # send_velocity=False cannot mean "no velocity reaches the EKF" -
+            # it only means we stop refreshing the one it already has. 2 Nov
+            # set this False to stop declaring a speed accuracy and the
+            # aircraft got worse, which is consistent: it left a frozen zero
+            # in place for the whole flight.
+            return _hold("send_velocity off")
         _alt = None if vel is None else getattr(vel, "altitude_m", None)
         # getattr, like n_frame_stale below: the velocity tests build a
         # GpsInputSender without running __init__ so that nothing opens a
         # serial port, and a bare attribute read breaks them.
         _max_alt = float(getattr(self, "vel_send_max_alt_m", 15.0))
         if _alt is not None and float(_alt) > _max_alt:
-            return (ign | self.IGN_VEL_HORIZ | self.IGN_SPEED_ACC, 0.0, 0.0,
-                    0.0, f"above {_max_alt:.0f} m ({float(_alt):.0f} m)")
+            # The altitude gate stays, but it now gates the DECLARATION, not
+            # whether a velocity is sent, because not sending one is not an
+            # option the protocol gives us. Above the gate the measurement
+            # still goes out carrying the full honest declaration - at 30 m
+            # that is 2.04 m/s, past EKF3's 1.5 fail threshold, so GPS2 will
+            # read as glitching up there. That is the cheaper of the two
+            # failures by a wide margin: a glitch flag is a status bit, while
+            # a confident zero corrupts the state the aircraft is flown on.
+            if vel is not None and getattr(vel, "valid", False) \
+                    and not getattr(vel, "deadbanded", False):
+                self._remember_real_vel(vel)
+            return _hold(f"above {_max_alt:.0f} m ({float(_alt):.0f} m)")
         if vel is None:
-            return ign | self.IGN_VEL_HORIZ | self.IGN_SPEED_ACC, 0.0, 0.0, 0.0, "no estimate"
+            return _hold("no estimate")
         if not vel.valid:
-            return (ign | self.IGN_VEL_HORIZ | self.IGN_SPEED_ACC, 0.0, 0.0, 0.0,
-                    vel.reason)
+            return _hold(vel.reason)
         if vel.deadbanded:
-            return (ign | self.IGN_VEL_HORIZ | self.IGN_SPEED_ACC, 0.0, 0.0, 0.0,
-                    f"deadbanded ({vel.speed_mps:.2f} < {vel.deadband_mps:.2f})")
+            # The deadband says this sample is indistinguishable from noise,
+            # not that the aircraft is still. 5 Oct measured it discarding
+            # 49% of genuine motion below 25 m, so holding the last real
+            # value is nearer the truth than a zero in either case.
+            return _hold(f"deadbanded ({vel.speed_mps:.2f} < {vel.deadband_mps:.2f})")
+        self._remember_real_vel(vel)
         # Speed accuracy the EKF can weigh, and it MUST grow with height.
         #
         # This used to be a flat 0.4 m/s widened only by staleness, and that
@@ -2779,6 +2907,32 @@ class VpsNode:
                 self._alt_bias_t = float(t)
         return self._alt_bias_m
 
+    def corrected_yaw(self, f):
+        """The heading to rotate CAMERA-FRAME measurements into north-east.
+
+        One function, because having two was the bug. Until 2 Nov
+        shift_to_ne took the raw FC yaw while only the map matcher's submit
+        added camera_yaw_offset_deg, so the mount's rotation went into every
+        metre of flow and nothing caught it - no test compared the call
+        sites. accel_to_ne had the same fault and kept it three hours longer.
+
+        Everything this is used on is in the CAMERA frame: the flow's pixel
+        shift, and the acceleration after _to_cam has put the BNO086's
+        samples into the camera's axes (verified at runtime - the node logs
+        "IMU->CAM_C rotation read from calibration (179.6 deg off the camera
+        frame)" on every start, 437 of them, and the fallback warning has
+        never once been printed). The camera is bolted to the airframe at an
+        angle, so the body yaw alone is the wrong rotation for any of them.
+
+        getattr with a default because the velocity and gap-fill tests build
+        these objects without running __init__ so that nothing opens a camera
+        or a serial port.
+        """
+        y = f.get("yaw") if hasattr(f, "get") else f
+        if y is None:
+            return None
+        return float(y) + float(getattr(self, "cam_yaw_offset_deg", 0.0))
+
     def step(self, f: dict) -> dict | None:
         """One frame in, one position estimate out."""
         if f["alt"] is None or f["yaw"] is None or self.origin is None:
@@ -2841,7 +2995,14 @@ class VpsNode:
             _roll = f.get("roll") or 0.0
             _pitch = f.get("pitch") or 0.0
             for ts, ax, ay, az in acc:
-                an, ae = accel_to_ne(ax, ay, f["yaw"], az, _roll, _pitch)
+                # THE MOUNT OFFSET. These samples are camera-frame - see
+                # corrected_yaw - and accel_to_ne applies the BODY
+                # attitude to them, so the yaw it is given has to carry
+                # the camera's rotation. Measured +4.42 deg three
+                # independent ways. shift_to_ne was corrected first; this
+                # path had exactly the same fault.
+                an, ae = accel_to_ne(ax, ay, self.corrected_yaw(f), az,
+                                     _roll, _pitch)
                 self.vel.push_accel(ts, an, ae)
 
         # The stereo pair, which until now was computed on the camera's own
@@ -3106,8 +3267,7 @@ class VpsNode:
             # +0.87. Worth 8.6 m of 406's 88.7 m, 1.6 of 418's 14.5 - about
             # 6-11% of the drift, systematic and growing with distance.
             dn, de = shift_to_ne(d, altitude_m=f["alt"], focal_px=self.focal,
-                                 yaw_deg=f["yaw"] + getattr(
-                                     self, "cam_yaw_offset_deg", 0.0),
+                                 yaw_deg=self.corrected_yaw(f),
                                  focal_y_px=self.focal_y)
             # ONE decision for both consumers. Until 21 Oct predict() ran here
             # unconditionally and push_flow() below could then refuse the same
@@ -3211,7 +3371,7 @@ class VpsNode:
             lon, lat = self.to_lonlat(*self.fuser.pos)
             if self.worker.submit(f["img"], prior_lon=lon, prior_lat=lat,
                                   altitude_m=f["alt"],
-                                  yaw_deg=f["yaw"] + self.cam_yaw_offset_deg,
+                                  yaw_deg=self.corrected_yaw(f),
                                   # For the nadir correction: the frame's own
                                   # attitude, so the matcher's answer is moved
                                   # from the image centre to under the

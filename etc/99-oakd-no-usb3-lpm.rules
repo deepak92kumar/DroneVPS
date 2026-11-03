@@ -1,0 +1,43 @@
+# The OAK-D Pro's USB 3 link drops because of USB 3 Link Power Management.
+#
+# Measured on the Jetson, boot of 3 Nov 2026, with kernel timestamps:
+#
+#   09:34:31  usb 2-1.2: Disable of device-initiated U1 failed.
+#   09:34:31  usb 2-1.2: Disable of device-initiated U2 failed.
+#   09:34:32  usb 2-1.2: USB disconnect, device number 3
+#   09:34:33  usb 1-2.2: new high-speed USB device number 6
+#   09:34:35  usb 1-2.2: USB disconnect, device number 6
+#   09:34:36  usb 2-1.2: new SuperSpeed USB device number 4
+#   09:34:36  usb 2-1.2: USB disconnect, device number 4
+#   ... and on, alternating SuperSpeed and high-speed
+#
+# The same pattern sits in the 20 Oct log, and one of these disconnects is
+# at 09:14:10 - inside flight 00000118. Every one of them reaches our node
+# as "RuntimeError: Device already closed or disconnected: Input/output
+# error" from startPipeline, 145 of those across the recorded runs. In
+# flight 00000117 it took the VPS out altogether: GPS2 managed 42 packets,
+# all of them fix status 1, so the aircraft flew that whole flight with no
+# vision aiding at all.
+#
+# U1 and U2 are the link's low-power states. The device fails to leave them
+# on demand, so the link is torn down and re-enumerated. Keeping the link
+# out of them costs no bandwidth, which matters because this camera needs
+# USB 3: two 800p mono streams at 25 fps is about 410 Mbit/s and USB 2 tops
+# out near 400, so dropping to high-speed would starve the flow instead.
+#
+# 03e7:f63b is the booted Movidius VPU; 03e7:2485 is the same camera in its
+# bootloader state, before depthai flashes it, and both are matched so the
+# setting is in place before the pipeline opens.
+#
+# Install:
+#   sudo install -m 644 etc/99-oakd-no-usb3-lpm.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="03e7", ATTR{idProduct}=="f63b", \
+  TEST=="power/usb3_hardware_lpm_u1", ATTR{power/usb3_hardware_lpm_u1}="0"
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="03e7", ATTR{idProduct}=="f63b", \
+  TEST=="power/usb3_hardware_lpm_u2", ATTR{power/usb3_hardware_lpm_u2}="0"
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="03e7", ATTR{idProduct}=="2485", \
+  TEST=="power/usb3_hardware_lpm_u1", ATTR{power/usb3_hardware_lpm_u1}="0"
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="03e7", ATTR{idProduct}=="2485", \
+  TEST=="power/usb3_hardware_lpm_u2", ATTR{power/usb3_hardware_lpm_u2}="0"

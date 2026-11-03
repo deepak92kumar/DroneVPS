@@ -97,8 +97,15 @@ check("the altitude refusal comes before any velocity is computed",
       "second branch must be the altitude gate")
 check("the bound is read with getattr so a stubbed sender still works",
       '"vel_send_max_alt_m", 15.0' in src)
-check("and it sets both ignore flags",
-      src.count("IGN_VEL_HORIZ | self.IGN_SPEED_ACC") >= 3)
+# 3 NOV: the gate now bounds the DECLARATION, not whether a velocity is
+# sent, because IGN_VEL_HORIZ freezes the last velocity instead of
+# withholding one (see test_velocity_off for the AP_GPS_MAV source and the
+# 118 measurement). Above the gate the real measurement still goes out,
+# carrying the full honest accuracy.
+check("the gate no longer sets the ignore flags",
+      src.count("IGN_VEL_HORIZ | self.IGN_SPEED_ACC") == 0)
+check("above the gate a real measurement is still remembered and sent",
+      "_remember_real_vel(vel)" in src and "_hold(f\"above" in src)
 
 print("\nALL PASS" if not fails else f"\n{len(fails)} FAILED: {', '.join(fails)}")
 sys.exit(1 if fails else 0)

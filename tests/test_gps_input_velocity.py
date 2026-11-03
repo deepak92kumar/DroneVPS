@@ -52,26 +52,66 @@ for name, s, v in (("off", mk(send_velocity=False), good()),
     ign = s.velocity_fields(v)[0]
     check(f"IGN_VEL_VERT set ({name})", bool(ign & S.IGN_VEL_VERT))
 
-print("\ndefault is off, and off means ignored")
-ign, vn, ve, acc, why = mk(send_velocity=False).velocity_fields(good())
-check("horizontal ignored", bool(ign & S.IGN_VEL_HORIZ), f"why={why}")
-check("speed accuracy ignored", bool(ign & S.IGN_SPEED_ACC))
-check("zeroes in the wire fields", vn == 0.0 and ve == 0.0)
+# ------------------------------------------------------------------ 3 NOV
+# EVERY ASSERTION IN THIS BLOCK IS REVERSED FROM WHAT IT WAS, and the old
+# ones were wrong about ArduPilot, not about our intent.
+#
+# This file used to require that each refusal set IGN_VEL_HORIZ, on the
+# belief that the flag says "I do not know" to the EKF. It does not.
+# AP_GPS_MAV::handle_msg assigns the velocity only inside
+#
+#     if (have_vel_h) { state.velocity = vel; velocity_to_speed_course(state); }
+#
+# with no else branch, nothing anywhere clearing state.velocity, and no
+# have_horizontal_velocity flag for EK3_SRC1_VELXY=3 to consult. The flag
+# therefore FREEZES the previous velocity, and when none was ever sent the
+# frozen value is (0,0,0) - which EKF3 fuses as a confident measurement
+# that the aircraft is standing still. IGN_SPEED_ACC freezes
+# state.speed_accuracy the same way.
+#
+# Flight 00000118, the 60 s VPS leg at 26.7-36.1 m, above the altitude gate,
+# so by the old design nothing was being sent:
+#     GPS2 reported speed       0.000 m/s on 200/200 samples
+#     the aircraft really did   p50 1.44, p90 3.95, max 6.65 m/s
+#     XKF4.SV crossed 1.0 twice (1.43, 2.99); both ERR GPS glitches followed
+#     XKF4.SP never passed 0.78 - the position we sent was not the problem
+#
+# There is no third state on this path. What we send is fused; staying
+# silent sends a zero. So a refusal now hands over the last velocity we
+# really measured and puts the doubt in the declared accuracy.
+print("\na refusal holds the last measurement - it never asserts stillness")
+for label, sender, v in (("send_velocity off", mk(send_velocity=False), good()),
+                         ("no estimate", mk(), None),
+                         ("stale", mk(), good(valid=False, reason="flow 2.0s stale")),
+                         ("deadbanded", mk(),
+                          good(deadbanded=True, speed_mps=0.2,
+                               sent_vn=0.0, sent_ve=0.0))):
+    ign, vn, ve, acc, why = sender.velocity_fields(v)
+    check(f"{label}: horizontal NOT ignored", not (ign & S.IGN_VEL_HORIZ),
+          f"why={why}")
+    check(f"{label}: speed accuracy NOT ignored", not (ign & S.IGN_SPEED_ACC))
+    check(f"{label}: a zero is declared at the widest uncertainty",
+          vn != 0.0 or ve != 0.0 or acc >= S.VEL_HOLD_MAX_ACC - 1e-9,
+          f"vn {vn} ve {ve} acc {acc:.2f}")
 
-print("\nno estimate, and a stale estimate, are both ignored")
-ign, vn, ve, acc, why = mk().velocity_fields(None)
-check("none -> ignored", bool(ign & S.IGN_VEL_HORIZ), f"why={why}")
-ign, vn, ve, acc, why = mk().velocity_fields(good(valid=False, reason="flow 2.0s stale"))
-check("invalid -> ignored", bool(ign & S.IGN_VEL_HORIZ), f"why={why}")
-check("the reason is passed through", "stale" in why, why)
-check("no stale value on the wire", vn == 0.0 and ve == 0.0)
+check("the stale reason still reaches the log",
+      "stale" in mk().velocity_fields(
+          good(valid=False, reason="flow 2.0s stale"))[4])
+check("the deadband reason still reaches the log",
+      "deadband" in mk().velocity_fields(
+          good(deadbanded=True, speed_mps=0.2))[4])
 
-print("\nthe deadband means IGNORE, not zero")
-ign, vn, ve, acc, why = mk().velocity_fields(
-    good(deadbanded=True, speed_mps=0.2, sent_vn=0.0, sent_ve=0.0))
-check("horizontal ignored rather than asserted zero",
-      bool(ign & S.IGN_VEL_HORIZ), f"why={why}")
-check("why says it was the deadband", "deadband" in why, why)
+# And the hold is a real hold: once something has been measured, THAT is
+# what a later refusal repeats, not a zero.
+held = mk()
+held.velocity_fields(good())                      # measures 6.0 / -2.0
+ign, vn, ve, acc, why = held.velocity_fields(None)   # then has nothing
+check("a later refusal repeats the measured value",
+      (vn, ve) == (6.0, -2.0), f"vn {vn} ve {ve} why={why}")
+check("and declares more error than when it was fresh",
+      acc > held.VEL_ACC_FLOOR, f"{acc:.2f} m/s")
+check("the hold is bounded, never beyond the widest honest figure",
+      acc <= S.VEL_HOLD_MAX_ACC + 1e-9, f"{acc:.2f} m/s")
 
 print("\na good estimate is sent, with an accuracy")
 ign, vn, ve, acc, why = mk().velocity_fields(good())
@@ -95,8 +135,13 @@ check("47.7 m/s is refused by the bridge outright", accepted is False,
 st = b.value(0.0, 106.0)
 check("so no estimate exists to send", st.valid is False, st.reason)
 ign, vn, ve, acc, why = mk().velocity_fields(st)
-check("and nothing goes on the wire", bool(ign & S.IGN_VEL_HORIZ) and vn == 0.0,
-      f"vn {vn:.1f}, why={why}")
+# 3 NOV: not "nothing goes on the wire" - nothing CAN be withheld here. The
+# bridge refused 47.7 m/s, so there is no measurement, and what goes out is
+# a zero declared at the full 6.0 m/s so the EKF gives it no weight.
+check("a refused reading is declared worthless, not asserted",
+      not (ign & S.IGN_VEL_HORIZ) and vn == 0.0
+      and acc >= S.VEL_HOLD_MAX_ACC - 1e-9,
+      f"vn {vn:.1f}, acc {acc:.2f}, why={why}")
 # A speed under the clamp but still absurd for a hover must reach the FC,
 # because the bridge cannot know the aircraft is hovering - that is the EKF's
 # job with the speed accuracy we declare. What must NOT happen is it arriving

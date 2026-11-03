@@ -132,7 +132,24 @@ class VpsConfig:
     # This is what the aircraft gets back by turning velocity on again at
     # low altitude: damping on approach and in a low hover, where a position
     # controller with no velocity aiding is at its worst.
-    vel_send_max_alt_m: float = 15.0
+    # 3 NOV: 15 -> 18 m, and what this number MEANS has changed. It no
+    # longer decides whether a velocity is sent - IGN_VEL_HORIZ cannot
+    # withhold one, it freezes the last, so there is no "do not send" on
+    # this path (see GpsInputSender.velocity_fields). It marks where our
+    # honest declaration stops keeping GPS2 un-glitched.
+    #
+    # Read from the real ArduPilot source, not from the 1.0 figure I had
+    # been using: calcGpsGoodForFlight low-passes the speed accuracy, peak-
+    # holds it, and then applies HYSTERESIS - fail above 1.5, pass below
+    # 1.0 - and ANDs that with the EKF's own velTestRatio/posTestRatio
+    # check. VEL_ACC_FLOOR 0.6 + 0.048 x alt reaches 1.5 at 18.75 m.
+    #
+    # So below 18 m the declaration we can defend also keeps the speed-
+    # accuracy test passing. Above it the measurement still goes out and
+    # GPS2 reads as glitching, which this aircraft has already flown
+    # through for a 222 s VPS leg - a survivable status bit, against a
+    # frozen zero velocity that silently corrupts the state estimate.
+    vel_send_max_alt_m: float = 18.0
 
     # 2 NOV: WAPAS True, pilot ke kehne par. Ab vel_send_max_alt_m iska
     # matlab tay karta hai - 15 m se neeche velocity jati hai, upar nahi.

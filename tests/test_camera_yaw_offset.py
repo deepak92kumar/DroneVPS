@@ -68,8 +68,8 @@ check("and it is a mount angle, not a large correction",
 print("\nit is added to the heading the map query is rotated by")
 src = open(os.path.join(os.path.dirname(__file__), "..",
                         "vps_vio", "live_node.py")).read()
-check("the submit call carries it",
-      'yaw_deg=f["yaw"] + self.cam_yaw_offset_deg' in src)
+check("the submit call carries it, through the canonical helper",
+      "yaw_deg=self.corrected_yaw(f)," in src)
 check("it is read from the config, not written in the node",
       "self.cam_yaw_offset_deg = float(_c.camera_yaw_offset_deg)" in src)
 
@@ -92,11 +92,18 @@ print("\nthe flow path gets it too, not only the matcher")
 # getattr, like n_frame_stale: the gap-fill test builds a VpsNode without
 # running __init__ so that nothing opens a camera, and a bare attribute read
 # broke it - which is how this reached a push with one test red.
-check("shift_to_ne is given the offset",
-      'yaw_deg=f["yaw"] + getattr(' in src
-      and '"cam_yaw_offset_deg", 0.0)' in src)
-check("the matcher still gets it",
-      'yaw_deg=f["yaw"] + self.cam_yaw_offset_deg,' in src)
+check("shift_to_ne is given it, through the same helper",
+      "yaw_deg=self.corrected_yaw(f)," in src
+      and "focal_y_px=self.focal_y)" in src)
+# 2 NOV, later: all three camera-frame consumers were put behind one
+# corrected_yaw() helper, so these check for the helper rather than for
+# three separate spellings of the same addition. Having two spellings IS
+# what let accel_to_ne keep the raw yaw while shift_to_ne was corrected.
+check("the accelerometer path gets it too",
+      "accel_to_ne(ax, ay, self.corrected_yaw(f), az," in src)
+check("all three use the one helper",
+      src.count("self.corrected_yaw(f)") == 3,
+      str(src.count("self.corrected_yaw(f)")))
 check("no call site is left on the raw yaw",
       'yaw_deg=f["yaw"],' not in src)
 check("and the value is the measured one",
