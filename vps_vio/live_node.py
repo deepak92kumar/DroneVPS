@@ -16,7 +16,7 @@ and that is refused unless the aircraft is disarmed, so the first transmission
 can only ever happen on a bench.
 """
 from __future__ import annotations
-import argparse, collections, csv, io, math, os, sys, time, traceback
+import argparse, collections, csv, io, math, os, sys, time
 import numpy as np, cv2
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -55,21 +55,17 @@ def _socket(name: str):
     """Named here so a typo is an AttributeError at startup, not a wrong frame."""
     import depthai as dai
     return getattr(dai.CameraBoardSocket, name)
-# THE MAP IS maps/active.tif, THE SYMLINK STUDIO REPOINTS. studio/flightsheet.py
-# moves it to whichever sheet the pilot loads, so it is the one name that
-# follows the aircraft to a new site; a sheet named in the source does not.
+# The only map on this machine after the SSD was lost. It was
+# /data/DRONE/ap/site_2km.tif, which no longer exists.
 #
-# It used to name bhh.tif here - "the only map on this machine after the SSD
-# was lost" - and that sheet spans 30.88411-30.90332 N, 74.59762-74.63224 E,
-# nowhere near where this aircraft now flies. A take-off point outside the
-# sheet means no map fixes for the whole flight, and on 1 Nov that is exactly
-# what happened: flight 378 ran 764 s with a sheet that stopped at lon
-# 74.1195 while the aircraft sat at 74.1254. MapFixWorker's covers() was
-# false the whole time, the matcher never ran once, every fix_*/try_* column
-# in all 18225 rows is null, and the radio read f0 from start to finish.
-#
-# preflight.py checks this same path against SCR_USER1/2 before a flight.
-DEFAULT_MAP = "/data/DRONE/maps/active.tif"
+# BEWARE: this sheet does not cover the point the FC last flew from. It spans
+# 30.88411-30.90332 N, 74.59762-74.63224 E, while SCR_USER1/2 in log
+# 00000195.BIN reads 30.7844, 74.6072 - 11.1 km south of it. Going by the
+# 13 Oct report ("today's ground - 12.7 km north of it"), this is the 13 Oct
+# site and SCR_USER holds the newer southern one. A take-off point outside the
+# sheet means no map fixes for the whole flight, which that report lists as its
+# first item to confirm before flying. Pass --map explicitly per site.
+DEFAULT_MAP = "/data/DRONE/bhh.tif"
 
 
 # --------------------------------------------------------------------------- #
@@ -135,12 +131,6 @@ class LiveSource:
         dual_flow = (getattr(cfg, "dual_flow", False) if dual_flow is None
                      else bool(dual_flow))
         self.dual_flow = bool(dual_flow)
-        # See VpsConfig.flow_device for the measurement. The stream is built
-        # whether or not the trackers end up using it, because the decision
-        # belongs to the node and the pipeline is fixed once the device opens.
-        flow_gpu_device = bool(getattr(cfg, "flow_device", False))
-        device_features = int(getattr(cfg, "flow_device_features", 300))
-        self.flow_device = flow_gpu_device
         imu_rate = cfg.imu_rate if imu_rate is None else int(imu_rate)
         self.imu_rate = imu_rate
         # 921600, not 115200. TELEM2 flies at 921600 - SERIAL2_BAUD reads 921
@@ -203,41 +193,6 @@ class LiveSource:
                 xo = p.create(dai.node.XLinkOut)
                 xo.setStreamName(name)
                 m.out.link(xo.input)
-                # THE CAMERA'S OWN TRACKER, beside the image rather than
-                # instead of it: the frames still cross XLink because the map
-                # matcher and the frame writer both want them, and the
-                # FeatureTracker only adds ids and positions.
-                #
-                # Measured 2 Nov on this board: 1.7 ms of host CPU a frame
-                # against 62.4 for goodFeaturesToTrack plus two-way LK, 97%
-                # less, and two trackers fly so the host path ceilings at
-                # 8.02 Hz where this one is 292. The loop was measured at
-                # 9.06 Hz against a camera giving 24.7 fps.
-                #
-                # setHardwareResources(2, 2) is needed for more than 146
-                # features; 4 shaves is refused on this board. The defaults
-                # of the maintainer are the best setting measured - raising
-                # lostFeatureErrorThreshold kills features rather than
-                # keeping them, down to 5% carried at 5e7 - and the only
-                # knob worth moving is the minimum distance, 50 -> 15, which
-                # buys 40 features to 51 for nothing.
-                if flow_gpu_device:
-                    ft = p.create(dai.node.FeatureTracker)
-                    ft.setHardwareResources(2, 2)
-                    fcfg = ft.initialConfig
-                    fcfg.setCornerDetector(
-                        dai.FeatureTrackerConfig.CornerDetector.Type.HARRIS)
-                    fcfg.setNumTargetFeatures(int(device_features))
-                    fcfg.setMotionEstimator(True)
-                    fcfg.setOpticalFlow()
-                    _raw = fcfg.get()
-                    _raw.featureMaintainer.enable = True
-                    _raw.featureMaintainer.minimumDistanceBetweenFeatures = 15.0
-                    fcfg.set(_raw)
-                    m.out.link(ft.inputImage)
-                    xf = p.create(dai.node.XLinkOut)
-                    xf.setStreamName(name + "_feat")
-                    ft.outputFeatures.link(xf.input)
 
         # The camera's own gyro. 28 Sep moved derotation onto it because flow
         # error DOUBLES when the aircraft tilts - 0.81 m/step under 0.5 deg of
@@ -460,42 +415,7 @@ class LiveSource:
                 print(f"*** could not read {STEREO_PARTNER_NAME} intrinsics "
                       f"({e}) - dual flow is OFF ***")
                 self.dual_flow = False
-        # VALIDITY CHECK AND BACKOFF, because the bare call has failed 145
-        # times in this log's history with
-        #     RuntimeError: Device already closed or disconnected:
-        #                   Input/output error
-        # and every one of those killed the process. systemd restarts in 5 s,
-        # the camera is still gone, and it dies again - a crash loop. That
-        # loop is what was running through BOTH flights of 3 Nov: the node
-        # restarted mid-air at 09:09:49 and again at 09:13:46, the second one
-        # 43 s before the pilot switched to the VPS.
-        #
-        # This does not fix a broken USB link - nothing in software can. What
-        # it fixes is the node burning the camera's recovery window by
-        # hammering it: a device that has just dropped off the bus needs a
-        # moment to re-enumerate, and five tries over fifteen seconds give it
-        # that, while a crash loop never does. If the device is genuinely
-        # gone, this still exits - and says so once, clearly, rather than in
-        # 145 identical tracebacks.
-        _last = None
-        for _try in range(5):
-            try:
-                self.dev.startPipeline(p)
-                if _try:
-                    print(f"camera pipeline started on attempt {_try + 1}",
-                          flush=True)
-                break
-            except Exception as exc:
-                _last = exc
-                print(f"camera pipeline attempt {_try + 1}/5 failed: "
-                      f"{type(exc).__name__}: {exc}", flush=True)
-                if _try < 4:
-                    time.sleep(3.0)
-        else:
-            raise RuntimeError(
-                f"camera did not start after 5 attempts over 15 s "
-                f"({type(_last).__name__}: {_last}). The USB link is the "
-                f"thing to look at, not this process.") from _last
+        self.dev.startPipeline(p)
         self.q = self.dev.getOutputQueue("mono", 4, False)
         # The partner's frames, when dual flow is on. Depth 2 and blocking
         # False, like the depth queue: if the partner ever falls behind, the
@@ -504,15 +424,6 @@ class LiveSource:
         # the 2.6 s stall all over again.
         self.q_partner = (self.dev.getOutputQueue("mono_partner", 4, False)
                           if self.dual_flow else None)
-        # The device tracker's own output, one list of ids and positions per
-        # frame. Depth 4 non-blocking like the images: features for a frame
-        # the loop has already passed are no use, and a queue that blocks is
-        # the 2.6 s stall again.
-        self.q_feat = (self.dev.getOutputQueue("mono_feat", 4, False)
-                       if self.flow_device else None)
-        self.q_feat_partner = (
-            self.dev.getOutputQueue("mono_partner_feat", 4, False)
-            if self.flow_device and self.dual_flow else None)
         self.fps = int(fps)
         # How many frames arrived with a usable partner, and how many partner
         # frames were thrown away for being too far from the primary in time.
@@ -527,10 +438,6 @@ class LiveSource:
         # Anchor for turning the camera's device clock into an age. Set on
         # the first frame; only the DIFFERENCE is ever used, so the two
         # clocks never have to agree about absolute time.
-        # The window the clock offset is tracked over. 250 frames is 10 s at
-        # 25 fps - long enough that a genuinely late burst cannot define the
-        # minimum, short enough to follow the drift.
-        self._clk_off = collections.deque(maxlen=250)
         self._dev_t0 = None
         self._dev_ts0 = None
         self._partner_last = None
@@ -638,50 +545,8 @@ class LiveSource:
         v = self.R_imu2cam @ np.array([x, y, z], float)
         return float(v[0]), float(v[1]), float(v[2])
 
-    def close(self):
-        """Close the OAK-D, so its watchdog does not have to.
-
-        dai.Device is held raw here rather than in a with-block, because the
-        source outlives any one scope. That makes closing someone's job, and
-        until 2 Nov it was nobody's: every stop left the device running and
-        its watchdog reset it 1.5 s later, writing a crash dump that the next
-        run reported as its own.
-
-        Safe to call twice, and safe when the device never opened.
-        """
-        dev, self.dev = getattr(self, "dev", None), None
-        if dev is None:
-            return
-        try:
-            dev.close()
-        except Exception:
-            pass
-
-    def _shift_features(self, feats):
-        """Device feature positions into the cropped frame's coordinates.
-
-        The FeatureTracker sees the full sensor image; everything downstream
-        sees it after crop_left. One subtraction, here, so no caller has to
-        remember. Features that fall inside the removed strip are dropped
-        rather than given a negative x.
-        """
-        c = int(getattr(self, "crop_left", 0) or 0)
-        if not c:
-            return list(feats)
-        out = []
-        for f in feats:
-            if f.position.x >= c:
-                f.position.x -= c
-                out.append(f)
-        return out
-
     def _crop(self, img):
         return img if self.crop_left <= 0 else img[:, self.crop_left:]
-
-    # How long read() will wait for a frame before giving up and letting
-    # systemd reopen the camera. 2 s is 50 frames at 25 fps; the longest
-    # legitimate gap ever recorded on this camera is 810 ms.
-    FRAME_WAIT_MAX_S = 2.0
 
     def read(self):
         # THE NEWEST FRAME, NOT THE OLDEST, and the age is carried with it.
@@ -698,28 +563,7 @@ class LiveSource:
         #
         # The pilot put it plainly: old frames make the FC run more, so throw
         # the stale ones away and act on the latest.
-        # BOUNDED. This was a blocking q.get() with no timeout, and that is
-        # how the node wedged on 2 Nov: the camera stopped delivering, get()
-        # never returned, and the process sat at 216% CPU with systemctl
-        # still reporting "active" while the CSV stayed frozen at t=300.65
-        # for two minutes. Restart= cannot see that, because nothing
-        # crashed.
-        #
-        # A frame later than this is no use to anyone - the flow baseline
-        # and the velocity are both built on frame-to-frame continuity - so
-        # the wait is bounded and a timeout ENDS THE RUN. main() breaks on a
-        # None and the unit exits cleanly, systemd restarts it in 5 s, and
-        # reopening the camera is the only thing that fixes a camera that
-        # has stopped.
-        deadline = time.monotonic() + self.FRAME_WAIT_MAX_S
-        fr = self.q.tryGet()
-        while fr is None:
-            if time.monotonic() > deadline:
-                print(f"CAMERA: no frame for {self.FRAME_WAIT_MAX_S:.1f}s - "
-                      f"ending the run so systemd can reopen it", flush=True)
-                return None
-            time.sleep(0.002)
-            fr = self.q.tryGet()
+        fr = self.q.get()
         while True:
             nf = self.q.tryGet()
             if nf is None:
@@ -729,33 +573,13 @@ class LiveSource:
         try:
             ts = fr.getTimestampDevice().total_seconds()
             now = time.monotonic()
-            # A ROLLING clock offset, not a fixed anchor on the first frame.
-            #
-            # 2 NOV. The anchored form measured CLOCK DRIFT, not frame age.
-            # The host's monotonic clock and the camera's device clock run at
-            # slightly different rates - about 0.05% on this pair - so
-            # (now - t0) - (ts - ts0) walks away from zero at roughly
-            # 0.5 ms per second no matter how fresh the frames are. Run 418
-            # climbed 0.0000 -> 0.3492 s over 495 s in a straight line, and
-            # run 406 FELL 0.2467 -> 0.0000 over 815 s, which is the drift
-            # running the other way. Real latency does not do either, and it
-            # certainly does not sit at exactly 0.0000 for 11% of a flight -
-            # that is the max(0.0, ...) clamp hiding the negative half.
-            #
-            # frame_age_max_s gates the flow on this number, so 8339 of
-            # 12160 rows in 418 were over its 0.12 s limit. (Only 5 of them
-            # actually lost their flow step, so the gate and this column
-            # disagree about something else as well - that is recorded in
-            # FLIGHT_2026-11-02.md and is not fixed here. What IS fixed is
-            # that the number now means what its name says.)
-            #
-            # The minimum of (now - ts) over a window is the best estimate of
-            # the true offset: the fastest frame in the window is the one that
-            # waited least, so anything above that minimum is this frame's own
-            # extra lateness. It tracks drift because the window moves.
-            d = now - ts
-            self._clk_off.append(d)
-            self._frame_age_s = max(0.0, d - min(self._clk_off))
+            if self._dev_t0 is None:
+                # First frame anchors the two clocks against each other. Only
+                # the difference is ever used, so they never have to agree
+                # about absolute time - and this frame's own age is unknown,
+                # which is honest: it reads 0.
+                self._dev_t0, self._dev_ts0 = now, ts
+            self._frame_age_s = max(0.0, (now - self._dev_t0) - (ts - self._dev_ts0))
         except Exception:
             self._frame_age_s = 0.0
         # tryGet, never get: the mono frame is what the flow loop is waiting on,
@@ -778,19 +602,6 @@ class LiveSource:
         # quaternion goes to the IMU log.
         q_roll = q_pitch = 0.0
         quat = []
-        # ts BEFORE the packet loop, for the third time in this file. It is
-        # the gyro sample's device timestamp and it is assigned only inside
-        # `if la is not None` or after the gyro's `continue` - so a frame that
-        # arrives with NO usable IMU packet left it unbound, and the frame
-        # window below reads it on every frame. That is the same shape as
-        # _use_pp (76 crashes) and _fe (4 crashes, 2 Nov, ALT_HOLD at 30 m),
-        # and bench/unbound_locals.py is what found it before it flew.
-        #
-        # None is the honest value: with no IMU sample there is no device
-        # timestamp, so there is no frame window to integrate over and the
-        # drain integral is all this frame has. That is exactly what the else
-        # branch below already does.
-        ts = None
         pk = self.q_imu.tryGet()
         while pk is not None:
             for packet in pk.packets:
@@ -876,8 +687,7 @@ class LiveSource:
         # directly comparable - that is the whole reason this is possible.
         drain_roll, drain_pitch = d_roll, d_pitch
         gyro_win_s = 0.0
-        if (ts is not None and self._ts_prev_frame is not None
-                and ts > self._ts_prev_frame):
+        if self._ts_prev_frame is not None and ts > self._ts_prev_frame:
             w0, w1 = self._ts_prev_frame, ts
             wr = wp = 0.0
             for (a, b, r_rate, p_rate) in self._gyro_buf:
@@ -894,11 +704,7 @@ class LiveSource:
             # No previous frame to bound the window: the drain integral is
             # all there is, and the buffer is spent.
             self._gyro_buf = []
-        # Only when there WAS a sample. Writing None here would make the
-        # next frame take the else branch too, so one IMU-less frame would
-        # cost two frames of window integration instead of one.
-        if ts is not None:
-            self._ts_prev_frame = ts
+        self._ts_prev_frame = ts
 
         depth = None
         if self.q_depth is not None:
@@ -977,38 +783,7 @@ class LiveSource:
         gps = None
         if s.get("lat") not in (None, 0.0):
             gps = (s["lon"], s["lat"])
-        # The device tracker's features for this frame, drained to the newest
-        # exactly as the images are. tryGet: a frame whose features have not
-        # arrived falls back to the host path for that step rather than
-        # waiting, which is the same rule the partner camera and depth live
-        # under.
-        #
-        # NOT cropped. crop_left shifts the image the host tracker sees, and
-        # these positions are in the FULL frame the device tracked - so the
-        # crop is subtracted here, once, rather than left for whoever reads
-        # them. Getting this wrong would be a constant offset in every shift,
-        # which is the kind of fault that looks like a mount angle.
-        feats = feats_partner = None
-        if self.q_feat is not None:
-            pk = self.q_feat.tryGet()
-            while True:
-                nxt = self.q_feat.tryGet()
-                if nxt is None:
-                    break
-                pk = nxt
-            if pk is not None:
-                feats = self._shift_features(pk.trackedFeatures)
-        if self.q_feat_partner is not None:
-            pk = self.q_feat_partner.tryGet()
-            while True:
-                nxt = self.q_feat_partner.tryGet()
-                if nxt is None:
-                    break
-                pk = nxt
-            if pk is not None:
-                feats_partner = self._shift_features(pk.trackedFeatures)
-        return dict(feats=feats, feats_partner=feats_partner,
-                    img=self._crop(fr.getCvFrame()), img_partner=img_partner,
+        return dict(img=self._crop(fr.getCvFrame()), img_partner=img_partner,
                     alt=s["alt_rel"], yaw=s["yaw"],
                     alt_amsl=s.get("alt_amsl"), rngfnd=s.get("rngfnd"),
                     gps1_alt=s.get("gps1_alt"), gps1_fix=s.get("fix"),
@@ -1183,28 +958,8 @@ class GpsInputSender:
     # about how bad it is. The velocity itself is still noise proportional to
     # height, and the fix for that is a longer measurement baseline, not a
     # number here.
-    # 3 NOV: these two stay at 0.6 / 0.048. I refitted them to 0.25 / 0.038
-    # against runs 431/432, where the per-axis p90 against gps1 is only 0.29
-    # below 15 m, and test_velocity_altitude caught it: the lower pair
-    # under-declares three RECORDED rows - 0.44 against a measured 0.56 at
-    # 5 m, 1.58 against 2.09 at 35 m, 3.18 against 4.19 at 77 m. Today's
-    # camera is genuinely about 2.4x better than the thirteen-flight hover
-    # sigma, but a mount degrades and these rows are real flights, so the
-    # declaration covers the worst credible case, not the best measured one.
-    #
-    # The consequence is the whole reason vel_send_max_alt_m exists. With a
-    # 0.6 floor the declaration passes EKF3's ~1.0 m/s speed-accuracy wall
-    # at 8.3 m, so velocity can only be SENT below that; above it both
-    # ignore flags go up and no speed accuracy is declared at all, which is
-    # what keeps our position trusted instead of glitch-flagged.
     VEL_ACC_FLOOR = 0.6
     VEL_ACC_PER_M = 0.048
-    # The widest uncertainty worth declaring. It is max_sent_mps, because a
-    # value we have no current measurement for could be anything the airframe
-    # can do, and the existing capped-sample rule already declares the
-    # ceiling for the same reason. Only reached when nothing has been
-    # measured yet or a held estimate has gone very stale.
-    VEL_HOLD_MAX_ACC = 6.0
     # The vertical accuracy the working flights declared: a constant 3.0 m
     # (GPA.VAcc is exactly 3.00 throughout logs 00000191 and 00000194). It had
     # been sigma_m * 2 here, which at a typical sigma of 21 m declares 42 m of
@@ -1233,34 +988,8 @@ class GpsInputSender:
         # 47.7 m/s during a 106 m hover, and it is the 54% row that the 13 Oct
         # report still calls the largest open fault.
         self.send_velocity = bool(send_velocity)
-        self.vel_send_max_alt_m = float(getattr(_vps_config(),
-                                                "vel_send_max_alt_m", 15.0))
-        # 10 Hz since 1 Nov. It was 4.3, "which is what logs 00000191 and
-        # 00000194 actually carried" - a figure copied from what the old
-        # configuration happened to do, never one that was chosen.
-        #
-        # WHY IT MOVED. A QGC telemetry log off another aircraft - a quad on
-        # 4.6.3 with its own X7, flying a different VPS at the old site -
-        # shows that unit injecting GPS_INPUT at 9.83 Hz, and its EKF running
-        # with velocity_variance 0.006 and never once over the gate. Ours ran
-        # at 4.30 with the variance at 0.846 and over the gate 40% of the
-        # time on flight 382.
-        #
-        # The rate is not why their estimate is better - theirs sits 0.52 m
-        # from the receiver against our 44.49 - but it is free. Replayed
-        # against the real frame timestamps of four flights, a 1/10 gate
-        # delivers 9.74 to 10.00 Hz, mean 9.93, because the loop runs at
-        # 21-24 Hz and there is always a frame to send on:
-        #
-        #     flight    loop Hz   at 1/4.3   at 1/10
-        #       368      23.47      4.30      10.00
-        #       373      22.74      4.30       9.97
-        #       378      24.00      4.30      10.00
-        #       382      21.03      4.30       9.74
-        #
-        # GPS2_RATE_MS on the flight controller should be 100 to match; it
-        # was 200, which was right for 4.3 and is now half the rate we send.
-        self.send_period_s = 1.0 / 10.0
+        # 4.3 Hz, which is what logs 00000191 and 00000194 actually carried.
+        self.send_period_s = 1.0 / 4.3
         # Seeded on the first send, then advanced by exactly one period each
         # time - see the gate in send() for why that distinction is worth 0.4 Hz.
         self._next_send = None
@@ -1273,20 +1002,6 @@ class GpsInputSender:
         return False if msg is None else bool(
             msg.base_mode & self.mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
 
-    def _remember_real_vel(self, vel):
-        """Keep the last velocity we actually measured, for velocity_fields.
-
-        A tuple rather than the bridge's object so nothing downstream can
-        mutate it under us, and with the wall clock alongside so the declared
-        accuracy can widen by age while it is being held.
-        """
-        try:
-            self._last_real_vel = (float(vel.sent_vn), float(vel.sent_ve),
-                                   time.time(),
-                                   float(getattr(vel, "altitude_m", 0.0) or 0.0))
-        except (TypeError, ValueError, AttributeError):
-            pass
-
     def velocity_fields(self, vel):
         """Decide what to tell the FC about velocity, and say so explicitly.
 
@@ -1297,100 +1012,25 @@ class GpsInputSender:
         00000195.BIN. Height comes from the lidar below 60 m and the barometer
         above it.
 
-        "I do not know" is the honest flag and "stationary" is not - and the
-        hard lesson of 3 Nov is that IGN_VEL_HORIZ DOES NOT SAY THE FIRST ONE.
-        AP_GPS_MAV::handle_msg only ever assigns the velocity inside
-
-            if (have_vel_h) { state.velocity = vel; ... }
-
-        There is no else, nothing clears state.velocity, and AP_GPS carries no
-        have_horizontal_velocity flag for EK3_SRC1_VELXY=3 to consult. So the
-        flag does not withhold a measurement: it freezes the last one, and
-        when there has never been one the frozen value is (0,0,0). Setting
-        IGN_VEL_HORIZ is how we told EKF3, at 10 Hz, that the aircraft was
-        STANDING STILL. IGN_SPEED_ACC has the identical defect, one branch up.
-
-        Measured, flight 00000118, the 60 s VPS leg at 26.7-36.1 m - above the
-        15 m gate, so by our own design nothing was being sent:
-
-            GPS2 reported speed      0.000 m/s on 200/200 samples
-            the aircraft really did  p50 1.44, p90 3.95, max 6.65 m/s
-            XKF4.SV (vel innovation) crossed 1.0 twice: 1.43, then 2.99
-            XKF4.SP (pos innovation) never passed 0.78 - our position was fine
-
-        Both ERR GPS glitches follow it 4/4: set at a real p50 of 2.95 and
-        4.79 m/s, cleared at 0.25 and 1.12, with EKF3's threshold at 1.0. And
-        a filter fed a confident zero believes the aircraft has not moved,
-        which is exactly the pilot's own account - it thinks it is at A while
-        it has already gone to B - and is the jump that arrives on switching
-        back to the receiver.
-
-        So this method no longer sets either flag while VPS is primary. There
-        is no third state on this path: whatever we send WILL be fused, and
-        staying silent sends a zero. The honest move is therefore to always
-        hand over the best real velocity we have and let the declared accuracy
-        carry the doubt - the age term already widens it while an estimate
-        goes stale - rather than to assert a stillness we never measured.
+        Horizontal velocity is sent only when the bridge says valid AND the
+        value is above the deadband. When the deadband bites we go back to
+        IGNORE rather than sending zero, and that is a deliberate difference
+        from asserting a stationary aircraft: 5 Oct measured the deadband
+        discarding 49% of genuine motion below 25 m, so a zero there would be a
+        confident false statement to the EKF, which follows what it is given on
+        this path. "I do not know" is the honest flag, and "stationary" is not.
         """
         ign = self.IGN_VEL_VERT
-        # IGN_VEL_HORIZ / IGN_SPEED_ACC are NEVER returned from here - see the
-        # docstring. _hold is the last velocity we actually measured, and it
-        # is what goes out when the bridge has nothing new, with the age term
-        # widening the declared accuracy for every second it is stale. That is
-        # a real measurement growing less certain, which is what the EKF can
-        # reason about, instead of a zero it cannot tell from a fact.
-        def _hold(why):
-            h = getattr(self, "_last_real_vel", None)
-            if h is None:
-                # Nothing measured yet this flight. There is still no way to
-                # withhold, so send the zero but declare it at the cap, the
-                # widest honest uncertainty, so the EKF gives it no weight.
-                return (ign, 0.0, 0.0, float(self.VEL_HOLD_MAX_ACC),
-                        f"{why}; no measurement yet, declared {self.VEL_HOLD_MAX_ACC:.1f}")
-            vn, ve, t_meas, alt = h
-            age = max(0.0, time.time() - t_meas)
-            acc = min(self.VEL_HOLD_MAX_ACC,
-                      self.VEL_ACC_FLOOR + self.VEL_ACC_PER_M * max(0.0, alt)
-                      + 2.0 * age)
-            return (ign, float(vn), float(ve), float(acc),
-                    f"{why}; holding {age:.1f} s at {acc:.2f}")
-
         if not self.send_velocity:
-            # send_velocity=False cannot mean "no velocity reaches the EKF" -
-            # it only means we stop refreshing the one it already has. 2 Nov
-            # set this False to stop declaring a speed accuracy and the
-            # aircraft got worse, which is consistent: it left a frozen zero
-            # in place for the whole flight.
-            return _hold("send_velocity off")
-        _alt = None if vel is None else getattr(vel, "altitude_m", None)
-        # getattr, like n_frame_stale below: the velocity tests build a
-        # GpsInputSender without running __init__ so that nothing opens a
-        # serial port, and a bare attribute read breaks them.
-        _max_alt = float(getattr(self, "vel_send_max_alt_m", 15.0))
-        if _alt is not None and float(_alt) > _max_alt:
-            # The altitude gate stays, but it now gates the DECLARATION, not
-            # whether a velocity is sent, because not sending one is not an
-            # option the protocol gives us. Above the gate the measurement
-            # still goes out carrying the full honest declaration - at 30 m
-            # that is 2.04 m/s, past EKF3's 1.5 fail threshold, so GPS2 will
-            # read as glitching up there. That is the cheaper of the two
-            # failures by a wide margin: a glitch flag is a status bit, while
-            # a confident zero corrupts the state the aircraft is flown on.
-            if vel is not None and getattr(vel, "valid", False) \
-                    and not getattr(vel, "deadbanded", False):
-                self._remember_real_vel(vel)
-            return _hold(f"above {_max_alt:.0f} m ({float(_alt):.0f} m)")
+            return ign | self.IGN_VEL_HORIZ | self.IGN_SPEED_ACC, 0.0, 0.0, 0.0, "off"
         if vel is None:
-            return _hold("no estimate")
+            return ign | self.IGN_VEL_HORIZ | self.IGN_SPEED_ACC, 0.0, 0.0, 0.0, "no estimate"
         if not vel.valid:
-            return _hold(vel.reason)
+            return (ign | self.IGN_VEL_HORIZ | self.IGN_SPEED_ACC, 0.0, 0.0, 0.0,
+                    vel.reason)
         if vel.deadbanded:
-            # The deadband says this sample is indistinguishable from noise,
-            # not that the aircraft is still. 5 Oct measured it discarding
-            # 49% of genuine motion below 25 m, so holding the last real
-            # value is nearer the truth than a zero in either case.
-            return _hold(f"deadbanded ({vel.speed_mps:.2f} < {vel.deadband_mps:.2f})")
-        self._remember_real_vel(vel)
+            return (ign | self.IGN_VEL_HORIZ | self.IGN_SPEED_ACC, 0.0, 0.0, 0.0,
+                    f"deadbanded ({vel.speed_mps:.2f} < {vel.deadband_mps:.2f})")
         # Speed accuracy the EKF can weigh, and it MUST grow with height.
         #
         # This used to be a flat 0.4 m/s widened only by staleness, and that
@@ -1605,24 +1245,6 @@ CSV_COLUMNS = ["t", "north_m", "east_m", "lon", "lat", "sigma_m",
     # frame. Two independent looks at the same ground is the first thing this
     # project has had that BOUNDS the flow's noise instead of inferring it.
     "flow_disagree_px", "flow_dual", "frame_age_s", "frames_skipped",
-    # n_flow_vetoed: frames whose two cameras disagreed by more than
-    # flow_disagree_max_px, so the step was thrown away. Counted since the
-    # gate was written and never recorded either. It is the companion of
-    # n_frame_stale and the reason both are here is the same: on 2 Nov the
-    # only way to find out that this gate had eaten 48% of run 411's flow -
-    # taking it from 20.3 Hz to 10.7 and doubling the velocity error - was to
-    # infer it from an empty derot_src column.
-    #
-    # It is logged next to flow_disagree_px on purpose: the pair says how
-    # often the gate fired AND how far apart the cameras were when it did,
-    # which is what any future change to the threshold has to be argued from.
-    "n_flow_vetoed",
-    # n_frame_stale: how many frames the age gate has thrown away so far.
-    # It was counted and never written anywhere - not to the CSV, not to the
-    # end-of-run summary - which is why it took a whole day on 2 Nov to notice
-    # that 8339 frames were over the limit and only 5 lost their step. A
-    # counter nobody can read is not a counter.
-    "n_frame_stale",
     "n_dr", "src", "rngfnd_m", "rngfnd_zero_m", "alt_amsl_m",
     # The saved image for THIS row, or empty on the rows where no
     # frame was saved (most of them - the gate saves a couple a
@@ -1656,40 +1278,7 @@ CSV_COLUMNS = ["t", "north_m", "east_m", "lon", "lat", "sigma_m",
     # FS_EKF_THRESH trips on the WORST of the first three; it is 1.2 on this
     # aircraft against a documented 0.8 default, and nothing has ever measured
     # what they actually reach while flying on the VPS.
-    "ekf_vel_var", "ekf_pos_h_var", "ekf_comp_var", "ekf_flags",
-    # EVERY MATCH THE WORKER ANSWERED, not only the accepted ones. 29 Oct.
-    #
-    # Until now the fix_* columns above were all written inside `if res.ok`,
-    # so a rejected match left no trace whatsoever. On vps_00286 fix_score
-    # appeared on 69 rows and all 69 of them were accepts, which makes the
-    # question that flight actually raised unanswerable: map_min_alt_m is 50,
-    # the aircraft crossed 50 m at t 266 and the first fix landed at 65.0 m at
-    # t 272.5, and nothing in the log distinguishes the three possible
-    # reasons - the matcher never ran, it ran and every answer was rejected,
-    # or the band was crossed in 7.5 s and it only got three attempts.
-    #
-    # The worker already computes all of it: FixResult carries ok, score,
-    # margin and a reason string for exactly this purpose ("why a rejected
-    # fix was rejected, for the recorder"). It was simply dropped here. These
-    # columns are the recorder it was written for.
-    "try_ok", "try_score", "try_margin", "try_inliers", "try_alt_m",
-    "try_reason",
-    # The worker's own tally, cumulative, so attempts that never reached a
-    # FixResult are visible too: skipped under min_alt_m, skipped by the fix
-    # period, or dropped because the thread was still busy with the last one.
-    # Without these a row with no try_* is ambiguous between "nothing was
-    # asked" and "something was asked and never came back".
-    "map_submitted", "map_completed", "map_skipped_low", "map_skipped_period",
-    "map_dropped", "map_warm",
-    # WHAT WE ACTUALLY SENT, not what we meant to. Added 1 Nov, when the rate
-    # went 4.3 -> 10 Hz and there was no way to check it had: the flight
-    # controller reports GPS2_RAW to a GCS at its own stream rate, which caps
-    # around 5 Hz for both receivers, so an outside observer counting distinct
-    # time_usec sees 4.97 Hz whether we send 5 or 50. gps_sent is the sender's
-    # own counter and its slope is the rate, measurable from any flight log.
-    # gps_skipped_rate is what the period gate turned away, so the two
-    # together say whether the gate or the loop is the limit.
-    "gps_sent", "gps_skipped_rate"]
+    "ekf_vel_var", "ekf_pos_h_var", "ekf_comp_var", "ekf_flags"]
 
 
 # w is only used by the quaternion rows, so it is last and empty elsewhere.
@@ -1781,12 +1370,6 @@ def csv_row(est, f, v, gN, gE, err):
             "1" if est.get("flow_dual") else "0",
             "" if est.get("frame_age_s") is None else f"{est['frame_age_s']:.4f}",
             est.get("frames_skipped") or 0,
-            est.get("n_flow_vetoed") or 0,
-            # Position matters: COLUMNS is positional and n_frame_stale was
-            # inserted directly after frames_skipped. On 20 Oct seven columns
-            # went into the row and not the header and every row was silently
-            # the wrong width; this is the same mistake waiting to happen.
-            est.get("n_frame_stale") or 0,
             est["n_dr"],
             est.get("src") or "",
             "" if f.get("rngfnd") is None else f"{f['rngfnd']:.2f}",
@@ -1801,17 +1384,7 @@ def csv_row(est, f, v, gN, gE, err):
             "" if f.get("ekf_vel_var") is None else f"{f['ekf_vel_var']:.4f}",
             "" if f.get("ekf_pos_h_var") is None else f"{f['ekf_pos_h_var']:.4f}",
             "" if f.get("ekf_comp_var") is None else f"{f['ekf_comp_var']:.4f}",
-            "" if f.get("ekf_flags") is None else int(f["ekf_flags"]),
-            "" if est.get("try_ok") is None else int(est["try_ok"]),
-            "" if est.get("try_score") is None else f"{est['try_score']:.4f}",
-            "" if est.get("try_margin") is None else f"{est['try_margin']:.4f}",
-            "" if est.get("try_inliers") is None else f"{est['try_inliers']:d}",
-            "" if est.get("try_alt_m") is None else f"{est['try_alt_m']:.1f}",
-            est.get("try_reason") or "",
-            est.get("map_submitted", ""), est.get("map_completed", ""),
-            est.get("map_skipped_low", ""), est.get("map_skipped_period", ""),
-            est.get("map_dropped", ""), est.get("map_warm", ""),
-            est.get("gps_sent", ""), est.get("gps_skipped_rate", "")]
+            "" if f.get("ekf_flags") is None else int(f["ekf_flags"])]
 
 
 # --------------------------------------------------------------------------- #
@@ -2475,7 +2048,7 @@ class VpsNode:
     STEP_ESCAPE_N = 5
 
     def __init__(self, cache: MapCache, focal_px: float, *,
-                 fix_period_s: float = 1.0, radius_m: float = 150.0,
+                 fix_period_s: float = 2.0, radius_m: float = 150.0,
                  max_corners: int = 300, K=None, D=None, focal_y_px=None,
                  derotate: str = "auto"):
         self.cache = cache
@@ -2517,16 +2090,7 @@ class VpsNode:
         # which is 1.8 cm per 100 m travelled. It is carried because it is free
         # and correct, NOT because it is a fix for anything.
         self.focal_y = float(focal_px if focal_y_px is None else focal_y_px)
-        # use_gpu PASSED, not defaulted - the same rule the map worker's
-        # four settings each had to learn. See VpsConfig.flow_gpu for what
-        # the GPU path is worth and what it costs.
-        # _vps_config() here rather than the _c0 read twenty lines down: the
-        # tracker is built before either of this method's config reads, and
-        # reaching forward to one of them is the UnboundLocalError the test
-        # suite caught the moment this line was added.
-        self.tracker = FlowTracker(
-            max_corners=max_corners, K=K, D=D,
-            use_gpu=bool(getattr(_vps_config(), "flow_gpu", True)))
+        self.tracker = FlowTracker(max_corners=max_corners, K=K, D=D)
         # The partner camera's own tracker, with ITS OWN intrinsics. See
         # VpsConfig.dual_flow. It is built only when the reader actually has
         # the partner open and calibrated - cam.dual_flow is already False if
@@ -2582,11 +2146,6 @@ class VpsNode:
             # fault that left map_window_alt_frac and map_query_shape dead.
             # All three defaults read 1.0 now and a test holds them together.
             fix_period_s=float(fix_period_s),
-            # PASSED, for the fourth time and the same reason as the three
-            # above. The worker defaults to a process; leaving this out would
-            # make VpsConfig.matcher_process dead the moment anyone set it.
-            use_process=bool(getattr(_cfg, "matcher_process", True)),
-            worker_core=getattr(_cfg, "matcher_core", None),
             principal_xy=(None if K is None
                           else (float(np.asarray(K).reshape(3, 3)[0, 2]),
                                 float(np.asarray(K).reshape(3, 3)[1, 2]))))
@@ -2907,32 +2466,6 @@ class VpsNode:
                 self._alt_bias_t = float(t)
         return self._alt_bias_m
 
-    def corrected_yaw(self, f):
-        """The heading to rotate CAMERA-FRAME measurements into north-east.
-
-        One function, because having two was the bug. Until 2 Nov
-        shift_to_ne took the raw FC yaw while only the map matcher's submit
-        added camera_yaw_offset_deg, so the mount's rotation went into every
-        metre of flow and nothing caught it - no test compared the call
-        sites. accel_to_ne had the same fault and kept it three hours longer.
-
-        Everything this is used on is in the CAMERA frame: the flow's pixel
-        shift, and the acceleration after _to_cam has put the BNO086's
-        samples into the camera's axes (verified at runtime - the node logs
-        "IMU->CAM_C rotation read from calibration (179.6 deg off the camera
-        frame)" on every start, 437 of them, and the fallback warning has
-        never once been printed). The camera is bolted to the airframe at an
-        angle, so the body yaw alone is the wrong rotation for any of them.
-
-        getattr with a default because the velocity and gap-fill tests build
-        these objects without running __init__ so that nothing opens a camera
-        or a serial port.
-        """
-        y = f.get("yaw") if hasattr(f, "get") else f
-        if y is None:
-            return None
-        return float(y) + float(getattr(self, "cam_yaw_offset_deg", 0.0))
-
     def step(self, f: dict) -> dict | None:
         """One frame in, one position estimate out."""
         if f["alt"] is None or f["yaw"] is None or self.origin is None:
@@ -2995,14 +2528,7 @@ class VpsNode:
             _roll = f.get("roll") or 0.0
             _pitch = f.get("pitch") or 0.0
             for ts, ax, ay, az in acc:
-                # THE MOUNT OFFSET. These samples are camera-frame - see
-                # corrected_yaw - and accel_to_ne applies the BODY
-                # attitude to them, so the yaw it is given has to carry
-                # the camera's rotation. Measured +4.42 deg three
-                # independent ways. shift_to_ne was corrected first; this
-                # path had exactly the same fault.
-                an, ae = accel_to_ne(ax, ay, self.corrected_yaw(f), az,
-                                     _roll, _pitch)
+                an, ae = accel_to_ne(ax, ay, f["yaw"], az, _roll, _pitch)
                 self.vel.push_accel(ts, an, ae)
 
         # The stereo pair, which until now was computed on the camera's own
@@ -3017,53 +2543,22 @@ class VpsNode:
         # and stamped "now" is read by the flight controller as motion: at
         # 3 m/s that is half a metre of invented travel, and it feeds the
         # velocity that ends every window.
-        # The gyro's rotation goes IN, so each track is derotated
-        # before the fit reduces them. See flow_odom.gyro_shift_px_at:
-        # the old path subtracted one centre-valued shift from the
-        # result, which is exact only at the optical centre and left
-        # 16-32% of the rotation behind on this 77.7 degree field.
-        #
-        # THESE THREE ARE SET BEFORE THE BRANCH, not inside it, and that is
-        # the whole of the 29 Oct fix. They used to live in the `else` below,
-        # while the SECOND camera's call - outside the branch - read _use_pp
-        # unconditionally. So a stale frame took the `if`, left _use_pp
-        # unassigned, and the partner's line raised UnboundLocalError and took
-        # the node down. 109 crashes are in vps_stderr.log and the last 25 are
-        # all this one; five of those are the build flying now.
-        #
-        # Hoisting them changes nothing else: both cameras sit on one airframe
-        # and turn together, so whatever rotation is removed from one has to
-        # be removed from the other, and the partner now gets exactly the
-        # value it would have got had the frame been fresh.
-        _gr, _gp = f.get("gyro_d_roll"), f.get("gyro_d_pitch")
-        _use_pp = (self.derotate != "fc" and _gr is not None
-                   and _gp is not None)
         _age = float(f.get("frame_age_s") or 0.0)
-        # _fe BEFORE the branch, not inside it. It was assigned only in the
-        # else, and the partner block below reads it on every frame - so the
-        # first stale frame raised UnboundLocalError and killed the node.
-        # That is what flight 2 Nov was: not a hang, a crash loop. The node
-        # died, systemd restarted it, the next stale frame killed it again,
-        # and by the time the pilot switched at 30 m the RC switch had been
-        # calling the VPS dead for 49 seconds.
-        _fe = None
         if _age > getattr(self, "frame_age_max_s", 0.12):
             self.n_frame_stale = getattr(self, "n_frame_stale", 0) + 1
             d, ntrk = None, 0
         else:
-            # The camera's own tracker when it gave features for this frame,
-            # the host's when it did not. Per frame, not per flight: a frame
-            # whose features were late must not stop the flow, and the two
-            # paths share everything from the depth gate down.
-            _fe = f.get("feats")
-            if _fe:
-                d, ntrk = self.tracker.step_device(
-                    f["img"], _fe, depth=f.get("depth"),
-                    derot_deg=((_gr, _gp) if _use_pp else None))
-            else:
-                d, ntrk = self.tracker.step(
-                    f["img"], depth=f.get("depth"),
-                    derot_deg=((_gr, _gp) if _use_pp else None))
+            # The gyro's rotation goes IN, so each track is derotated
+            # before the fit reduces them. See flow_odom.gyro_shift_px_at:
+            # the old path subtracted one centre-valued shift from the
+            # result, which is exact only at the optical centre and left
+            # 16-32% of the rotation behind on this 77.7 degree field.
+            _gr, _gp = f.get("gyro_d_roll"), f.get("gyro_d_pitch")
+            _use_pp = (self.derotate != "fc" and _gr is not None
+                       and _gp is not None)
+            d, ntrk = self.tracker.step(
+                f["img"], depth=f.get("depth"),
+                derot_deg=((_gr, _gp) if _use_pp else None))
         # THE SECOND CAMERA. Averaged into the first when both produced a
         # shift on this frame; ignored entirely when it did not, so a partner
         # that drops out costs nothing but the averaging.
@@ -3089,25 +2584,9 @@ class VpsNode:
             # on 41% of rows, and the aircraft dropped to ALT_HOLD four
             # times. Both cameras are on one airframe and turn together;
             # whatever is removed from one is removed from the other.
-            # BOTH CAMERAS ON ONE BACKEND, or flow_disagree_px stops meaning
-            # what it means. Flight 163 is the lesson: the primary was
-            # derotated per track and the partner was not, and the gap
-            # between them became the rotation - p50 0.06 px to 2.32, the
-            # veto on 95% of frames, four ALT_HOLDs. A primary on the device
-            # and a partner on the host would be the same mistake wearing a
-            # different hat, so the partner follows whatever the primary just
-            # used on THIS frame.
-            _fb = f.get("feats_partner") if _fe else None
-            if _fb:
-                db, ntrk_b = tracker_b.step_device(
-                    f["img_partner"], _fb, depth=f.get("depth"),
-                    derot_deg=((_gr, _gp) if _use_pp else None))
-            elif _fe:
-                db, ntrk_b = None, 0
-            else:
-                db, ntrk_b = tracker_b.step(
-                    f["img_partner"], depth=f.get("depth"),
-                    derot_deg=((_gr, _gp) if _use_pp else None))
+            db, ntrk_b = tracker_b.step(
+                f["img_partner"], depth=f.get("depth"),
+                derot_deg=((_gr, _gp) if _use_pp else None))
             if d is not None and db is not None and (ntrk + ntrk_b) > 0:
                 self.flow_disagree_px = float(np.hypot(*(np.asarray(db, float)
                                                          - np.asarray(d, float))))
@@ -3256,19 +2735,8 @@ class VpsNode:
                 self.n_derot_both += 1
             else:
                 self.derot_dis_roll = self.derot_dis_pitch = None
-            # THE MOUNT OFFSET, which this path never had. Until 2 Nov
-            # camera_yaw_offset_deg went only to the map matcher's submit
-            # below; shift_to_ne got the raw FC yaw, so the camera's rotation
-            # relative to the airframe rotated every metre of flow straight
-            # into the position. Measured three independent ways and they
-            # agree to 0.1 deg: +4.32 on flight 406, +4.41 on 418, and +4.42
-            # from sliding the aircraft on the ground - north leg +3.04,
-            # south leg +5.29. Applying -4.42 to the slide leaves -1.38 and
-            # +0.87. Worth 8.6 m of 406's 88.7 m, 1.6 of 418's 14.5 - about
-            # 6-11% of the drift, systematic and growing with distance.
             dn, de = shift_to_ne(d, altitude_m=f["alt"], focal_px=self.focal,
-                                 yaw_deg=self.corrected_yaw(f),
-                                 focal_y_px=self.focal_y)
+                                 yaw_deg=f["yaw"], focal_y_px=self.focal_y)
             # ONE decision for both consumers. Until 21 Oct predict() ran here
             # unconditionally and push_flow() below could then refuse the same
             # displacement on its own physical gate - so the position swallowed
@@ -3371,7 +2839,7 @@ class VpsNode:
             lon, lat = self.to_lonlat(*self.fuser.pos)
             if self.worker.submit(f["img"], prior_lon=lon, prior_lat=lat,
                                   altitude_m=f["alt"],
-                                  yaw_deg=self.corrected_yaw(f),
+                                  yaw_deg=f["yaw"] + self.cam_yaw_offset_deg,
                                   # For the nadir correction: the frame's own
                                   # attitude, so the matcher's answer is moved
                                   # from the image centre to under the
@@ -3384,19 +2852,6 @@ class VpsNode:
         fix_inl = None
         fix_age = None
         fix_dis = None
-        # THE ATTEMPT, accepted or not. Read before the `if res.ok` below,
-        # because that branch is what used to swallow every rejection. A
-        # non-ok FixResult is still a measurement: it says the matcher ran,
-        # at what height, what it scored, and which gate turned it away.
-        try_ok = try_score = try_margin = try_inl = try_alt = None
-        try_reason = ""
-        if res is not None:
-            try_ok = int(bool(res.ok))
-            try_score = float(getattr(res, "score", 0.0) or 0.0)
-            try_margin = float(getattr(res, "margin", 0.0) or 0.0)
-            try_inl = int(getattr(res, "inliers", 0) or 0)
-            try_alt = float(getattr(res, "altitude_m", 0.0)) or None
-            try_reason = str(getattr(res, "reason", "") or "")
         if res is not None and res.ok:
             fN = (res.lat - self.origin[1]) * M_PER_DEG_LAT
             fE = (res.lon - self.origin[0]) * self.mlon
@@ -3436,19 +2891,6 @@ class VpsNode:
                     step_dt_s=getattr(self, "step_dt", None),
                     fix_lon=fix_lon, fix_lat=fix_lat, fix_score=fix_score,
                     fix_inliers=fix_inl, fix_alt_m=fix_alt,
-                    try_ok=try_ok, try_score=try_score,
-                    try_margin=try_margin, try_inliers=try_inl,
-                    try_alt_m=try_alt, try_reason=try_reason,
-                    # getattr for the same reason the counters above use it:
-                    # the tests build VpsNode through __new__ and it has no
-                    # worker. A missing tally writes blank, not a crash.
-                    map_submitted=getattr(self.worker, "submitted", ""),
-                    map_completed=getattr(self.worker, "completed", ""),
-                    map_skipped_low=getattr(self.worker, "skipped_low", ""),
-                    map_skipped_period=getattr(self.worker,
-                                               "skipped_period", ""),
-                    map_dropped=getattr(self.worker, "dropped", ""),
-                    map_warm=getattr(self.worker, "warm_runs", ""),
                     north=float(self.fuser.pos[0]), east=float(self.fuser.pos[1]),
                     lon=lon, lat=lat, sigma=self.fuser.sigma_m,
                     # Two sigmas, and the difference is the whole 20 Oct
@@ -3472,8 +2914,6 @@ class VpsNode:
                     flow_disagree_px=getattr(self, "flow_disagree_px", None),
                     frame_age_s=f.get("frame_age_s"),
                     frames_skipped=f.get("frames_skipped"),
-                    n_flow_vetoed=getattr(self, "n_flow_vetoed", 0),
-                    n_frame_stale=getattr(self, "n_frame_stale", 0),
                     flow_dual=(tracker_b is not None
                                and f.get("img_partner") is not None),
                     derot_src=("gyro" if self.n_derot_gyro > _dg
@@ -3491,31 +2931,7 @@ class VpsNode:
         self.worker.stop()
 
 
-def _exit_on_sigterm(signum, frame):
-    """Turn systemd's SIGTERM into a normal exit, so the finally blocks run.
-
-    WITHOUT THIS THE CAMERA IS NEVER CLOSED. Python's default SIGTERM ends
-    the process outright - no exception, no finally - so dai.Device is
-    abandoned with its pipeline running. The device's watchdog then fires
-    1.5 s later and writes a crash dump, which the NEXT connection reports:
-    that is the "Device has crashed" line that appears at the START of a run
-    and belongs to the previous one.
-
-    Seen on every single stop. The dumps say it plainly - the last healthy
-    line is "WD:1876 TX:89394201" and the next is "WD:1360 TX:0", the host
-    gone and the countdown running out - and they go back to 22 Oct, which
-    is as far as the cache does.
-
-    It also explains why bringing the node back needs the 03e7:2485 dance:
-    a device that reset itself is re-enumerating while the next process is
-    already asking for it.
-    """
-    raise SystemExit(0)
-
-
 def main():
-    import signal
-    signal.signal(signal.SIGTERM, _exit_on_sigterm)
     ap = argparse.ArgumentParser()
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--replay", help="recorded flight folder")
@@ -3552,7 +2968,7 @@ def main():
                     help="camera IMU report rate in Hz for all three sensors "
                          "(default from VpsConfig.imu_rate, 100). They share "
                          "one packet, so this sets them together.")
-    ap.add_argument("--fix-period", type=float, default=1.0,
+    ap.add_argument("--fix-period", type=float, default=2.0,
                     help="seconds between map fixes. 1.0 was tried on 22 Oct "
                          "because the pilot's archived 11 Oct reports record "
                          "'0.500 m per fix at 1 fix/s' - later evidence than "
@@ -3760,19 +3176,10 @@ def main():
 
     gps_sender = None
     if a.send_gps:
-        # BOTH have to agree, and the config is passed rather than defaulted
-        # for the same reason map_window_alt_frac and map_query_shape had to
-        # be: a setting the node never reads is a setting that silently does
-        # nothing. --no-send-vel still forces it off.
-        _send_vel = bool(a.send_vel) and bool(
-            getattr(_vps_config(), "send_velocity", True))
         gps_sender = GpsInputSender(a.fc_port, a.fc_baud, gps_id=a.gps_id,
-                                    send_velocity=_send_vel)
+                                    send_velocity=a.send_vel)
         print(f"GPS INPUT SENDER ON - the estimate will arrive as GPS{a.gps_id+1}.\n"
               f"   (horiz_accuracy carries the fuser's own sigma)")
-        print("   VELOCITY: " + ("ON" if _send_vel else
-              "OFF - position only, so no speed accuracy is declared and "
-              "EKF3's GPS quality check cannot be tripped (log 116)"))
 
     sender = None
     if a.send_fc:
@@ -3816,13 +3223,7 @@ def main():
     # that silently ran on the primary's K would be worse than none.
     if getattr(src, "dual_flow", False) and getattr(src, "K_partner", None) is not None:
         node.tracker_b = FlowTracker(max_corners=a.corners,
-                                     K=src.K_partner, D=src.D_partner,
-                                     use_gpu=node.tracker.gpu)
-        print(f"FLOW BACKEND: primary "
-              f"{'GPU (VPI CUDA)' if node.tracker.gpu else 'CPU'}"
-              + ("" if node.tracker.gpu
-                 else f" - VPI unavailable: {node.tracker.vpi_error}"),
-              flush=True)
+                                     K=src.K_partner, D=src.D_partner)
         print(f"DUAL FLOW ON: {STEREO_PARTNER_NAME} has its own tracker and its "
               f"own intrinsics. Shifts are averaged weighted by track count, "
               f"and their disagreement is written to every row.", flush=True)
@@ -3951,432 +3352,360 @@ def main():
     _src_was = [None]
     errs, t_start, n = [], time.perf_counter(), 0
     last_sync = 0.0
-    # Frame-level failure state. consec is what tells a bug on one frame
-    # apart from a camera that is gone.
-    CONSEC_MAX = 50
-    _frame_err_consec = 0
-    _frame_err_total = 0
-    _frame_err_kinds: dict[str, int] = {}
     try:
         while True:
-            # EVERY frame in its own try, and this is the whole answer to
-            # "stop the VPS from dying". Until now the 350 lines below ran
-            # bare inside `while True`: one frame that raised took the
-            # PROCESS down, and systemd brought it back cold. Measured cost
-            # of one such death on 2 Nov: the gap between consecutive run
-            # folders was 8.4 s, 9.7 s, 16.4 s, 19.7 s and 37.2 s - not the
-            # unit's RestartSec=5, because the restart also pays for the
-            # DepthAI pipeline boot and a fresh N-frame flow baseline. Four
-            # frames out of 46333 raised that day and they cost the whole
-            # VPS leg: no GPS_INPUT for tens of seconds, GPS2 went stale,
-            # and the aircraft was in ALT_HOLD at 30 m.
-            #
-            # Contained, the same four frames cost one loop tick each - 45 ms
-            # - and nothing else. Nothing is sent for a frame that raised,
-            # because every send is inside this block, so a failing node
-            # still goes quiet and the FC still falls back. That behaviour
-            # is unchanged and it is the behaviour the pilot asked to keep.
-            #
-            # What this must NOT do is make a dead camera look alive. If
-            # src.read() itself is the thing raising, every frame raises, and
-            # a contained loop would spin on it for ever while the liveness
-            # file went on being rewritten. So consecutive failures are
-            # counted and at CONSEC_MAX the exception is let go: the process
-            # exits, systemd restarts it cold, and that is the only thing
-            # that can reopen a camera. 50 ticks is 2.3 s at 22 Hz.
-            try:
-                f = src.read()
-                if f is None:
-                    break
-                if node.origin is None:
-                    # Precedence, and the order is the 13 Oct fix: an explicitly
-                    # passed origin, then the point the PILOT TYPED on the RC, and
-                    # only then the live receiver. It used to be the receiver that
-                    # won whenever it had a fix, which is how the aircraft picked
-                    # up a stale site by itself after the pilot drove to a new one.
-                    #
-                    # Every start says which of the three it was and whether that
-                    # point is inside the loaded sheet, because a take-off point
-                    # outside it means no map fixes for the whole flight - the
-                    # first item on the 13 Oct list of things to confirm.
-                    cli = None
-                    if a.origin:
-                        lo, la = (float(x) for x in a.origin.split(","))
-                        cli = (lo, la)
-                    chosen, why = choose_origin(cli, scr_origin, gps_primary,
-                                                f["gps"])
-                    if chosen is None:
-                        if not _origin_refused[0]:
-                            _origin_refused[0] = True
-                            print(f"NO ORIGIN: {why}. The receiver cannot be used "
-                                  f"here.")
-                            print("  Set SCR_USER1/2 from the RC, or pass "
-                                  "--origin lon,lat. Waiting.")
-                            notifier.event("noorigin", True,
-                                           "VPS NO ORIGIN - SET SCR_USER1/2",
-                                           Notifier.SEV_CRIT)
-                        continue
-                    # Only the live receiver states its own accuracy. --origin and
-                    # SCR_USER1/2 are both typed, so they get None and
-                    # absolute_sigma_m falls back to the map's own error.
-                    boot_sigma = (f.get("gps1_hacc")
-                                  if why.startswith("the live receiver") else None)
-                    node.set_origin(*chosen, sigma_m=boot_sigma)
-                    _armed_was[0] = f.get("armed")
-                    olon, olat = node.origin
-                    covered = cache.covers(olon, olat)
-                    print(f"origin from {why}: {olat:.6f}, {olon:.6f}")
-                    print(f"  this point is known to "
-                          f"{'no stated accuracy' if boot_sigma is None else f'{boot_sigma:.1f} m'}"
-                          f", so the FC is told {node.absolute_sigma_m:.1f} m at the start")
-                    notifier.event("origin", why, f"VPS ORIGIN {why}"[:50],
-                                   Notifier.SEV_INFO)
-                    notifier.event("sheet", covered,
-                                   "VPS SHEET OK" if covered
-                                   else "VPS SHEET MISS - NO MAP FIX",
-                                   Notifier.SEV_INFO if covered else Notifier.SEV_CRIT)
-                    print(f"  sheet covers this point: "
-                          f"{'YES' if covered else 'NO - there will be NO map fixes'}")
-                    if not covered:
-                        print(f"  loaded sheet: {a.map}")
-                est = node.step(f)
-                if est is None:
+            f = src.read()
+            if f is None:
+                break
+            if node.origin is None:
+                # Precedence, and the order is the 13 Oct fix: an explicitly
+                # passed origin, then the point the PILOT TYPED on the RC, and
+                # only then the live receiver. It used to be the receiver that
+                # won whenever it had a fix, which is how the aircraft picked
+                # up a stale site by itself after the pilot drove to a new one.
+                #
+                # Every start says which of the three it was and whether that
+                # point is inside the loaded sheet, because a take-off point
+                # outside it means no map fixes for the whole flight - the
+                # first item on the 13 Oct list of things to confirm.
+                cli = None
+                if a.origin:
+                    lo, la = (float(x) for x in a.origin.split(","))
+                    cli = (lo, la)
+                chosen, why = choose_origin(cli, scr_origin, gps_primary,
+                                            f["gps"])
+                if chosen is None:
+                    if not _origin_refused[0]:
+                        _origin_refused[0] = True
+                        print(f"NO ORIGIN: {why}. The receiver cannot be used "
+                              f"here.")
+                        print("  Set SCR_USER1/2 from the RC, or pass "
+                              "--origin lon,lat. Waiting.")
+                        notifier.event("noorigin", True,
+                                       "VPS NO ORIGIN - SET SCR_USER1/2",
+                                       Notifier.SEV_CRIT)
                     continue
-                n += 1
+                # Only the live receiver states its own accuracy. --origin and
+                # SCR_USER1/2 are both typed, so they get None and
+                # absolute_sigma_m falls back to the map's own error.
+                boot_sigma = (f.get("gps1_hacc")
+                              if why.startswith("the live receiver") else None)
+                node.set_origin(*chosen, sigma_m=boot_sigma)
+                _armed_was[0] = f.get("armed")
+                olon, olat = node.origin
+                covered = cache.covers(olon, olat)
+                print(f"origin from {why}: {olat:.6f}, {olon:.6f}")
+                print(f"  this point is known to "
+                      f"{'no stated accuracy' if boot_sigma is None else f'{boot_sigma:.1f} m'}"
+                      f", so the FC is told {node.absolute_sigma_m:.1f} m at the start")
+                notifier.event("origin", why, f"VPS ORIGIN {why}"[:50],
+                               Notifier.SEV_INFO)
+                notifier.event("sheet", covered,
+                               "VPS SHEET OK" if covered
+                               else "VPS SHEET MISS - NO MAP FIX",
+                               Notifier.SEV_INFO if covered else Notifier.SEV_CRIT)
+                print(f"  sheet covers this point: "
+                      f"{'YES' if covered else 'NO - there will be NO map fixes'}")
+                if not covered:
+                    print(f"  loaded sheet: {a.map}")
+            est = node.step(f)
+            if est is None:
+                continue
+            n += 1
 
-                # Which source the aircraft is actually navigating on, NOW, not at
-                # startup. The pilot's rule: on the real receiver nothing of ours
-                # reaches the flight controller, and either way the change is
-                # announced on the radio.
-                watcher.poll(est["t"])
-                on_vps = watcher.on_vps()
-                est["src"] = ("VPS" if watcher.value == 1
-                              else "GPS1" if watcher.value == 0 else "?")
+            # Which source the aircraft is actually navigating on, NOW, not at
+            # startup. The pilot's rule: on the real receiver nothing of ours
+            # reaches the flight controller, and either way the change is
+            # announced on the radio.
+            watcher.poll(est["t"])
+            on_vps = watcher.on_vps()
+            est["src"] = ("VPS" if watcher.value == 1
+                          else "GPS1" if watcher.value == 0 else "?")
+            notifier.event(
+                "source", est["src"],
+                "VPS ON - injecting as GPS2" if watcher.value == 1
+                else "GPS1 ON - VPS data blocked" if watcher.value == 0
+                else "SOURCE UNKNOWN - cannot read GPS_PRIMARY",
+                Notifier.SEV_INFO if watcher.value == 1 else Notifier.SEV_CRIT)
+
+            # The lidar's ZERO, announced on the radio while still on the
+            # ground. ArduPilot will not declare the aircraft landed unless
+            # the rangefinder reads under 2 m in absolute terms, and this
+            # sensor's zero wanders by one to two metres between power cycles
+            # (0.82, 2.53 and 0.96 m on the same ground on 20 Oct). On the
+            # 20 Oct flight it sat at 2.53 m, the land detector never fired,
+            # DISARM_DELAY never ran and the battery had to be pulled. This
+            # changes nothing and blocks nothing - it only says so, before
+            # take-off, while there is still time to run lidar_zero.py.
+            rng = f.get("rngfnd")
+            if rng is not None and f.get("armed") is False:
                 notifier.event(
-                    "source", est["src"],
-                    "VPS ON - injecting as GPS2" if watcher.value == 1
-                    else "GPS1 ON - VPS data blocked" if watcher.value == 0
-                    else "SOURCE UNKNOWN - cannot read GPS_PRIMARY",
-                    Notifier.SEV_INFO if watcher.value == 1 else Notifier.SEV_CRIT)
+                    "lidarzero", rng < 1.5,
+                    f"VPS LIDAR ZERO OK {rng:.2f}m" if rng < 1.5
+                    else f"LIDAR ZERO {rng:.1f}m - NO AUTO-DISARM"[:50],
+                    Notifier.SEV_INFO if rng < 1.5 else Notifier.SEV_WARN)
 
-                # The lidar's ZERO, announced on the radio while still on the
-                # ground. ArduPilot will not declare the aircraft landed unless
-                # the rangefinder reads under 2 m in absolute terms, and this
-                # sensor's zero wanders by one to two metres between power cycles
-                # (0.82, 2.53 and 0.96 m on the same ground on 20 Oct). On the
-                # 20 Oct flight it sat at 2.53 m, the land detector never fired,
-                # DISARM_DELAY never ran and the battery had to be pulled. This
-                # changes nothing and blocks nothing - it only says so, before
-                # take-off, while there is still time to run lidar_zero.py.
-                rng = f.get("rngfnd")
-                if rng is not None and f.get("armed") is False:
-                    notifier.event(
-                        "lidarzero", rng < 1.5,
-                        f"VPS LIDAR ZERO OK {rng:.2f}m" if rng < 1.5
-                        else f"LIDAR ZERO {rng:.1f}m - NO AUTO-DISARM"[:50],
-                        Notifier.SEV_INFO if rng < 1.5 else Notifier.SEV_WARN)
-
-                # THE ORIGIN IS RE-TAKEN AT ARM. The pilot's instruction, and
-                # three flights of evidence behind it: SCR_USER1/2 was left 147,
-                # 148 and 157 m from where the aircraft actually stood, because it
-                # is typed by hand and the aircraft moves. Every VPS position is
-                # measured from the origin, so flipping to the VPS with the origin
-                # 150 m out hands the flight controller a 150 m step.
-                #
-                # At the moment of arming the aircraft is standing still on the
-                # ground at the place it is about to fly from, which is the one
-                # moment its position is certainly known. So:
-                #
-                #   on the receiver (GPS_PRIMARY 0) -> take the receiver's fix
-                #   on the VPS                      -> take SCR_USER1/2
-                #
-                # and the VIO's accumulated displacement goes back to zero,
-                # because it was measured from the origin that just moved.
-                # Anchoring is the VIO's job; the map only corrects it afterwards.
-                armed_now = f.get("armed")
-                if (armed_now is True and _armed_was[0] is not True
-                        and node.origin is not None):
-                    src_now = watcher.value
-                    new_o = why_o = None
-                    # The receiver states its own accuracy and SCR_USER1/2 cannot:
-                    # one is a measurement, the other is typed. Measured in the
-                    # recent logs, GPS1 reported 1.08 to 3.01 m with a lock and
-                    # UINT32_MAX without one (the reader discards that), so taking
-                    # the origin from the receiver is worth about 2 m of declared
-                    # uncertainty. A hand-typed point gets None, which
-                    # absolute_sigma_m reads as the map's own error - and the three
-                    # flights that flew on a stale SCR_USER were 147-157 m out.
-                    new_sigma = None
-                    if src_now == 0 and f["gps"]:
-                        new_o, why_o = f["gps"], "receiver at arm"
-                        new_sigma = f.get("gps1_hacc")
-                    elif scr_origin is not None:
-                        new_o, why_o = scr_origin, "SCR_USER1/2 at arm"
-                    if new_o is not None:
-                        moved = float(np.hypot(
-                            (new_o[1] - node.origin[1]) * M_PER_DEG_LAT,
-                            (new_o[0] - node.origin[0]) * node.mlon))
-                        node.set_origin(*new_o, sigma_m=new_sigma)
-                        node.fuser.reset_displacement()
-                        # Same reason as the handover below: the origin moved, so
-                        # anything measured from the old one is meaningless, and
-                        # that includes the velocity the bridge had integrated
-                        # while the aircraft sat on the ground before arming.
-                        node.vel.reset_state("origin re-taken at arm")
-                        print(f"ARM: origin re-taken from {why_o}: "
-                              f"{new_o[1]:.6f}, {new_o[0]:.6f} "
-                              f"(moved {moved:.0f} m, origin known to "
-                              f"{'unmeasured' if new_sigma is None else f'{new_sigma:.1f} m'}"
-                              f", declaring {node.absolute_sigma_m:.1f} m)", flush=True)
-                        notifier.event("reanchor", round(moved),
-                                       f"VPS ORIGIN {why_o} {moved:.0f}m"[:50],
-                                       Notifier.SEV_INFO if moved < 50
-                                       else Notifier.SEV_WARN)
-                    else:
-                        notifier.event("reanchor", "none",
-                                       "VPS ORIGIN NOT RE-TAKEN AT ARM",
-                                       Notifier.SEV_WARN)
-                # THE HANDOVER, IN FLIGHT. The pilot's instruction, 21 Oct, and the
-                # reasoning is his own: when the switch goes the other way, from the
-                # VPS back to GPS, the flight controller does not drag the aircraft
-                # across whatever error had built up - "man lo error 50 mtr hai tho
-                # gps drone ko 50 mtr lekar correct nahi karta, wo direct apne
-                # current position inject kar deta hai aur wahi stable ho jata hai".
-                # Handing over TO the VPS has to behave the same way.
-                #
-                # It did not. The origin was only ever re-taken at the ARM edge, so
-                # a flight that armed on GPS, flew, and then switched to the VPS at
-                # altitude started sending `takeoff origin + every metre of VIO
-                # drift accumulated during the whole GPS phase`. Measured on the
-                # three flights with real travel below 60 m: 5.73 m and 5.24 m of
-                # drift on two of them, and a single-sample 20.55 m jump on
-                # vps_00016 at 41 m altitude. The EKF holds the GPS position at that
-                # instant, so it sees a step of exactly that size.
-                #
-                # So on the transition INTO the VPS, while armed, the origin is
-                # re-taken from where the flight controller currently believes it is
-                # and the VIO's displacement goes back to zero. The first position
-                # the VPS then sends equals what the EKF already holds, which is a
-                # handover with no jump and no drift carried across it. Nothing is
-                # corrected, nothing is flown - exactly as the pilot described.
-                #
-                # DISARMED is deliberately excluded. A switch flipped on the ground
-                # is case one - take off on the VPS - and there the origin must come
-                # from SCR_USER1/2, which the arm edge above already does.
-                #
-                # f["gps"] is GLOBAL_POSITION_INT, which is the EKF's own fused
-                # position rather than the raw receiver. That is the right source
-                # HERE and not a compromise: the whole point is to start from what
-                # the flight controller believes, because that is what makes the
-                # step zero. While the aircraft is on GPS that belief is GPS-driven.
-                # It is read once, at this edge, so nothing loops.
-                src_val = watcher.value
-                # _armed_was[0] is True, not armed_now: the aircraft has to have
-                # ALREADY been armed on the previous frame. That is what "in flight"
-                # means here, and it also stops this colliding with the arm edge
-                # above if the pilot flips to the VPS and arms in the same frame -
-                # that is case one, and the arm edge's SCR_USER1/2 must stand.
-                if should_handover(src_val, _src_was[0], _armed_was[0],
-                                   armed_now, node.origin is not None):
-                    if f["gps"]:
-                        moved = float(np.hypot(
-                            (f["gps"][1] - node.origin[1]) * M_PER_DEG_LAT,
-                            (f["gps"][0] - node.origin[0]) * node.mlon))
-                        carried = float(np.hypot(*node.fuser.pos))
-                        node.set_origin(*f["gps"], sigma_m=f.get("gps1_hacc"))
-                        node.fuser.reset_displacement()
-                        # AND THE VELOCITY, at the pilot's instruction, 23 Oct:
-                        # nothing from before the switch crosses it. Where the GPS
-                        # is, that is where the VPS starts.
-                        #
-                        # reset_displacement above has always zeroed the POSITION
-                        # and the variance - measured over ten switches on flight
-                        # 00000233, displacement went from up to 74.5 m down to
-                        # 0.4-2.0 m every time. The bridge was the half nobody
-                        # reset, because it had no reset to call: the integrated
-                        # velocity, the learned bias, the last flow and accel
-                        # samples, the slew reference and every timer ran
-                        # continuously from node start, through however long the
-                        # aircraft sat on GPS, and straight into the first
-                        # GPS_INPUT packet after the switch.
-                        node.vel.reset_state("handover to VPS")
-                        print(f"HANDOVER to VPS in flight: origin re-taken from the "
-                              f"FC's own position {f['gps'][1]:.6f}, {f['gps'][0]:.6f} "
-                              f"(origin moved {moved:.1f} m, {carried:.1f} m of VIO "
-                              f"displacement discarded, declaring "
-                              f"{node.absolute_sigma_m:.1f} m)", flush=True)
-                        notifier.event("handover", round(carried),
-                                       f"VPS HANDOVER - dropped {carried:.0f}m drift"[:50],
-                                       Notifier.SEV_INFO)
-                    else:
-                        # No fix to hand over from - which is the jammed case this
-                        # aircraft exists for. Keep the origin and the displacement
-                        # we have: they carry whatever drift has built up, and that
-                        # is far better than falling back to SCR_USER1/2, which on
-                        # three flights sat 147-157 m from the aircraft.
-                        notifier.event("handover", "noloc",
-                                       "VPS HANDOVER - NO FIX, drift carried",
-                                       Notifier.SEV_WARN)
-                        print("HANDOVER to VPS in flight: the FC had no position to "
-                              "hand over, so the existing origin and displacement "
-                              "are kept (drift is carried across)", flush=True)
-                _src_was[0] = src_val
-                _armed_was[0] = armed_now
-
-                gN = gE = err = None
-                if f["gps"]:
-                    gN = (f["gps"][1] - node.origin[1]) * M_PER_DEG_LAT
-                    gE = (f["gps"][0] - node.origin[0]) * node.mlon
-                    err = float(np.hypot(est["north"] - gN, est["east"] - gE))
-                    errs.append(err)
-                # And the same against the RAW receiver, which is a different
-                # measurement and the only independent one. err above is against
-                # GLOBAL_POSITION_INT, the EKF's own fused position; once the
-                # aircraft flies on the VPS that is partly our own output returning,
-                # and comparing against it flatters us. This pair does not.
-                est["g1_north"] = est["g1_east"] = est["g1_err"] = None
-                if f.get("gps1_raw"):
-                    g1 = f["gps1_raw"]
-                    est["g1_north"] = (g1[1] - node.origin[1]) * M_PER_DEG_LAT
-                    est["g1_east"] = (g1[0] - node.origin[0]) * node.mlon
-                    est["g1_err"] = float(np.hypot(est["north"] - est["g1_north"],
-                                                   est["east"] - est["g1_east"]))
-                v = est["vel"]
-                if fwriter is not None:
-                    # ARMED ONLY, at the pilot's instruction (20 Oct). Images are
-                    # wanted for the flight, not for the hour the aircraft sits on
-                    # the ground with the services up: that hour is where the 29 MB
-                    # a minute and the bench frames at alt 0.1 m come from, and
-                    # every one of them is a frame offline matching has to be told
-                    # to ignore.
-                    #
-                    # `armed` is the FC's own flag out of the telemetry snapshot.
-                    # Three states, and the direction of each is deliberate:
-                    # True keeps saving, False stops, and None - no FC, or a link
-                    # that never carried a heartbeat - does NOT save, because
-                    # "cannot tell" on the bench is the common case and a flight
-                    # always has a link. If the link dies mid-flight the snapshot
-                    # FREEZES rather than emptying (see Telemetry), so armed stays
-                    # True and the recording continues, which is the safe way for
-                    # that failure to fall.
-                    armed = f.get("armed")
-                    if armed is True:
-                        # After n, so the name carries the index of the row about
-                        # to be written, and before csv_row, so that row names its
-                        # own image. offer() encodes nothing and waits for
-                        # nothing: if the writer is behind, this returns None and
-                        # the frame is gone.
-                        est["frame_file"] = fwriter.offer(f["img"], n) or ""
-                    elif not a.frames_any_time:
-                        est["frame_file"] = ""
-                    else:
-                        est["frame_file"] = fwriter.offer(f["img"], n) or ""
-                    notifier.event(
-                        "frames", bool(armed) or a.frames_any_time,
-                        f"VPS FRAMES ON {fwriter.hz:g}Hz" if (bool(armed)
-                                                              or a.frames_any_time)
-                        else "VPS FRAMES OFF - DISARMED",
-                        Notifier.SEV_INFO)
-                if wr:
-                    # The sender is main()'s, not the node's, so its tallies are
-                    # put on the estimate here rather than where the rest are
-                    # gathered. Blank when there is no sender at all, which is
-                    # every bench run that does not inject.
-                    if gps_sender is not None:
-                        est["gps_sent"] = gps_sender.sent
-                        est["gps_skipped_rate"] = gps_sender.skipped_rate
-                    wr.writerow(csv_row(est, f, v, gN, gE, err))
-                if imu_wr is not None:
-                    imu_wr.writerows(imu_rows(f))
-                # A row in the page cache is not a row on the disk. The battery
-                # comes out of this aircraft by hand, and when it did on 20 Oct
-                # the last block of two runs came back as NUL bytes.
-                if a.sync_every > 0 and est["t"] - last_sync >= a.sync_every:
-                    last_sync = est["t"]
-                    for h_ in (fh, imu_fh):
-                        if h_ is None:
-                            continue
-                        try:
-                            h_.flush()
-                            os.fsync(h_.fileno())
-                        except OSError:
-                            pass
-                notifier.tick(est["t"], est, node)
-
-                # Gated on the source. GPS_PRIMARY=0 means the pilot asked for the
-                # real M9N, so the VPS stops injecting entirely - not "sends and is
-                # ignored", stops. Unknown keeps sending; see SourceWatcher for why
-                # the two directions are not symmetrical.
-                if gps_sender is not None and on_vps:
-                    amsl_ref.observe(f.get("gps1_fix"), f.get("gps1_alt"), f["alt"])
-                    amsl = amsl_ref.amsl(f["alt"])
-                    notifier.event("amsl", amsl_ref.source or False,
-                                   f"VPS AMSL from {amsl_ref.source}"[:50]
-                                   if amsl_ref.source
-                                   else "VPS AMSL UNKNOWN - pass --site-alt",
-                                   Notifier.SEV_INFO if amsl_ref.source
+            # THE ORIGIN IS RE-TAKEN AT ARM. The pilot's instruction, and
+            # three flights of evidence behind it: SCR_USER1/2 was left 147,
+            # 148 and 157 m from where the aircraft actually stood, because it
+            # is typed by hand and the aircraft moves. Every VPS position is
+            # measured from the origin, so flipping to the VPS with the origin
+            # 150 m out hands the flight controller a 150 m step.
+            #
+            # At the moment of arming the aircraft is standing still on the
+            # ground at the place it is about to fly from, which is the one
+            # moment its position is certainly known. So:
+            #
+            #   on the receiver (GPS_PRIMARY 0) -> take the receiver's fix
+            #   on the VPS                      -> take SCR_USER1/2
+            #
+            # and the VIO's accumulated displacement goes back to zero,
+            # because it was measured from the origin that just moved.
+            # Anchoring is the VIO's job; the map only corrects it afterwards.
+            armed_now = f.get("armed")
+            if (armed_now is True and _armed_was[0] is not True
+                    and node.origin is not None):
+                src_now = watcher.value
+                new_o = why_o = None
+                # The receiver states its own accuracy and SCR_USER1/2 cannot:
+                # one is a measurement, the other is typed. Measured in the
+                # recent logs, GPS1 reported 1.08 to 3.01 m with a lock and
+                # UINT32_MAX without one (the reader discards that), so taking
+                # the origin from the receiver is worth about 2 m of declared
+                # uncertainty. A hand-typed point gets None, which
+                # absolute_sigma_m reads as the map's own error - and the three
+                # flights that flew on a stale SCR_USER were 147-157 m out.
+                new_sigma = None
+                if src_now == 0 and f["gps"]:
+                    new_o, why_o = f["gps"], "receiver at arm"
+                    new_sigma = f.get("gps1_hacc")
+                elif scr_origin is not None:
+                    new_o, why_o = scr_origin, "SCR_USER1/2 at arm"
+                if new_o is not None:
+                    moved = float(np.hypot(
+                        (new_o[1] - node.origin[1]) * M_PER_DEG_LAT,
+                        (new_o[0] - node.origin[0]) * node.mlon))
+                    node.set_origin(*new_o, sigma_m=new_sigma)
+                    node.fuser.reset_displacement()
+                    # Same reason as the handover below: the origin moved, so
+                    # anything measured from the old one is meaningless, and
+                    # that includes the velocity the bridge had integrated
+                    # while the aircraft sat on the ground before arming.
+                    node.vel.reset_state("origin re-taken at arm")
+                    print(f"ARM: origin re-taken from {why_o}: "
+                          f"{new_o[1]:.6f}, {new_o[0]:.6f} "
+                          f"(moved {moved:.0f} m, origin known to "
+                          f"{'unmeasured' if new_sigma is None else f'{new_sigma:.1f} m'}"
+                          f", declaring {node.absolute_sigma_m:.1f} m)", flush=True)
+                    notifier.event("reanchor", round(moved),
+                                   f"VPS ORIGIN {why_o} {moved:.0f}m"[:50],
+                                   Notifier.SEV_INFO if moved < 50
                                    else Notifier.SEV_WARN)
-                    gps_sender.send(est["lon"], est["lat"],
-                                    est["alt"] if amsl is None else amsl,
-                                    est["sigma_abs"], est["yaw"], vel=est["vel"])
-                if sender is not None:
-                    sender.send(est["north"], est["east"], -est["alt"],
-                                f["roll"], f["pitch"], f["yaw"])
-                if a.liveness:
-                    # Written, not just touched: the mtime says the loop ran and
-                    # the contents say what it was doing, so a watchdog log shows
-                    # WHY it stalled rather than only that it did.
+                else:
+                    notifier.event("reanchor", "none",
+                                   "VPS ORIGIN NOT RE-TAKEN AT ARM",
+                                   Notifier.SEV_WARN)
+            # THE HANDOVER, IN FLIGHT. The pilot's instruction, 21 Oct, and the
+            # reasoning is his own: when the switch goes the other way, from the
+            # VPS back to GPS, the flight controller does not drag the aircraft
+            # across whatever error had built up - "man lo error 50 mtr hai tho
+            # gps drone ko 50 mtr lekar correct nahi karta, wo direct apne
+            # current position inject kar deta hai aur wahi stable ho jata hai".
+            # Handing over TO the VPS has to behave the same way.
+            #
+            # It did not. The origin was only ever re-taken at the ARM edge, so
+            # a flight that armed on GPS, flew, and then switched to the VPS at
+            # altitude started sending `takeoff origin + every metre of VIO
+            # drift accumulated during the whole GPS phase`. Measured on the
+            # three flights with real travel below 60 m: 5.73 m and 5.24 m of
+            # drift on two of them, and a single-sample 20.55 m jump on
+            # vps_00016 at 41 m altitude. The EKF holds the GPS position at that
+            # instant, so it sees a step of exactly that size.
+            #
+            # So on the transition INTO the VPS, while armed, the origin is
+            # re-taken from where the flight controller currently believes it is
+            # and the VIO's displacement goes back to zero. The first position
+            # the VPS then sends equals what the EKF already holds, which is a
+            # handover with no jump and no drift carried across it. Nothing is
+            # corrected, nothing is flown - exactly as the pilot described.
+            #
+            # DISARMED is deliberately excluded. A switch flipped on the ground
+            # is case one - take off on the VPS - and there the origin must come
+            # from SCR_USER1/2, which the arm edge above already does.
+            #
+            # f["gps"] is GLOBAL_POSITION_INT, which is the EKF's own fused
+            # position rather than the raw receiver. That is the right source
+            # HERE and not a compromise: the whole point is to start from what
+            # the flight controller believes, because that is what makes the
+            # step zero. While the aircraft is on GPS that belief is GPS-driven.
+            # It is read once, at this edge, so nothing loops.
+            src_val = watcher.value
+            # _armed_was[0] is True, not armed_now: the aircraft has to have
+            # ALREADY been armed on the previous frame. That is what "in flight"
+            # means here, and it also stops this colliding with the arm edge
+            # above if the pilot flips to the VPS and arms in the same frame -
+            # that is case one, and the arm edge's SCR_USER1/2 must stand.
+            if should_handover(src_val, _src_was[0], _armed_was[0],
+                               armed_now, node.origin is not None):
+                if f["gps"]:
+                    moved = float(np.hypot(
+                        (f["gps"][1] - node.origin[1]) * M_PER_DEG_LAT,
+                        (f["gps"][0] - node.origin[0]) * node.mlon))
+                    carried = float(np.hypot(*node.fuser.pos))
+                    node.set_origin(*f["gps"], sigma_m=f.get("gps1_hacc"))
+                    node.fuser.reset_displacement()
+                    # AND THE VELOCITY, at the pilot's instruction, 23 Oct:
+                    # nothing from before the switch crosses it. Where the GPS
+                    # is, that is where the VPS starts.
+                    #
+                    # reset_displacement above has always zeroed the POSITION
+                    # and the variance - measured over ten switches on flight
+                    # 00000233, displacement went from up to 74.5 m down to
+                    # 0.4-2.0 m every time. The bridge was the half nobody
+                    # reset, because it had no reset to call: the integrated
+                    # velocity, the learned bias, the last flow and accel
+                    # samples, the slew reference and every timer ran
+                    # continuously from node start, through however long the
+                    # aircraft sat on GPS, and straight into the first
+                    # GPS_INPUT packet after the switch.
+                    node.vel.reset_state("handover to VPS")
+                    print(f"HANDOVER to VPS in flight: origin re-taken from the "
+                          f"FC's own position {f['gps'][1]:.6f}, {f['gps'][0]:.6f} "
+                          f"(origin moved {moved:.1f} m, {carried:.1f} m of VIO "
+                          f"displacement discarded, declaring "
+                          f"{node.absolute_sigma_m:.1f} m)", flush=True)
+                    notifier.event("handover", round(carried),
+                                   f"VPS HANDOVER - dropped {carried:.0f}m drift"[:50],
+                                   Notifier.SEV_INFO)
+                else:
+                    # No fix to hand over from - which is the jammed case this
+                    # aircraft exists for. Keep the origin and the displacement
+                    # we have: they carry whatever drift has built up, and that
+                    # is far better than falling back to SCR_USER1/2, which on
+                    # three flights sat 147-157 m from the aircraft.
+                    notifier.event("handover", "noloc",
+                                   "VPS HANDOVER - NO FIX, drift carried",
+                                   Notifier.SEV_WARN)
+                    print("HANDOVER to VPS in flight: the FC had no position to "
+                          "hand over, so the existing origin and displacement "
+                          "are kept (drift is carried across)", flush=True)
+            _src_was[0] = src_val
+            _armed_was[0] = armed_now
+
+            gN = gE = err = None
+            if f["gps"]:
+                gN = (f["gps"][1] - node.origin[1]) * M_PER_DEG_LAT
+                gE = (f["gps"][0] - node.origin[0]) * node.mlon
+                err = float(np.hypot(est["north"] - gN, est["east"] - gE))
+                errs.append(err)
+            # And the same against the RAW receiver, which is a different
+            # measurement and the only independent one. err above is against
+            # GLOBAL_POSITION_INT, the EKF's own fused position; once the
+            # aircraft flies on the VPS that is partly our own output returning,
+            # and comparing against it flatters us. This pair does not.
+            est["g1_north"] = est["g1_east"] = est["g1_err"] = None
+            if f.get("gps1_raw"):
+                g1 = f["gps1_raw"]
+                est["g1_north"] = (g1[1] - node.origin[1]) * M_PER_DEG_LAT
+                est["g1_east"] = (g1[0] - node.origin[0]) * node.mlon
+                est["g1_err"] = float(np.hypot(est["north"] - est["g1_north"],
+                                               est["east"] - est["g1_east"]))
+            v = est["vel"]
+            if fwriter is not None:
+                # ARMED ONLY, at the pilot's instruction (20 Oct). Images are
+                # wanted for the flight, not for the hour the aircraft sits on
+                # the ground with the services up: that hour is where the 29 MB
+                # a minute and the bench frames at alt 0.1 m come from, and
+                # every one of them is a frame offline matching has to be told
+                # to ignore.
+                #
+                # `armed` is the FC's own flag out of the telemetry snapshot.
+                # Three states, and the direction of each is deliberate:
+                # True keeps saving, False stops, and None - no FC, or a link
+                # that never carried a heartbeat - does NOT save, because
+                # "cannot tell" on the bench is the common case and a flight
+                # always has a link. If the link dies mid-flight the snapshot
+                # FREEZES rather than emptying (see Telemetry), so armed stays
+                # True and the recording continues, which is the safe way for
+                # that failure to fall.
+                armed = f.get("armed")
+                if armed is True:
+                    # After n, so the name carries the index of the row about
+                    # to be written, and before csv_row, so that row names its
+                    # own image. offer() encodes nothing and waits for
+                    # nothing: if the writer is behind, this returns None and
+                    # the frame is gone.
+                    est["frame_file"] = fwriter.offer(f["img"], n) or ""
+                elif not a.frames_any_time:
+                    est["frame_file"] = ""
+                else:
+                    est["frame_file"] = fwriter.offer(f["img"], n) or ""
+                notifier.event(
+                    "frames", bool(armed) or a.frames_any_time,
+                    f"VPS FRAMES ON {fwriter.hz:g}Hz" if (bool(armed)
+                                                          or a.frames_any_time)
+                    else "VPS FRAMES OFF - DISARMED",
+                    Notifier.SEV_INFO)
+            if wr:
+                wr.writerow(csv_row(est, f, v, gN, gE, err))
+            if imu_wr is not None:
+                imu_wr.writerows(imu_rows(f))
+            # A row in the page cache is not a row on the disk. The battery
+            # comes out of this aircraft by hand, and when it did on 20 Oct
+            # the last block of two runs came back as NUL bytes.
+            if a.sync_every > 0 and est["t"] - last_sync >= a.sync_every:
+                last_sync = est["t"]
+                for h_ in (fh, imu_fh):
+                    if h_ is None:
+                        continue
                     try:
-                        tmp = a.liveness + ".tmp"
-                        with open(tmp, "w") as lf:
-                            lf.write(f"t={est['t']:.2f} n={n} tracks={est['tracks']} "
-                                     f"sigma={est['sigma']:.1f} fixes={node.n_fix} "
-                                     f"flow={node.n_flow} vel={v.reason}\n")
-                        os.replace(tmp, a.liveness)   # atomic; never a half file
+                        h_.flush()
+                        os.fsync(h_.fileno())
                     except OSError:
                         pass
-                if n % 200 == 0:
-                    print(f"  {est['t']:7.1f}s  N {est['north']:8.1f}  E {est['east']:8.1f}  "
-                          f"sigma {est['sigma']:5.1f}  tracks {est['tracks']:4d}  "
-                          f"fixes {node.n_fix:3d}"
-                          + (f"  err {err:6.1f} m" if err is not None else ""), flush=True)
-            except Exception as exc:
-                _frame_err_consec += 1
-                _frame_err_total += 1
-                k = type(exc).__name__
-                _frame_err_kinds[k] = _frame_err_kinds.get(k, 0) + 1
-                if _frame_err_kinds[k] == 1:
-                    # The first of each kind with its traceback; after that
-                    # the count only, or a per-frame bug writes gigabytes.
-                    print(f"FRAME {n}: {k}: {exc} - frame chhoda, "
-                          f"node chal raha hai", flush=True)
-                    traceback.print_exc()
-                elif _frame_err_kinds[k] % 200 == 0:
-                    print(f"FRAME {n}: {k} x{_frame_err_kinds[k]}",
-                          flush=True)
-                if _frame_err_consec >= CONSEC_MAX:
-                    print(f"{_frame_err_consec} frames lagatar fail - "
-                          f"camera hi gaya lagta hai, systemd ko dete hai",
-                          flush=True)
-                    raise
-            else:
-                _frame_err_consec = 0
+            notifier.tick(est["t"], est, node)
+
+            # Gated on the source. GPS_PRIMARY=0 means the pilot asked for the
+            # real M9N, so the VPS stops injecting entirely - not "sends and is
+            # ignored", stops. Unknown keeps sending; see SourceWatcher for why
+            # the two directions are not symmetrical.
+            if gps_sender is not None and on_vps:
+                amsl_ref.observe(f.get("gps1_fix"), f.get("gps1_alt"), f["alt"])
+                amsl = amsl_ref.amsl(f["alt"])
+                notifier.event("amsl", amsl_ref.source or False,
+                               f"VPS AMSL from {amsl_ref.source}"[:50]
+                               if amsl_ref.source
+                               else "VPS AMSL UNKNOWN - pass --site-alt",
+                               Notifier.SEV_INFO if amsl_ref.source
+                               else Notifier.SEV_WARN)
+                gps_sender.send(est["lon"], est["lat"],
+                                est["alt"] if amsl is None else amsl,
+                                est["sigma_abs"], est["yaw"], vel=est["vel"])
+            if sender is not None:
+                sender.send(est["north"], est["east"], -est["alt"],
+                            f["roll"], f["pitch"], f["yaw"])
+            if a.liveness:
+                # Written, not just touched: the mtime says the loop ran and
+                # the contents say what it was doing, so a watchdog log shows
+                # WHY it stalled rather than only that it did.
+                try:
+                    tmp = a.liveness + ".tmp"
+                    with open(tmp, "w") as lf:
+                        lf.write(f"t={est['t']:.2f} n={n} tracks={est['tracks']} "
+                                 f"sigma={est['sigma']:.1f} fixes={node.n_fix} "
+                                 f"flow={node.n_flow} vel={v.reason}\n")
+                    os.replace(tmp, a.liveness)   # atomic; never a half file
+                except OSError:
+                    pass
+            if n % 200 == 0:
+                print(f"  {est['t']:7.1f}s  N {est['north']:8.1f}  E {est['east']:8.1f}  "
+                      f"sigma {est['sigma']:5.1f}  tracks {est['tracks']:4d}  "
+                      f"fixes {node.n_fix:3d}"
+                      + (f"  err {err:6.1f} m" if err is not None else ""), flush=True)
     except KeyboardInterrupt:
         print("\nstopped")
-    except SystemExit:
-        print("\nstopped (SIGTERM)")
     finally:
         node.stop()
-        # THE CAMERA, FIRST, and before anything that can block. An
-        # abandoned dai.Device is what the watchdog kills, and a watchdog
-        # reset is what makes the next start slow and uncertain. Closing it
-        # is also what lets the file writers below take their time safely.
-        _close = getattr(src, "close", None)
-        if _close is not None:
-            try:
-                _close()
-            except Exception as exc:
-                print(f"camera close: {type(exc).__name__}: {exc}", flush=True)
         if fwriter is not None:
             # Before the CSV closes, and bounded: queued frames get a few
             # seconds to land, and then we stop regardless. A node that hangs
@@ -4400,17 +3729,6 @@ def main():
               f"({100.0 * node.n_derot_gyro / tot:.1f}% gyro)")
         print("  " + node.val_gyro.describe())
         print("  " + node.val_quat.describe())
-    # The two gates, in the end-of-run summary as well as the CSV. A counter
-    # that only exists inside a row nobody opens is barely better than one
-    # that exists nowhere - this is the line that would have said, on 2 Nov,
-    # that the age gate had fired 8339 times or not at all.
-    print(f"gates: flow vetoed (cameras disagreed) "
-          f"{getattr(node, 'n_flow_vetoed', 0)}, frames too old "
-          f"{getattr(node, 'n_frame_stale', 0)}, of {n} frames")
-    if _frame_err_total:
-        kinds = ", ".join(f"{k} x{v}" for k, v in
-                          sorted(_frame_err_kinds.items(), key=lambda kv: -kv[1]))
-        print(f"frames jo fail hue: {_frame_err_total} / {n} ({kinds})")
     if gps_sender is not None:
         print(f"GPS_INPUT bheje: {gps_sender.sent}")
     if sender is not None:

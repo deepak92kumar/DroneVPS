@@ -95,66 +95,15 @@ def _correlate(window: np.ndarray, templ: np.ndarray, *, pyramid: bool = True,
     return peak, (l[0] + x0, l[1] + y0), rh
 
 
-def _edges(img: np.ndarray, notch: bool = False) -> np.ndarray:
+def _edges(img: np.ndarray) -> np.ndarray:
     """Gradient magnitude. Correlating intensity across a four-year gap and a
     different sensor is weak; edges survive the difference in brightness,
     season and sun angle far better."""
-    if notch:
-        img = _denotch(img)
     eq = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(img)
     gx = cv2.Sobel(eq, cv2.CV_32F, 1, 0, ksize=3)
     gy = cv2.Sobel(eq, cv2.CV_32F, 0, 1, ksize=3)
     return cv2.normalize(cv2.magnitude(gx, gy), None, 0, 255,
                          cv2.NORM_MINMAX).astype(np.uint8)
-
-
-def _denotch(img: np.ndarray, n_peaks: int = 6) -> np.ndarray:
-    """Remove the strongest PERIODIC components before correlating.
-
-    This ground is ploughed, and both the sheet and the camera see it as
-    parallel furrows. A periodic pattern correlates with itself at every
-    multiple of its own period, so the correlation surface grows a row of
-    rival peaks that are as tall as the true one and the matcher locks onto
-    the wrong furrow. That is what flight 378 measured on the sheet that does
-    cover the site: NCC passed 57% of 2069 attempts and landed 33.9 m from
-    the receiver, with only 2.2% inside 10 m, and no margin threshold could
-    separate the good from the bad - the top 1% by margin still sat at
-    35.9 m, and corr(margin, error) was -0.155. A matcher that cannot tell
-    when it is wrong is the whole problem.
-
-    Periodicity is a few bright points in the Fourier plane, so it can be
-    taken out there: find the n_peaks strongest components away from DC,
-    blank each one and its conjugate, and transform back. What is left is the
-    non-repeating structure - field boundaries, tracks, buildings - which is
-    what actually says WHERE.
-
-    Measured on 180 frames of flight 378 against demo/bam1.tif, in one
-    harness, against the receiver:
-
-        plain gradient   err p50 51.7 m    at 39 m: 58.7 m
-        notch + gradient err p50 38.9 m    at 39 m: 15.0 m
-
-    The low leg is the one that moves, and it moves 3.9x. That is why this
-    exists. It is NOT enough on its own - 11% of frames inside 10 m against
-    8% - so it is a step, not the answer.
-
-    DC is kept. The 3-pixel block around the centre is excluded from the
-    search, so the mean and the slowest shading survive; removing those
-    would flatten the image, not sharpen its structure.
-    """
-    f = np.fft.fftshift(np.fft.fft2(img.astype(np.float32)))
-    mag = np.abs(f).copy()
-    h, w = mag.shape
-    cy, cx = h // 2, w // 2
-    mag[cy - 3:cy + 4, cx - 3:cx + 4] = 0.0
-    yy, xx = np.ogrid[:h, :w]
-    for _ in range(n_peaks):
-        iy, ix = np.unravel_index(int(np.argmax(mag)), mag.shape)
-        for sy, sx in ((iy, ix), (2 * cy - iy, 2 * cx - ix)):
-            f[(yy - sy) ** 2 + (xx - sx) ** 2 <= 16] = 0.0
-        mag[max(iy - 5, 0):iy + 6, max(ix - 5, 0):ix + 6] = 0.0
-    out = np.abs(np.fft.ifft2(np.fft.ifftshift(f)))
-    return cv2.normalize(out, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
 
 def locate(img_grey: np.ndarray, map_window: np.ndarray, geo_window, *,
@@ -164,7 +113,7 @@ def locate(img_grey: np.ndarray, map_window: np.ndarray, geo_window, *,
            min_score: float = 0.05, min_margin: float = 0.01,
            window_is_edges: bool = False, pyramid: bool = True,
            min_inliers: int = 0, principal_xy=None,
-           query_shape: str = "full", notch: bool = False) -> NccResult:
+           query_shape: str = "full") -> NccResult:
     """Correlate one frame against a map window. geo_window maps window px -> lon/lat.
 
     yaw_search_deg covers compass error: the FC heading is good to a few
@@ -189,7 +138,7 @@ def locate(img_grey: np.ndarray, map_window: np.ndarray, geo_window, *,
         return NccResult(False, reason=f"altitude {altitude_m:.1f} m is not "
                                        f"above the ground",
                          altitude_m=float(altitude_m))
-    W = map_window if window_is_edges else _edges(map_window, notch)
+    W = map_window if window_is_edges else _edges(map_window)
     peak, loc, q, r, scale = -9.0, None, None, None, 1
     for d in yaw_search_deg:
         t = north_up_query(img_grey, altitude_m=altitude_m, focal_px=focal_px,
@@ -199,7 +148,7 @@ def locate(img_grey: np.ndarray, map_window: np.ndarray, geo_window, *,
             t = t[0]
         if t.shape[0] < 16 or W.shape[0] <= t.shape[0] or W.shape[1] <= t.shape[1]:
             continue
-        pk, lc, rr = _correlate(W, _edges(t, notch), pyramid=pyramid)
+        pk, lc, rr = _correlate(W, _edges(t), pyramid=pyramid)
         if pk > peak:
             peak, loc, q, r, scale = pk, lc, t, rr, (2 if pyramid else 1)
     if loc is None:

@@ -1,0 +1,200 @@
+# DroneVPS - every parameter back to the 27 October configuration.
+#
+# Built by fc_scripts/build_27oct_restore.py from the two FC logs:
+#   27 Oct  flight_logs/00000258.BIN  (15:42)
+#   3 Nov   flight_logs/00000118.BIN
+#
+# The flight controller is NOT the same board - the X7+ went in on 31 Oct,
+# and the logs prove it (STAT_BOOTCNT 817 -> 63, INS_ACC2_ID 2622002 ->
+# 2621962, a third IMU that did not exist before). So this file carries the
+# DECISIONS and leaves this board's own CALIBRATION alone. What was left out
+# is listed at the bottom, with the reason for each.
+#
+# 49 parameters to write.
+#
+# Load in Mission Planner or QGroundControl, then reboot the FC. Read the
+# groups before writing - nothing here is urgent enough to load unread.
+
+# ---- NAVIGATION AND THE EKF - what the estimate is built from
+AHRS_GPS_USE,0    # today 1
+EK3_MAG_CAL,2    # today 3
+EK3_RNG_USE_SPD,6    # today 2
+EK3_SRC2_POSZ,0    # today 1
+EK3_VEL_I_GATE,300    # today 500
+GPS2_RATE_MS,200    # today 100
+INS_USE3,0    # today 1
+
+# ---- COMPASS - which ones are used, at the pilot's word
+COMPASS_ORIENT3,6    # today 0
+COMPASS_USE3,0    # today 1
+
+# ---- HEIGHT - rangefinder, surface tracking, terrain
+RNGFND_FILT,1    # today 0.5
+SURFTRAK_MODE,0    # today 1
+TERRAIN_ENABLE,0    # today 1
+
+# ---- SPEED AND LOITER
+LOIT_BRK_DELAY,0.1    # today 1
+LOIT_SPEED_MS,4    # today 3
+WP_SPD,4    # today 3
+WP_SPD_DN,1.5    # today 1.1
+WP_SPD_UP,2.5    # today 1.5
+
+# ---- MOTORS
+MOT_SPIN_ARM,0.14    # today 0.145
+MOT_SPIN_MIN,0.15    # today 0.16
+
+# ---- FLIGHT MODES, MISSION, FENCE
+FENCE_TYPE,4    # today 7
+FLTMODE2,2    # today 0
+FLTMODE3,5    # today 0
+FLTMODE5,5    # today 0
+INITIAL_MODE,2    # today 0
+
+# ---- PRECISION LANDING - it was enabled on 27 Oct
+PLND_ACC_P_NSE,2.5    # absent today
+PLND_ALT_MAX,0    # absent today
+PLND_ALT_MIN,0.75    # absent today
+PLND_BUS,-1    # absent today
+PLND_CAM_POS_X,0    # absent today
+PLND_CAM_POS_Y,0    # absent today
+PLND_CAM_POS_Z,0    # absent today
+PLND_ENABLED,1    # today 0
+PLND_EST_TYPE,1    # absent today
+PLND_LAG,0.03    # absent today
+PLND_LAND_OFS_X,0    # absent today
+PLND_LAND_OFS_Y,0    # absent today
+PLND_OPTIONS,0    # absent today
+PLND_RET_BEHAVE,0    # absent today
+PLND_RET_MAX,4    # absent today
+PLND_STRICT,1    # absent today
+PLND_TIMEOUT,4    # absent today
+PLND_TYPE,1    # absent today
+PLND_XY_DIST_MAX,2.5    # absent today
+PLND_YAW_ALIGN,0    # absent today
+
+# ---- SERIAL PORTS AND BOARD
+BRD_SER1_RTSCTS,0    # today 2
+BRD_SER2_RTSCTS,0    # today 2
+SERIAL4_BAUD,115    # today 230
+SERIAL6_BAUD,115    # today 57
+
+# ---- LOGGING
+INS_LOG_BAT_MASK,1    # today 0
+
+# ======== DELIBERATELY NOT RESTORED ========
+#
+# PILOT: different power module, already correct  (13)
+#   BATT_AMP_OFFSET        27 Oct       0.0000   today absent
+#   BATT_AMP_PERVLT        27 Oct      24.0000   today absent
+#   BATT_ARM_VOLT          27 Oct      23.3000   today 0.0000
+#   BATT_CAPACITY          27 Oct   16000.0000   today 3300.0000
+#   BATT_CRT_VOLT          27 Oct      20.4000   today 0.0000
+#   BATT_CURR_PIN          27 Oct      17.0000   today absent
+#   BATT_LOW_VOLT          27 Oct      21.0000   today 10.5000
+#   BATT_MONITOR           27 Oct       4.0000   today 8.0000
+#   BATT_VLT_OFFSET        27 Oct       0.0000   today absent
+#   BATT_VOLT_MULT         27 Oct      17.8800   today absent
+#   BATT_VOLT_PIN          27 Oct      16.0000   today absent
+#   MOT_BAT_VOLT_MAX       27 Oct      25.2000   today 0.0000
+#   MOT_BAT_VOLT_MIN       27 Oct      21.0000   today 0.0000
+#
+# counters: boot count, flight time, distance  (5)
+#   STAT_BOOTCNT           27 Oct     817.0000   today 63.0000
+#   STAT_DISTFLWN          27 Oct  107327.4453   today 5506.9688
+#   STAT_FLTCNT            27 Oct     296.0000   today 14.0000
+#   STAT_FLTTIME           27 Oct   78739.0000   today 4890.0000
+#   STAT_RUNTIME           27 Oct  897438.0000   today 73038.0000
+#
+# ground pressure, re-set every boot - an old one makes altitude wrong  (2)
+#   BARO1_GND_PRESS        27 Oct  101651.3438   today 101982.9844
+#   BARO2_GND_PRESS        27 Oct  101619.6406   today 101900.6328
+#
+# set by uploading the mission, not by hand - re-upload the 27 Oct WP file  (1)
+#   MIS_TOTAL              27 Oct      15.0000   today 1.0000
+#
+# the FC learns this in flight  (1)
+#   MOT_THST_HOVER         27 Oct       0.3461   today 0.3740
+#
+# this board's accel/gyro calibration  (37)
+#   INS_ACC1_CALTEMP       27 Oct      44.8068   today 44.3237
+#   INS_ACC2OFFS_X         27 Oct       0.0648   today -0.1427
+#   INS_ACC2OFFS_Y         27 Oct       0.2833   today -0.0879
+#   INS_ACC2OFFS_Z         27 Oct      -0.1036   today -0.1990
+#   INS_ACC2SCAL_X         27 Oct       0.9985   today 1.0000
+#   INS_ACC2SCAL_Y         27 Oct       1.0001   today 1.0000
+#   INS_ACC2SCAL_Z         27 Oct       0.9906   today 1.0000
+#   INS_ACC2_CALTEMP       27 Oct      44.6961   today 48.3869
+#   INS_ACC2_ID            27 Oct 2622002.0000   today 2621962.0000
+#   INS_ACC3OFFS_X         27 Oct       0.0000   today -0.2118
+#   INS_ACC3OFFS_Y         27 Oct       0.0000   today -0.2089
+#   INS_ACC3OFFS_Z         27 Oct       0.0000   today -0.2649
+#   INS_ACC3SCAL_X         27 Oct       0.0000   today 1.0000
+#   INS_ACC3SCAL_Y         27 Oct       0.0000   today 1.0000
+#   INS_ACC3SCAL_Z         27 Oct       0.0000   today 1.0000
+#   INS_ACC3_CALTEMP       27 Oct    -300.0000   today 46.6159
+#   INS_ACC3_ID            27 Oct       0.0000   today 2622002.0000
+#   INS_ACCOFFS_X          27 Oct      -0.0325   today -0.0620
+#   INS_ACCOFFS_Y          27 Oct      -0.0006   today -0.1816
+#   INS_ACCOFFS_Z          27 Oct      -0.0277   today -0.1542
+#   INS_ACCSCAL_X          27 Oct       1.0015   today 1.0000
+#   INS_ACCSCAL_Y          27 Oct       0.9992   today 1.0000
+#   INS_ACCSCAL_Z          27 Oct       1.0019   today 1.0000
+#   INS_GYR1_CALTEMP       27 Oct      43.5990   today 35.1449
+#   INS_GYR2OFFS_X         27 Oct       0.0202   today 0.0190
+#   INS_GYR2OFFS_Y         27 Oct      -0.0406   today 0.0298
+#   INS_GYR2OFFS_Z         27 Oct      -0.0026   today -0.0106
+#   INS_GYR2_CALTEMP       27 Oct      44.1870   today 19.7227
+#   INS_GYR2_ID            27 Oct 2622002.0000   today 2621962.0000
+#   INS_GYR3OFFS_X         27 Oct       0.0000   today 0.0024
+#   INS_GYR3OFFS_Y         27 Oct       0.0000   today -0.0330
+#   INS_GYR3OFFS_Z         27 Oct       0.0000   today -0.0021
+#   INS_GYR3_CALTEMP       27 Oct    -300.0000   today 36.7777
+#   INS_GYR3_ID            27 Oct       0.0000   today 2622002.0000
+#   INS_GYROFFS_X          27 Oct       0.0026   today -0.0059
+#   INS_GYROFFS_Y          27 Oct       0.0055   today 0.0191
+#   INS_GYROFFS_Z          27 Oct       0.0043   today 0.0017
+#
+# this board's compass calibration  (30)
+#   COMPASS_DIA2_X         27 Oct       1.0217   today 1.0530
+#   COMPASS_DIA2_Y         27 Oct       0.9963   today 0.9718
+#   COMPASS_DIA2_Z         27 Oct       0.9793   today 1.0239
+#   COMPASS_DIA3_X         27 Oct       1.0153   today 1.0000
+#   COMPASS_DIA3_Y         27 Oct       1.0097   today 1.0000
+#   COMPASS_DIA3_Z         27 Oct       1.0962   today 1.0000
+#   COMPASS_DIA_X          27 Oct       1.0027   today 1.0138
+#   COMPASS_DIA_Y          27 Oct       0.9810   today 0.9748
+#   COMPASS_DIA_Z          27 Oct       1.0689   today 1.0660
+#   COMPASS_ODI2_X         27 Oct      -0.0202   today -0.0176
+#   COMPASS_ODI2_Y         27 Oct       0.0068   today -0.0065
+#   COMPASS_ODI2_Z         27 Oct      -0.0028   today -0.0051
+#   COMPASS_ODI3_X         27 Oct       0.0016   today 0.0000
+#   COMPASS_ODI3_Y         27 Oct       0.1126   today 0.0000
+#   COMPASS_ODI3_Z         27 Oct      -0.0502   today 0.0000
+#   COMPASS_ODI_X          27 Oct       0.0032   today 0.0143
+#   COMPASS_ODI_Y          27 Oct       0.1156   today -0.0095
+#   COMPASS_ODI_Z          27 Oct      -0.0374   today -0.0061
+#   COMPASS_OFS2_X         27 Oct       8.9147   today -2.2102
+#   COMPASS_OFS2_Y         27 Oct      39.0200   today 55.1110
+#   COMPASS_OFS2_Z         27 Oct     -62.6160   today -79.8947
+#   COMPASS_OFS3_X         27 Oct      41.6441   today 0.0000
+#   COMPASS_OFS3_Y         27 Oct      13.0277   today 0.0000
+#   COMPASS_OFS3_Z         27 Oct      24.7897   today 0.0000
+#   COMPASS_OFS_X          27 Oct      34.2526   today 14.3491
+#   COMPASS_OFS_Y          27 Oct      29.5502   today 21.8137
+#   COMPASS_OFS_Z          27 Oct      33.4517   today 18.5914
+#   COMPASS_SCALE          27 Oct       0.9762   today 0.9920
+#   COMPASS_SCALE2         27 Oct       1.0888   today 1.0571
+#   COMPASS_SCALE3         27 Oct       1.0112   today 0.0000
+#
+# this board's level calibration  (2)
+#   AHRS_TRIM_X            27 Oct       0.0193   today 0.0000
+#   AHRS_TRIM_Y            27 Oct       0.0145   today 0.0000
+#
+# today's RC calibration - an old one breaks the sticks and the switch  (6)
+#   RC14_MAX               27 Oct    1950.0000   today 1900.0000
+#   RC14_MIN               27 Oct    1050.0000   today 1100.0000
+#   RC14_TRIM              27 Oct    1050.0000   today 1500.0000
+#   RC2_MAX                27 Oct    1945.0000   today 1919.0000
+#   RC3_TRIM               27 Oct    1495.0000   today 1045.0000
+#   RC4_MIN                27 Oct    1045.0000   today 1077.0000

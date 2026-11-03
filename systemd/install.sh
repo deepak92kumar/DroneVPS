@@ -38,12 +38,10 @@ install)
     echo
     echo "Installed, nothing started. './install.sh enable' to run on boot."
     echo
-    echo "Before enabling, check the map: the unit passes"
-    echo "  --map /data/DRONE/maps/active.tif, the symlink Studio repoints when"
-    echo "  the pilot loads a sheet. It must COVER THE TAKE-OFF POINT -"
-    echo "  'python3 vps_vio/preflight.py' reads it against SCR_USER1/2."
-    echo "  Outside the sheet there are no map fixes for the whole flight;"
-    echo "  that is flight 378 on 1 Nov, 764 s with f0 on the radio."
+    echo "Before enabling, check the map: live_node.py needs a GeoTIFF that"
+    echo "  COVERS THE TAKE-OFF POINT. /data/DRONE/bhh.tif spans"
+    echo "  30.88411-30.90332 N, 74.59762-74.63224 E. SCR_USER1/2 on the FC"
+    echo "  must be inside that, or there are no map fixes for the whole flight."
     ;;
 enable)
     sudo systemctl enable "${ENABLE[@]}" || die "enable failed"

@@ -66,9 +66,7 @@ LIDAR_MAX_M = 1.5
 # Expected after 20 Oct. A power cycle keeps these (they are in flash), but a
 # parameter reset or someone else's session does not.
 EXPECT = {
-    # RNGFND1_RMETRIC was here until 1 Nov. It only exists when
-    # RNGFND1_TYPE is non-zero, and this aircraft has no rangefinder, so the
-    # check could only ever report "absent" about hardware that is not fitted.
+    "RNGFND1_RMETRIC": (0.0, "a current loop does not scale with the 5 V rail"),
     "INS_HNTCH_FREQ": (47.0, "the measured prop fundamental"),
     "INS_HNTCH_REF": (0.331, "the measured hover throttle"),
     "INS_HNTCH_BW": (24.0, "FREQ/2"),
@@ -287,14 +285,9 @@ def flight_controller(port):
                   ("" if mean > rmin_now + 0.1 else
                    " - too low; EK3 will drop it for height near the ground"),
                   soft=True)
-    elif (fc.get("RNGFND1_TYPE") or 0) == 0:
-        ok("no rangefinder fitted, and none configured",
-           "height is the barometer at every altitude - it reads 5-7 m high "
-           "near the ground, and nothing will auto-disarm on a lidar zero")
     else:
         bad("lidar is reporting",
-            "RNGFND1_TYPE is set but no RANGEFINDER or DISTANCE_SENSOR "
-            "messages arrived - either the sensor is gone or its wiring is")
+            "no RANGEFINDER or DISTANCE_SENSOR messages in the window")
 
     # MOT_HOVER_LEARN=2 means the FC updates MOT_THST_HOVER itself after every
     # flight, so an exact expectation here would go stale on its own and cry
@@ -345,22 +338,17 @@ def flight_controller(port):
         ok("vibration at rest", f"X {vx:.1f} Y {vy:.1f} Z {vz:.1f} m/s2 "
                                 f"(in hover on 20 Oct: 0.8 / 1.6 / 2.3)")
 
-    fc_parameters(fc)
-
     # The origin, and whether the sheet covers it.
     lat, lon = fc.get("SCR_USER1"), fc.get("SCR_USER2")
     if lat and lon:
         print(f"\nTHE ORIGIN  SCR_USER1/2 = {lat:.6f}, {lon:.6f}")
         covered = sheet_covers(lon, lat)
         if covered is None:
-            warn("the sheet covers the take-off point",
-                 "could not read maps/active.tif")
+            warn("the sheet covers the take-off point", "could not read bhh.tif")
         else:
-            sheet = os.path.realpath("/data/DRONE/maps/active.tif")
             check(covered, "the sheet covers the take-off point",
-                  os.path.basename(sheet) if covered else
-                  f"OFF-SHEET ({os.path.basename(sheet)}) - there will be no "
-                  f"map fixes for the whole flight, which is what 1 Nov cost")
+                  "bhh.tif" if covered else
+                  "OFF-SHEET - there will be no map fixes for the whole flight")
         # Is the aircraft actually AT the typed point? 20 Oct: 150 m away.
         d = distance_to_gps(fc, lat, lon)
         if d is None:
@@ -374,127 +362,7 @@ def flight_controller(port):
     return fc
 
 
-# WHAT THE FLIGHT CONTROLLER MUST SAY, AND WHY EACH ONE.
-#
-# This list exists because of 1 Nov. The X7 was swapped for an X7+ on 31 Oct
-# and the new board came up on ArduPilot defaults. EK3_SRC1_VELZ came back as
-# GPS, pointing the EKF's vertical velocity at a source - us - that sets
-# IGN_VEL_VERT on every single packet and has never sent a vertical velocity
-# in its life. live_node's own comment still read "EK3_SRC1_VELZ reads 0 in
-# log 00000195.BIN", which had been true of the OLD board. Nothing checked,
-# so nothing said.
-#
-# Each entry is (name, wanted, blocker, why). blocker=True means the flight
-# is not worth taking; False prints a warning and lets the pilot decide.
-#
-# These are OUR values, not a vendor's. Where we differ from the Stride
-# Dynamics integration guide, the difference is deliberate and the reason is
-# in the "why" - GPS_AUTO_SWITCH especially.
-FC_WANTS = [
-    ("GPS2_TYPE", 14, True,
-     "14 = MAV. Without it GPS_INPUT arrives nowhere and the whole VPS is a "
-     "process talking to itself"),
-    ("EK3_ENABLE", 1, True, "EKF3 is the only estimator this aircraft flies"),
-    ("EK3_SRC1_POSXY", 3, True,
-     "GPS, and GPS means us - the estimate arrives as GPS2 through "
-     "GPS_INPUT. Anything else here and the position we compute never "
-     "reaches the EKF at all"),
-    ("EK3_SRC1_VELXY", 3, True,
-     "GPS, which is the velocity bridge's output riding in the same "
-     "GPS_INPUT packet. Horizontal velocity is the half the EKF argues with, "
-     "so it has to be pointed at us for the argument to happen at all"),
-    ("EK3_SRC1_VELZ", 0, True,
-     "NONE. velocity_fields() sets IGN_VEL_VERT on EVERY packet - the bridge "
-     "is horizontal only - so pointing this at GPS asks us for a number we "
-     "never send. It was 3 on 1 Nov after the board swap"),
-    ("EK3_SRC1_POSZ", 1, True,
-     "BARO. Height is the lidar below 60 m and the barometer above it, never "
-     "the VPS"),
-    ("EK3_SRC1_YAW", 1, True,
-     "COMPASS. north_up_query rotates the frame by the FC's heading, so a "
-     "heading from anywhere else lands in the matcher's error"),
-    ("GPS_AUTO_SWITCH", 0, True,
-     "WE DIFFER FROM THE VENDOR HERE ON PURPOSE. Their guide says UseBest. "
-     "UseBest lets the FLIGHT CONTROLLER pick the receiver; 0 means it uses "
-     "the one GPS_PRIMARY names, and GPS_PRIMARY is what the pilot's RC6 "
-     "sets. The pilot's switch has to be the only thing that decides, which "
-     "is the whole of 'switch means switch'"),
-    ("SERIAL2_PROTOCOL", 2, True,
-     "MAVLink2 on TELEM2, the port mavlink_router owns and the only way "
-     "anything on the companion reaches the flight controller"),
-    ("SERIAL2_BAUD", 921, True,
-     "921600. The router opens the port at this rate, and a mismatch is not "
-     "a slow link but no link - no heartbeat, no GPS_INPUT, no VPS"),
-    ("ATC_ANGLE_MAX", 15, False,
-     "15 degrees is what every working flight has had. The default is 30, "
-     "and a fresh board comes up there - see the 31 Oct handoff"),
-    ("GPS_BLEND_MASK", 0, False,
-     "Inert while GPS_AUTO_SWITCH is 0, because blending only runs at "
-     "AUTO_SWITCH 2. It is still a loaded gun pointed at the source "
-     "switching, so it should read 0"),
-    ("RC6_OPTION", 0, False,
-     "Do Nothing. OUR node reads the channel and decides whether to inject; "
-     "ArduPilot must not also act on it. The vendor's guide says the same"),
-    # THE PARENT. EXPECT above checks INS_HNTCH_FREQ/REF/BW, but when
-    # INS_HNTCH_ENABLE reads 0 ArduPilot does not create those children at
-    # all, so the checks report "absent" and the cause is never named. On
-    # 1 Nov all three read absent for exactly this reason.
-    ("INS_HNTCH_ENABLE", 1, True,
-     "The harmonic notch is OFF. 47 Hz of prop fundamental then goes straight "
-     "into the gyros, and the flow's derotation reads those gyros. Measured "
-     "on flight 378 this did NOT correlate with flow_disagree (r = +0.08), so "
-     "it is not the altitude problem - but it is tuning that flew and is now "
-     "gone"),
-    # 0, because THERE IS NO LIDAR ON THIS AIRCRAFT. The pilot said so on
-    # 1 Nov, and the logs agree: 00000111.BIN has zero RFND rows and
-    # rngfnd_m is NaN in every row of every run. I read that as a board-swap
-    # regression and wrote a check wanting 1; it was not a regression, it is
-    # the airframe. A rangefinder configured for hardware that is absent
-    # reports a clamped 0.000 m, which every threshold below 2 m waves
-    # through - see the note above EXPECT.
-    #
-    # What follows from it, and is NOT a fault to chase: height is the
-    # barometer at every altitude (EK3_SRC1_POSZ = BARO above), the barometer
-    # reads 5-7 m high near the ground, and there is no lidar zero, so the
-    # aircraft will not auto-disarm on the sensor - the pilot disarms it.
-    ("RNGFND1_TYPE", 0, True,
-     "0 = none, and that is correct: this aircraft carries no rangefinder. "
-     "Setting it to anything else makes ArduPilot read an ADC pin that "
-     "nothing drives and floor the result at 0.000 m, which reads as a "
-     "perfect ground lock"),
-]
-
-
-def fc_parameters(fc):
-    """Read the parameters the VPS depends on and say which are wrong.
-
-    A board swap resets these silently and the symptom appears in the air,
-    an hour later, as something else entirely.
-    """
-    print("\nTHE PARAMETERS THE VPS DEPENDS ON")
-    unread = []
-    for name, want, blocker, why in FC_WANTS:
-        got = fc.get(name, timeout=2.5)
-        if got is None:
-            unread.append(name)
-            continue
-        right = abs(got - want) < 1e-6
-        shown = f"{got:g}"
-        if right:
-            ok(f"{name} = {shown}")
-        else:
-            check(False, f"{name} is {shown}, must be {want:g}", why,
-                  soft=not blocker)
-    if unread:
-        warn("every parameter answered", "no reply for " + ", ".join(unread))
-
-
-def sheet_covers(lon, lat, path="/data/DRONE/maps/active.tif"):
-    """Default is the symlink Studio repoints, same as live_node's DEFAULT_MAP.
-
-    Checking a sheet the node will not open is a check that passes while the
-    flight gets no fixes - flight 378, 1 Nov.
-    """
+def sheet_covers(lon, lat, path="/data/DRONE/bhh.tif"):
     try:
         from osgeo import gdal
         ds = gdal.Open(path)

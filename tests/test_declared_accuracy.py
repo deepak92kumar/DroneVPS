@@ -66,7 +66,7 @@ check("and a deadline already in the past is restarted, not chased",
       "if self._next_send < t:" in src,
       "otherwise a stalled camera is followed by a 30 Hz burst")
 
-PER = 1.0 / 10.0
+PER = 1.0 / 4.3
 
 
 def replay(timestamps, form):
@@ -112,18 +112,11 @@ if real:
     dl = [replay(x, "deadline") for x in real]
     print(f"  on {len(real)} recorded flights' own timestamps: "
           f"t+period {np.mean(now):.3f} Hz, deadline {np.mean(dl):.3f} Hz")
-    # 1 NOV: the target is 10 Hz, not 4.3. The arithmetic this test exists
-    # for is unchanged - the deadline form keeps the rate and the t+period
-    # form loses a slice of every interval to the frame it waited for - but
-    # the loss is bigger at 10 Hz, because the interval is shorter against
-    # the same ~42 ms frame spacing. That is exactly what makes the two forms
-    # worth telling apart, so the check gets stronger rather than weaker.
-    check("the old form falls short on every recorded flight",
-          max(now) < 9.5, f"worst {max(now):.3f}, mean {np.mean(now):.3f}")
-    check("the deadline form holds 10 Hz on all of them",
-          abs(np.mean(dl) - 10.0) < 0.4,
-          f"mean {np.mean(dl):.3f}; replayed on four flights it gave "
-          f"9.74-10.00, mean 9.93")
+    check("the old form fell short on every recorded flight",
+          max(now) < 4.1, f"worst {max(now):.3f}, mean {np.mean(now):.3f}")
+    check("the new form holds 4.3 Hz on all of them",
+          abs(np.mean(dl) - 4.30) < 0.03,
+          f"mean {np.mean(dl):.3f} against log 194's 4.31")
 else:
     # No recordings in this checkout. The synthetic loop still separates the
     # two forms, just by less, so the assertion is loosened to match what it
@@ -163,15 +156,8 @@ for t in gap:
     after.append(t)
 tail = [x for x in after if x > clean[-1]]
 burst = max(sum(1 for x in tail if w <= x < w + 1.0) for w in tail) if tail else 0
-# The bound is the rate itself plus one, not a constant: at 4.3 Hz five
-# sends in a second was already a burst, and at 10 Hz it is simply the rate.
-# What this check is for is the CATCH-UP - "nxt < t -> nxt = t + PER" is what
-# stops the gate firing once for every period the gap swallowed - and that is
-# a question about sends ABOVE the steady rate, whatever the rate is.
-rate_cap = int(round(1.0 / PER)) + 1
-check("after a 3 s gap it does not burst", burst <= rate_cap,
-      f"most sends in any one second afterwards: {burst}, cap {rate_cap} "
-      f"at {1.0 / PER:.1f} Hz")
+check("after a 3 s gap it does not burst", burst <= 5,
+      f"most sends in any one second afterwards: {burst}")
 
 # ------------------------------------------------- the origin is in the sigma
 

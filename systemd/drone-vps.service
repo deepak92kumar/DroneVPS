@@ -34,27 +34,9 @@ WorkingDirectory=/data/DRONE/vps_vio
 # --fc-port goes through the router, not at the serial device: the router is
 # the one owner of /dev/ttyTHS1 and everything else is a UDP client of it.
 # --send-gps with --gps-id 1 is what makes the estimate arrive as GPS2.
-#
-# --map IS maps/active.tif AND MUST STAY THAT WAY. That path is the symlink
-# Studio repoints when the pilot loads a sheet (studio/flightsheet.py: "Point
-# maps/active.tif at this sheet"), so it is the one name that follows the
-# aircraft to a new site. A sheet named here directly does not.
-#
-# 1 NOV, flight 378, is why. The pilot loaded bam1.tif in Studio at 15:36 and
-# Studio did its job - maps/active.tif pointed at demo/bam1.tif, which covers
-# the site. This line still said demo_loc.tif, so the node opened the old
-# sheet, whose bounds (lon 74.0945-74.1195) do not contain the take-off point
-# at 74.1254. MapFixWorker's covers() was false for the whole flight, the
-# matcher never ran once, and every fix_*/try_* column in all 18225 rows of
-# vps_00378.csv is null. The RC showed f0 for 764 s and the drone flew the
-# entire VPS leg on flow alone.
-#
-# The installed unit said demo_bam1.tif, which is a symlink to the SAME old
-# sheet - a name that reads like the right map and is not. That symlink is
-# deleted; use maps/active.tif.
 ExecStart=/usr/bin/python3 /data/DRONE/vps_vio/live_node.py \
     --live \
-    --map /data/DRONE/maps/active.tif \
+    --map /data/DRONE/bhh.tif \
     --fc-port udpout:127.0.0.1:14650 \
     --send-gps --gps-id 1 \
     --out /data/DRONE/flight_logs/vps \

@@ -47,7 +47,6 @@ from dataclasses import dataclass
 import os
 import sys
 
-import math
 import numpy as np
 import cv2
 
@@ -76,14 +75,6 @@ class XFeatResult:
     inliers: int = 0
     total_matches: int = 0
     reason: str = ""
-    # What the fit had to rotate and rescale to make the points agree. The
-    # query reaches the matcher ALREADY north-up and already at the map's
-    # scale, so a correct match leaves 0 deg and 1.0 here. Reported, not
-    # gated: on flight 406 tightening |rot| to 2 deg left the error where it
-    # was (66.4 m against 62.8 m ungated), so these say what the fit did and
-    # nothing more.
-    residual_rot_deg: float = 0.0
-    residual_scale: float = 1.0
 
 
 def _load():
@@ -166,12 +157,7 @@ def _equalise(img: np.ndarray) -> np.ndarray:
 
 
 def _translation(src: np.ndarray, dst: np.ndarray, tol_px: float):
-    """Robust translation from matched points. NOT the production fit.
-
-    _similarity replaced this on 2 Nov. It is kept because
-    tests/test_xfeat_similarity_fit.py measures the two against each other on
-    the same synthetic pairs - that comparison IS the justification for the
-    change, and deleting this would leave the claim unchecked.
+    """Robust translation from matched points.
 
     Median of the per-match offset, then count how many agree within tol_px.
     A median survives the outlier rate this imagery produces, where RANSAC on a
@@ -192,42 +178,6 @@ def _translation(src: np.ndarray, dst: np.ndarray, tol_px: float):
         keep = r <= tol_px
     mad = float(np.median(r[keep])) if keep.any() else float(tol_px)
     return off, keep, mad
-
-
-def _similarity(src: np.ndarray, dst: np.ndarray, tol_px: float):
-    """Robust SIMILARITY from matched points: rotation, scale, translation.
-
-    This replaced a translation-only fit on 2 Nov, and the reason is in the
-    numbers. The query arrives pre-rotated by the compass yaw and pre-scaled
-    by the barometric altitude, so whatever error those two carry is still in
-    the correspondences. A 2 deg yaw error is 5 px at a 150 px radius - past
-    tol_px=4 before the first point is considered - and a 3% scale error is
-    4.5 px at the same radius. The old fit asked every pair to agree on ONE
-    offset and so rejected nearly all of them: flight 406 reported 0 inliers
-    on all 777 attempts while XFeat was finding 67-166 matches each time.
-    Fitting the two extra degrees of freedom takes the same frames to 8-15.
-
-    _translation's docstring argued that a median beats RANSAC on this
-    imagery because RANSAC "would rather fit the outliers". Measured on 406
-    that is not what happens: the similarity fit's residual rotation and
-    scale are reported above and a caller can see when they are nonsense.
-
-    Returns (M, inlier_mask, mad, rot_deg, scale). M is 2x3 or None.
-    """
-    if len(src) < 4:
-        return None, np.zeros(len(src), bool), float(tol_px), 0.0, 1.0
-    M, mask = cv2.estimateAffinePartial2D(
-        src.reshape(-1, 1, 2), dst.reshape(-1, 1, 2), method=cv2.RANSAC,
-        ransacReprojThreshold=float(tol_px), maxIters=5000, confidence=0.999)
-    if M is None:
-        return None, np.zeros(len(src), bool), float(tol_px), 0.0, 1.0
-    keep = (mask.ravel() != 0)
-    proj = (src @ M[:, :2].T) + M[:, 2]
-    r = np.linalg.norm(proj - dst, axis=1)
-    mad = float(np.median(r[keep])) if keep.any() else float(tol_px)
-    rot = float(math.degrees(math.atan2(M[1, 0], M[0, 0])))
-    scale = float(math.hypot(M[0, 0], M[1, 0]))
-    return M, keep, mad, rot, scale
 
 
 def locate(img_grey: np.ndarray, map_window: np.ndarray, geo_window, *,
@@ -301,18 +251,15 @@ def locate(img_grey: np.ndarray, map_window: np.ndarray, geo_window, *,
         return XFeatResult(False, total_matches=n_total,
                            reason=f"only {n_total} matches")
 
-    M, keep, mad, res_rot, res_scale = _similarity(src, dst, tol_px)
-    if M is None:
-        return XFeatResult(False, total_matches=n_total,
-                           reason="no similarity fit")
+    off, keep, mad = _translation(src, dst, tol_px)
     n_in = int(keep.sum())
     ratio = n_in / max(n_total, 1)
     margin = max(0.0, 1.0 - mad / float(tol_px))
 
-    # Where that pixel lands on the map, through the similarity just fitted.
+    # Where that pixel lands on the map, through the translation just fitted.
     qc = (np.array([q.shape[1] / 2.0, q.shape[0] / 2.0]) if qc_tracked is None
           else np.array(qc_tracked, float))
-    mc = (M[:, :2] @ qc) + M[:, 2]
+    mc = qc + off
     lon, lat = geo_window.to_lonlat(float(mc[0]), float(mc[1]))
     lon, lat = float(lon), float(lat)
 
@@ -330,18 +277,14 @@ def locate(img_grey: np.ndarray, map_window: np.ndarray, geo_window, *,
     # points agree, a real share of them agree, and they agree tightly.
     if n_in < min_inliers:
         return XFeatResult(False, lon, lat, ratio, margin, n_in, n_total,
-                           reason=f"only {n_in} inliers",
-                           residual_rot_deg=res_rot, residual_scale=res_scale)
+                           reason=f"only {n_in} inliers")
     if ratio < min_score:
         return XFeatResult(False, lon, lat, ratio, margin, n_in, n_total,
-                           reason=f"inlier ratio {ratio:.2f} below {min_score}",
-                           residual_rot_deg=res_rot, residual_scale=res_scale)
+                           reason=f"inlier ratio {ratio:.2f} below {min_score}")
     if margin < min_margin:
         return XFeatResult(False, lon, lat, ratio, margin, n_in, n_total,
-                           reason=f"cluster spread {mad:.1f} px too wide",
-                           residual_rot_deg=res_rot, residual_scale=res_scale)
-    return XFeatResult(True, lon, lat, ratio, margin, n_in, n_total,
-                       residual_rot_deg=res_rot, residual_scale=res_scale)
+                           reason=f"cluster spread {mad:.1f} px too wide")
+    return XFeatResult(True, lon, lat, ratio, margin, n_in, n_total)
 
 
 def _aniso_scale(src: np.ndarray, dst: np.ndarray):

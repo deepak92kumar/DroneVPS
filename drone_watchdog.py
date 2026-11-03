@@ -81,22 +81,6 @@ def armed_via_router(endpoint: str, timeout_s: float = 3.0) -> bool | None:
     try:
         m = mavutil.mavlink_connection(endpoint, source_system=255,
                                        source_component=191)
-        # ANNOUNCE FIRST. On a udpout: endpoint the router only learns this
-        # client's ephemeral port when a packet arrives FROM it, so a
-        # connection that only listens is never sent anything and every
-        # heartbeat wait times out. live_node.read_scr_user() has always
-        # called _announce() for this reason; this function never did, and
-        # the cost was that it ALWAYS returned None.
-        #
-        # None means "treat as armed and do not restart", so the effect was a
-        # watchdog that could see a stall and would never act on one. 2 Nov:
-        # the loop wedged at t=300.65 and the watchdog logged STALLED seven
-        # times over 115 s while the aircraft sat DISARMED on the ground, and
-        # restarted nothing. Measured before and after on the live router:
-        # without the announce, None in 3.00 s, three times out of three;
-        # with it, DISARMED in 0.70 s and 1.00 s.
-        m.mav.heartbeat_send(mavutil.mavlink.MAV_TYPE_GCS,
-                             mavutil.mavlink.MAV_AUTOPILOT_INVALID, 0, 0, 0)
         hb = m.recv_match(type="HEARTBEAT", blocking=True, timeout=timeout_s)
         if hb is None:
             return None

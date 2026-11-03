@@ -39,10 +39,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from map_db import MapDatabase
 from map_match import match_image, geo_error_m
 
-# maps/active.tif: the symlink Studio repoints, same as live_node's
-# DEFAULT_MAP. Analysing against a different sheet than the one that flew
-# measures the wrong thing.
-MAP = "/data/DRONE/maps/active.tif"
+MAP = "/data/DRONE/bhh.tif"
 M_PER_DEG_LAT = 111_320.0
 
 

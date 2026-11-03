@@ -53,8 +53,6 @@ caller, so a caller that forgets cannot put that behaviour back.
 """
 from __future__ import annotations
 import math
-import multiprocessing as _mp
-import os
 import threading
 import time
 from dataclasses import dataclass
@@ -168,8 +166,7 @@ class MapFixWorker:
     def __init__(self, cache, *, focal_px: float, matcher: str = "xfeat",
                  radius_m: float = 150.0, window_alt_frac: float = 0.60,
                  query_shape: str = "full",
-                 min_alt_m: float = 60.0, fix_period_s: float = 1.0,
-                 use_process: bool = True, worker_core: int | None = None,
+                 min_alt_m: float = 60.0, fix_period_s: float = 2.0,
                  min_score: float | None = None,
                  min_margin: float | None = None,
                  principal_xy=None):
@@ -268,42 +265,8 @@ class MapFixWorker:
         # this on the radio before arming.
         self.model_ready = False
         self.model_load_s = 0.0
-        # THE MATCHER RUNS IN ITS OWN PROCESS, and flight 382 is why.
-        #
-        # It was a thread, on the reasoning at the top of this file - "threads
-        # are enough here, despite the GIL: OpenCV releases it around the
-        # heavy work". The first flight whose matcher ever actually ran
-        # measured what that costs: the loop went 23.86 Hz on 378, where
-        # covers() was false and the matcher returned instantly, to 21.20 Hz
-        # on 382, and dropped frames went 1.06 to 3.67 a second. That is 5.3
-        # frames per fix against 84 ms of measured matcher work, so four
-        # fifths of the cost is contention, not arithmetic - the Python-level
-        # glue between the OpenCV calls holds the GIL, and the flow loop is
-        # Python-level glue too.
-        #
-        # Frames are what the velocity is made of. On the same flight the
-        # phantom - flow minus GPS_RAW_INT - was +0.770 m/s p50 where fewer
-        # than 3 frames a second were dropped and +3.705 where 6 to 10 were.
-        #
-        # A process has its own GIL, so the only thing shared is CPU, and
-        # there are six cores. fork() is deliberate: the child inherits the
-        # 30 MB map array copy-on-write instead of pickling it, and torch is
-        # loaded by _warm() INSIDE the child, so the flying process never
-        # imports it at all.
-        self.use_process = bool(use_process)
-        self._proc = self._jobq = self._resq = None
-        self._thread = None
-        if self.use_process:
-            ctx = _mp.get_context("fork")
-            self._jobq = ctx.Queue(maxsize=2)
-            self._resq = ctx.Queue(maxsize=8)
-            self._proc = ctx.Process(target=self._proc_main,
-                                     args=(self._jobq, self._resq, worker_core),
-                                     daemon=True)
-            self._proc.start()
-        else:
-            self._thread = threading.Thread(target=self._loop, daemon=True)
-            self._thread.start()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
 
     def _warm(self) -> None:
         """Build the XFeat model NOW, in this thread, before any fix is asked for.
@@ -441,32 +404,16 @@ class MapFixWorker:
                          discard)
             self.submitted += 1
             self._last_submit = now
-            job = self._job
-        if self._jobq is not None:
-            try:
-                self._jobq.put_nowait(job)
-            except Exception:
-                # The child is gone or wedged. Give the slot back rather than
-                # leaving busy stuck true for ever, which would stop every
-                # later fix silently.
-                with self._lock:
-                    self._job = None
-                    self.submitted -= 1
-                    self.dropped += 1
-                return False
-        else:
-            self._wake.set()
+        self._wake.set()
         return True
 
     @property
     def busy(self) -> bool:
-        self._drain()
         with self._lock:
             return self._job is not None
 
     def poll(self) -> FixResult | None:
         """Take the most recent finished fix, if there is one. Returns it once."""
-        self._drain()
         with self._lock:
             r, self._result = self._result, None
         return r
@@ -499,74 +446,7 @@ class MapFixWorker:
             r = max(r, half + self.ncc_search_m)
         return float(np.clip(r, 40.0, self.radius_m))
 
-    def _proc_main(self, jobq, resq, core):
-        """The child. Loads the model, then answers jobs until told to stop.
-
-        Runs in a fork, so self is already here with the map in it - nothing
-        is pickled except the job and the answer. Pinning is optional and off
-        by default: the scheduler spreads six cores well enough, and a pin
-        that collides with the flow threads is worse than none.
-        """
-        if core is not None:
-            try:
-                os.sched_setaffinity(0, {int(core)})
-            except (OSError, ValueError):
-                pass
-        try:
-            self._warm()
-        except Exception:
-            pass
-        try:
-            resq.put(("ready", float(self.model_load_s)))
-        except Exception:
-            pass
-        while True:
-            try:
-                job = jobq.get()
-            except (EOFError, OSError):
-                break
-            if job is None:
-                break
-            try:
-                out, warm, tilt = self._run_job(job)
-            except Exception:
-                out, warm, tilt = None, False, 0.0
-            try:
-                resq.put(("fix", out, bool(warm), float(tilt)))
-            except Exception:
-                break
-
-    def _drain(self) -> None:
-        """Take whatever the child has finished and do the parent's counting.
-
-        The child cannot touch the counters - it has its own copy of them - so
-        every one of them is updated here, which is also the only place the
-        single job slot is cleared. Called from poll() and from busy().
-        """
-        if self._resq is None:
-            return
-        while True:
-            try:
-                msg = self._resq.get_nowait()
-            except Exception:
-                return
-            kind = msg[0]
-            if kind == "ready":
-                self.model_ready = True
-                self.model_load_s = msg[1]
-                continue
-            _, out, warm, tilt = msg
-            with self._lock:
-                self.last_tilt_shift_m = tilt
-                if warm:
-                    self.warm_runs += 1
-                else:
-                    self._result = out
-                    self.completed += 1
-                self._job = None
-
     def _loop(self):
-        """Drive _run_job from a THREAD. The fallback when use_process is off."""
         self._warm()
         while self._run:
             self._wake.wait(0.2)
@@ -575,109 +455,79 @@ class MapFixWorker:
                 job = self._job
             if job is None:
                 continue
-            out, warm, _tilt = self._run_job(job)
+            img, plon, plat, alt, yaw, roll, pitch, t0, discard = job
+            res = None
+            got = {}
+            try:
+                if self.cache.covers(plon, plat):
+                    for mname in self._pair:
+                        # Each matcher gets the window IT needs: NCC slides
+                        # the template inside the window and starves on
+                        # XFeat's radius. See _radius_for.
+                        win, wg = self.cache.window(
+                            plon, plat, self._radius_for(alt, mname),
+                            kind=self._window_kind)
+                        ms, mm = self._gate[mname]
+                        r_ = self._all_locate[mname](
+                            img, win, wg, altitude_m=alt, focal_px=self.focal_px,
+                            yaw_deg=yaw, map_gsd_m=self.cache.gsd,
+                            map_gsd_x_m=getattr(self.cache, "gsd_x", None),
+                            min_score=ms, min_margin=mm,
+                            window_is_edges=(self._window_kind == "edges"),
+                            principal_xy=self.principal_xy,
+                            query_shape=self.query_shape)
+                        if r_ is not None and r_.ok:
+                            got[mname] = r_
+                        if res is None or (r_ is not None and r_.ok and not res.ok):
+                            res = r_
+            except Exception:
+                pass
+            # How far apart the two answers are, when both produced one. The
+            # ONLY measured predictor of a bad fix: corr +0.928 against the
+            # error, where score manages -0.10 and inlier count +0.20.
+            # Logged, not enforced.
+            # Both matchers get the SAME tilt shift, so it cancels out of
+            # their disagreement entirely - this number is unaffected by the
+            # correction above and still means what it meant.
+            disagree = None
+            if len(got) == 2:
+                a, b = (got[k] for k in self._pair)
+                disagree = float(math.hypot(
+                    (a.lat - b.lat) * 111320.0,
+                    (a.lon - b.lon) * 111320.0
+                    * math.cos(math.radians(a.lat))))
+            # THE TILT CORRECTION. The matcher answers "the middle of this
+            # frame is here"; the aircraft is nadir of that, not at it. Both
+            # matchers report the same centre, so this is applied once, here,
+            # rather than inside either of them.
+            dN, dE = self.nadir_offset_m(alt, roll, pitch, yaw)
+            self.last_tilt_shift_m = float(math.hypot(dN, dE))
+            if res is not None and res.ok and (dN or dE):
+                res.lat = res.lat - dN / 111320.0
+                res.lon = res.lon - dE / (111320.0
+                                          * math.cos(math.radians(res.lat)))
+            out = None
+            if res is not None:
+                out = FixResult(res.lon, res.lat, res.score, res.margin, res.ok,
+                                time.monotonic() - t0, plon, plat,
+                                disagree,
+                                getattr(res, "inliers", 0),
+                                getattr(res, "total_matches", 0),
+                                getattr(res, "reason", ""),
+                                float(alt))
             with self._lock:
-                if warm:
+                if discard:
+                    # Ran to keep the path warm and visible. The answer does
+                    # not go to the fuser - nothing below min_alt_m ever has.
                     self.warm_runs += 1
                 else:
                     self._result = out
                     self.completed += 1
                 self._job = None
 
-    def _run_job(self, job):
-        """One match, start to finish. Returns (FixResult|None, warm, tilt_m).
-
-        Pure with respect to the worker's bookkeeping: it reads self.cache
-        and the gates, and the CALLER counts what comes back. That split is
-        what lets the same code run in a thread or in a child process - see
-        _proc_loop and the note on use_process in __init__.
-        """
-        img, plon, plat, alt, yaw, roll, pitch, t0, discard = job
-        res = None
-        got = {}
-        try:
-            if self.cache.covers(plon, plat):
-                for mname in self._pair:
-                    # Each matcher gets the window IT needs: NCC slides
-                    # the template inside the window and starves on
-                    # XFeat's radius. See _radius_for.
-                    win, wg = self.cache.window(
-                        plon, plat, self._radius_for(alt, mname),
-                        kind=self._window_kind)
-                    ms, mm = self._gate[mname]
-                    r_ = self._all_locate[mname](
-                        img, win, wg, altitude_m=alt, focal_px=self.focal_px,
-                        yaw_deg=yaw, map_gsd_m=self.cache.gsd,
-                        map_gsd_x_m=getattr(self.cache, "gsd_x", None),
-                        min_score=ms, min_margin=mm,
-                        window_is_edges=(self._window_kind == "edges"),
-                        principal_xy=self.principal_xy,
-                        query_shape=self.query_shape)
-                    if r_ is not None and r_.ok:
-                        got[mname] = r_
-                    if res is None or (r_ is not None and r_.ok and not res.ok):
-                        res = r_
-        except Exception:
-            pass
-        # How far apart the two answers are, when both produced one. The
-        # ONLY measured predictor of a bad fix: corr +0.928 against the
-        # error, where score manages -0.10 and inlier count +0.20.
-        # Logged, not enforced.
-        # Both matchers get the SAME tilt shift, so it cancels out of
-        # their disagreement entirely - this number is unaffected by the
-        # correction above and still means what it meant.
-        disagree = None
-        if len(got) == 2:
-            a, b = (got[k] for k in self._pair)
-            disagree = float(math.hypot(
-                (a.lat - b.lat) * 111320.0,
-                (a.lon - b.lon) * 111320.0
-                * math.cos(math.radians(a.lat))))
-        # THE TILT CORRECTION. The matcher answers "the middle of this
-        # frame is here"; the aircraft is nadir of that, not at it. Both
-        # matchers report the same centre, so this is applied once, here,
-        # rather than inside either of them.
-        dN, dE = self.nadir_offset_m(alt, roll, pitch, yaw)
-        self.last_tilt_shift_m = float(math.hypot(dN, dE))
-        if res is not None and res.ok and (dN or dE):
-            res.lat = res.lat - dN / 111320.0
-            res.lon = res.lon - dE / (111320.0
-                                      * math.cos(math.radians(res.lat)))
-        out = None
-        if res is not None:
-            out = FixResult(res.lon, res.lat, res.score, res.margin, res.ok,
-                            time.monotonic() - t0, plon, plat,
-                            disagree,
-                            getattr(res, "inliers", 0),
-                            getattr(res, "total_matches", 0),
-                            getattr(res, "reason", ""),
-                            float(alt))
-        # discard: the run happened to keep the path warm and visible. The
-        # answer does not go to the fuser - nothing below min_alt_m ever has.
-        return out, bool(discard), float(self.last_tilt_shift_m)
-
     def stop(self):
         self._run = False
         self._wake.set()
-        if self._proc is not None:
-            try:
-                self._jobq.put_nowait(None)
-            except Exception:
-                pass
-            # Same 8 s as the thread, and for the same reason: _warm() is
-            # 2.35 s warm and 4.95 s cold, and a child killed inside torch
-            # leaves the same mess a thread did.
-            self._proc.join(timeout=8.0)
-            if self._proc.is_alive():
-                self._proc.terminate()
-                self._proc.join(timeout=2.0)
-            for q in (self._jobq, self._resq):
-                try:
-                    q.close()
-                    q.cancel_join_thread()
-                except Exception:
-                    pass
-            return
         # Long enough to outlast _warm(). The model load is 2.35 s warm and
         # 4.95 s cold, so a 2 s join returned while the thread was still
         # inside torch - and an abandoned torch thread aborts the interpreter

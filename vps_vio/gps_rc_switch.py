@@ -202,11 +202,6 @@ class RcGpsSwitch:
         proof, and a silent failure here puts the aircraft on the wrong
         source for the rest of the flight.
         """
-        # got BEFORE the loop: tries=0 runs the body zero times and the
-        # return below reads it. Same shape as live_node's _fe, and this
-        # function is the one that puts the aircraft on the source the pilot
-        # asked for - it is the last place that should raise.
-        got = None
         for k in range(tries):
             self.set_primary(idx)
             time.sleep(0.8)

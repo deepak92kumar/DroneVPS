@@ -136,26 +136,8 @@ check("widths match", len(row) == len(CSV_COLUMNS),
 # because seven columns were once added to the ROW and not to the header, and
 # 1162 rows were written with everything past the 32nd attributed to the wrong
 # name. Adding a column here is meant to be a decision, not an accident.
-# 80 -> 92 on 29 Oct: the twelve try_*/map_* columns that record a map match
-# ATTEMPT rather than only an accepted fix. The number is hard-coded on
-# purpose - it is the tripwire that catches a column added by accident - so
-# changing it is part of changing the columns, not a nuisance.
-# 92 -> 94 on 1 Nov: gps_sent and gps_skipped_rate. The send rate went 4.3 ->
-# 10 Hz and there was no way to check it had - the flight controller reports
-# GPS2_RAW to a GCS at its own stream rate, which caps near 5 Hz for both
-# receivers, so counting distinct time_usec from outside gives 4.97 Hz
-# whether the node sends 5 or 50. The sender's own counter is the instrument.
-# 95 since 2 Nov: n_frame_stale, inserted directly after frames_skipped.
-# It had been counted in VpsNode and written nowhere at all, which is why it
-# took a day to notice that run 418 had 8339 frames over the age limit and
-# only 5 of them lost a flow step. The count is here so that disagreement is
-# visible in the CSV from now on.
-check("and there are the columns we expect", len(CSV_COLUMNS) == 96,
+check("and there are the columns we expect", len(CSV_COLUMNS) == 80,
       str(len(CSV_COLUMNS)))
-i_fs = CSV_COLUMNS.index("frames_skipped")
-check("the two veto counters sit immediately after frames_skipped",
-      CSV_COLUMNS[i_fs + 1:i_fs + 3] == ["n_flow_vetoed", "n_frame_stale"],
-      CSV_COLUMNS[i_fs:i_fs + 3])
 i = CSV_COLUMNS.index("fc_d_roll")
 check("the three derotation opinions sit together",
       CSV_COLUMNS[i:i + 8] == ["fc_d_roll", "fc_d_pitch",
