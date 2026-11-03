@@ -2543,19 +2543,39 @@ class VpsNode:
         # and stamped "now" is read by the flight controller as motion: at
         # 3 m/s that is half a metre of invented travel, and it feeds the
         # velocity that ends every window.
+        # THE DEROTATION FLAG IS SET BEFORE THE BRANCH, NOT INSIDE ONE.
+        #
+        # 29 Oct, and again on 3 Nov after the 27 Oct rewind removed the fix:
+        # these three names were assigned inside the `else` below, while the
+        # SECOND camera's call - which sits outside the branch - read them
+        # anyway. A frame older than frame_age_max_s took the stale path, left
+        # _use_pp unassigned, and the process exited with
+        #
+        #     UnboundLocalError: local variable '_use_pp' referenced before
+        #     assignment                              (live_node.py line 2589)
+        #
+        # It is not rare and it is not harmless. It fires when the camera's
+        # USB 3 link drops and the frames go stale, which this aircraft does
+        # about every 20-40 minutes: measured 3 Nov, two drops in 45 minutes
+        # on the bench, each one killing the node. systemd restarts it five
+        # seconds later, and on top of that comes the camera init and the
+        # XFeat load - twenty to thirty seconds with no injection, which in
+        # the air is an ALT_HOLD.
+        #
+        # So they are assigned here, where every path runs.
+        _gr, _gp = f.get("gyro_d_roll"), f.get("gyro_d_pitch")
+        # The gyro's rotation goes IN, so each track is derotated before the
+        # fit reduces them. See flow_odom.gyro_shift_px_at: the old path
+        # subtracted one centre-valued shift from the result, which is exact
+        # only at the optical centre and left 16-32% of the rotation behind on
+        # this 77.7 degree field.
+        _use_pp = (self.derotate != "fc" and _gr is not None
+                   and _gp is not None)
         _age = float(f.get("frame_age_s") or 0.0)
         if _age > getattr(self, "frame_age_max_s", 0.12):
             self.n_frame_stale = getattr(self, "n_frame_stale", 0) + 1
             d, ntrk = None, 0
         else:
-            # The gyro's rotation goes IN, so each track is derotated
-            # before the fit reduces them. See flow_odom.gyro_shift_px_at:
-            # the old path subtracted one centre-valued shift from the
-            # result, which is exact only at the optical centre and left
-            # 16-32% of the rotation behind on this 77.7 degree field.
-            _gr, _gp = f.get("gyro_d_roll"), f.get("gyro_d_pitch")
-            _use_pp = (self.derotate != "fc" and _gr is not None
-                       and _gp is not None)
             d, ntrk = self.tracker.step(
                 f["img"], depth=f.get("depth"),
                 derot_deg=((_gr, _gp) if _use_pp else None))
