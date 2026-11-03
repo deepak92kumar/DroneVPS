@@ -3106,7 +3106,8 @@ class VpsNode:
             # +0.87. Worth 8.6 m of 406's 88.7 m, 1.6 of 418's 14.5 - about
             # 6-11% of the drift, systematic and growing with distance.
             dn, de = shift_to_ne(d, altitude_m=f["alt"], focal_px=self.focal,
-                                 yaw_deg=f["yaw"] + self.cam_yaw_offset_deg,
+                                 yaw_deg=f["yaw"] + getattr(
+                                     self, "cam_yaw_offset_deg", 0.0),
                                  focal_y_px=self.focal_y)
             # ONE decision for both consumers. Until 21 Oct predict() ran here
             # unconditionally and push_flow() below could then refuse the same

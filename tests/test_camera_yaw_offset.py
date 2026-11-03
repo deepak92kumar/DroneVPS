@@ -89,9 +89,12 @@ print("\nthe flow path gets it too - 2 Nov, and why this check reversed")
 # the mount's rotation went straight into every metre of flow - and nothing
 # caught it because no test compared the two call sites.
 print("\nthe flow path gets it too, not only the matcher")
+# getattr, like n_frame_stale: the gap-fill test builds a VpsNode without
+# running __init__ so that nothing opens a camera, and a bare attribute read
+# broke it - which is how this reached a push with one test red.
 check("shift_to_ne is given the offset",
-      'yaw_deg=f["yaw"] + self.cam_yaw_offset_deg,\n'
-      '                                 focal_y_px=self.focal_y)' in src)
+      'yaw_deg=f["yaw"] + getattr(' in src
+      and '"cam_yaw_offset_deg", 0.0)' in src)
 check("the matcher still gets it",
       'yaw_deg=f["yaw"] + self.cam_yaw_offset_deg,' in src)
 check("no call site is left on the raw yaw",
