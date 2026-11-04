@@ -103,6 +103,56 @@ class VpsConfig:
                                    # disagreement is LOGGED, not enforced -
                                    # a veto on it is a new gate. UNFLOWN.
                                    # Map matching went 45% -> 75% on the swap.
+    # WHOSE ANSWER MAY BECOME A FIX, when `matcher` runs more than one. Both
+    # still run - the disagreement above needs two answers - but only a
+    # trusted matcher's position is published. Comma-separated, in order of
+    # preference; None means "xfeat" when both are running.
+    #
+    # THIS IS THE 4 NOV FINDING. The worker kept the first result unless a
+    # later one was ok where the earlier was not, and the pair reads
+    # ["ncc", "xfeat"], so NCC won every frame it accepted. On flight 478
+    # that was all 153 fixes; XFeat succeeded 51 times and published nothing.
+    # Measured on 675 frames of two flights, both matchers, nadir corrected,
+    # against the M9N:
+    #                       n    NCC p50/p90/max      XFeat p50/p90/max
+    #   both accepted     339    3.80  8.09  85.69     3.55  6.49  11.36
+    #   only NCC          226   25.01 146.55 180.74   (XFeat declined)
+    #   only XFeat          9   (NCC declined)         5.18  7.37   9.00
+    #   neither           101   both about 104 m
+    #
+    # XFeat's error is bounded at 11.36 m in every prior-error band and every
+    # tilt band, including prior 50-200 m where it accepts 1% of frames. NCC
+    # accepts 94-100% whatever the prior, and 55% of the prior 50-200 m
+    # frames with a median error of 96.88 m. One gate is a self-assessment;
+    # the other, at min_score 0.05 and min_margin 0.01, is not.
+    #
+    #                    fix rate   p50    p90      max    >20 m  >50 m
+    #   NCC wins (old)   574/675    4.91  89.83  180.74     132    109
+    #   XFeat trusted    348/675    3.57   6.59   11.36       0      0
+    #
+    # A third of the fixes go and every fix over 20 m goes with them; the
+    # lost ones had a median error of 25 m. Set this to "ncc,xfeat" to get
+    # the old behaviour back, or to "ncc" on a day like 15:20 above when the
+    # shadows have moved and XFeat produces nothing - on such a day the
+    # aircraft otherwise gets no map fixes and ALT_HOLD is the answer, which
+    # is the standing rule for the VPS stopping. UNFLOWN.
+    map_trust: str | None = None
+    # How old the roll and pitch behind the nadir correction may be before
+    # the correction is withheld. The matcher says "the middle of this frame
+    # is here" and the aircraft is alt*tan(tilt) from that, so the shift is
+    # only as good as the attitude it is built from - and nothing recorded
+    # that attitude's age until 4 Nov.
+    #
+    # Measured on 451 frames of two flights, accepted fixes, error
+    # p50/p90/max against how stale the attitude was:
+    #     0 ms  3.48/ 6.18/11.26     100 ms  3.48/ 7.68/11.60
+    #   200 ms  4.65/ 9.97/18.55     400 ms  6.32/15.13/29.41
+    # so 100 ms is free and 400 ms doubles it. ATTITUDE arrives at 10 Hz, so
+    # the normal case sits inside the free band; 0.30 s is set where the cost
+    # starts and exists for the stream STALLING, which this project has
+    # already done once when a second MAVLink client changed the shared
+    # channel's stream rates. UNFLOWN.
+    map_att_age_max_s: float = 0.30
     # 60 -> 50 ON 26 OCT, at the pilot's instruction and on their reasoning:
     # the gate reads the BAROMETER, which runs 5-9 m high, so a gate of 50
     # stops the map at about 44 m of real height. Below that the flow, the

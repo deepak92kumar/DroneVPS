@@ -135,7 +135,11 @@ class Telemetry:
         from lidar_filter import LidarFilter
         self.lidar = LidarFilter()
         self.state = dict(lat=None, lon=None, alt_rel=None, alt_amsl=None,
-                          roll=None, pitch=None, yaw=None, fix=None, sats=None,
+                          roll=None, pitch=None, yaw=None,
+                          # When the roll/pitch/yaw above arrived. See the
+                          # ATTITUDE handler: None until the first message, so
+                          # a consumer can tell "no attitude yet" from "old".
+                          att_t=None, fix=None, sats=None,
                           hdg=None, rngfnd=None, rngfnd_raw=None, armed=False, t=0.0,
                           gps1_alt=None,
                           # The receiver's OWN horizontal accuracy, metres.
@@ -376,9 +380,21 @@ class Telemetry:
                     self.state["rngfnd_raw"] = raw
                     self.state["rngfnd"] = self.lidar.push(now, raw)
                 elif t == "ATTITUDE":
+                    # att_t, because roll and pitch are what the map fix's
+                    # nadir correction is built from and this dict only ever
+                    # held the LATEST message with no way to tell how old it
+                    # was. Measured 4 Nov on 451 frames: attitude 100 ms stale
+                    # costs nothing (fix error p50 3.48 either way), 200 ms
+                    # costs a third, 400 ms doubles it and takes the worst
+                    # case to 29 m. ATTITUDE runs at 10 Hz, so the normal case
+                    # is free - the hazard is the stream stalling, which this
+                    # project has already done once when a second MAVLink
+                    # client changed the shared channel's stream rates, and
+                    # which nothing aboard could see.
                     self.state.update(roll=np.degrees(msg.roll),
                                       pitch=np.degrees(msg.pitch),
-                                      yaw=np.degrees(msg.yaw))
+                                      yaw=np.degrees(msg.yaw),
+                                      att_t=time.time())
                 self.state["t"] = time.time()
 
     def snapshot(self) -> dict:

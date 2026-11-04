@@ -808,7 +808,18 @@ class LiveSource:
                     # truth on board.
                     gps1_raw=((s["gps1_lon"], s["gps1_lat"])
                               if s.get("gps1_lat") not in (None, 0.0) else None),
-                    roll=s["roll"], pitch=s["pitch"], gps=gps, depth=depth,
+                    roll=s["roll"], pitch=s["pitch"],
+                    # HOW OLD THE ROLL AND PITCH ABOVE ARE. The map fix's
+                    # nadir correction is alt*tan(tilt), so it is only as
+                    # good as the attitude behind it, and until now there was
+                    # no way to know whether that attitude was 10 ms or 10 s
+                    # old. See record_flight's ATTITUDE handler and
+                    # MapFixWorker.att_age_max_s for the measurement. The
+                    # frame itself is not the problem: frame_age_s measures
+                    # p50 0.0000 s and max 0.0061 s on both 4 Nov flights.
+                    att_age_s=(None if s.get("att_t") is None
+                               else max(0.0, time.time() - s["att_t"])),
+                    gps=gps, depth=depth,
                     gyro_d_roll=d_roll, gyro_d_pitch=d_pitch,
                         gyro_drain_roll=drain_roll,
                         gyro_drain_pitch=drain_pitch,
@@ -1178,6 +1189,14 @@ CSV_COLUMNS = ["t", "north_m", "east_m", "lon", "lat", "sigma_m",
     # configuration carried an 8.61 m east bias this code never had. Now the
     # fix's own position is in the log and the dependence is ours to measure.
     "fix_lon", "fix_lat", "fix_score", "fix_inliers", "fix_alt_m",
+    # WHICH MATCHER PUBLISHED IT, and whether the attitude behind its nadir
+    # correction was fresh. Added 4 Nov, both for the same reason: on
+    # flight 478 every one of 153 fixes came from NCC and none from XFeat,
+    # and the only way to find that out afterwards was that fix_inliers was
+    # zero on all of them, because NCC does not produce inliers. A guess from
+    # a side effect is not a record. fix_att_age_s is blank when the frame
+    # carried no attitude timestamp, which is every flight before this one.
+    "fix_source", "fix_att_age_s", "fix_reason",
     # How stale the fix was when it arrived - the matcher's own round trip.
     # Until 24 Oct the correction was measured against the CURRENT position
     # rather than the prior the matcher saw, so this interval was folded into
@@ -1339,6 +1358,9 @@ def csv_row(est, f, v, gN, gE, err):
             "" if est.get("fix_score") is None else f"{est['fix_score']:.4f}",
             "" if est.get("fix_inliers") is None else f"{est['fix_inliers']:d}",
             "" if est.get("fix_alt_m") is None else f"{est['fix_alt_m']:.1f}",
+            est.get("fix_source") or "",
+            "" if est.get("fix_att_age_s") is None else f"{est['fix_att_age_s']:.3f}",
+            (est.get("fix_reason") or "").replace(",", ";"),
             "" if est.get("fix_age_s") is None else f"{est['fix_age_s']:.3f}",
             "" if est.get("fix_disagree_m") is None
             else f"{est['fix_disagree_m']:.2f}",
@@ -2146,6 +2168,15 @@ class VpsNode:
             # fault that left map_window_alt_frac and map_query_shape dead.
             # All three defaults read 1.0 now and a test holds them together.
             fix_period_s=float(fix_period_s),
+            # WHOSE ANSWER MAY BECOME A FIX. See MapFixWorker._trust for the
+            # 675-frame measurement: with both matchers running, taking
+            # XFeat's answer and publishing nothing when it declines cost a
+            # third of the fixes and removed every fix over 20 m, worst error
+            # 180.74 -> 11.36 m. A setting, not a code change, because
+            # flight 160 showed a day where XFeat produced 2 fixes of 40 and
+            # NCC produced 26.
+            trust=getattr(_cfg, "map_trust", None),
+            att_age_max_s=float(getattr(_cfg, "map_att_age_max_s", 0.30)),
             principal_xy=(None if K is None
                           else (float(np.asarray(K).reshape(3, 3)[0, 2]),
                                 float(np.asarray(K).reshape(3, 3)[1, 2]))))
@@ -2865,7 +2896,11 @@ class VpsNode:
                                   # from the image centre to under the
                                   # aircraft. See MapFixWorker.nadir_offset_m.
                                   roll_deg=f.get("roll"),
-                                  pitch_deg=f.get("pitch")):
+                                  pitch_deg=f.get("pitch"),
+                                  # So the worker can tell whether the
+                                  # attitude behind the nadir correction is
+                                  # fresh enough to trust it.
+                                  att_age_s=f.get("att_age_s")):
                 self._next_fix = f["t"] + self.fix_period
         res = self.worker.poll()
         fix_lon = fix_lat = fix_score = fix_alt = None
@@ -2898,6 +2933,28 @@ class VpsNode:
             fix_inl = int(getattr(res, "inliers", 0))
             fix_alt = float(getattr(res, "altitude_m", 0.0)) or None
 
+        # EVERY ATTEMPT GETS A REASON, accepted or not. Until 4 Nov a match
+        # the matcher itself refused left no trace at all: flight 478's log
+        # holds 153 fix rows and all 153 were matches the matcher had
+        # ACCEPTED, of which the fuser then took 84. The ones XFeat declined -
+        # the whole reason NCC was publishing every fix - were invisible, and
+        # the only way to find that out afterwards was that fix_inliers read
+        # zero on every row because NCC does not produce inliers.
+        #
+        # The rejected fix's POSITION is deliberately still not written to
+        # fix_lon/fix_lat. Those columns mean "where the matcher put us on a
+        # fix that was taken", analysis depends on that, and a rejected
+        # position belongs in an offline replay where it can be scored. The
+        # reason, the source and the attitude age are what the aircraft cannot
+        # reconstruct later, so those are what it records.
+        fix_src = fix_att_age = fix_reason = None
+        if res is not None:
+            fix_src = getattr(res, "source", "") or None
+            fix_att_age = getattr(res, "att_age_s", None)
+            fix_reason = getattr(res, "reason", "") or None
+            if not res.ok:
+                self.n_fix_refused = getattr(self, "n_fix_refused", 0) + 1
+
         lon, lat = self.to_lonlat(*self.fuser.pos)
         return dict(step_px=self.step_px, step_action=self.step_action,
                     fix_age_s=fix_age, fix_disagree_m=fix_dis,
@@ -2911,6 +2968,8 @@ class VpsNode:
                     step_dt_s=getattr(self, "step_dt", None),
                     fix_lon=fix_lon, fix_lat=fix_lat, fix_score=fix_score,
                     fix_inliers=fix_inl, fix_alt_m=fix_alt,
+                    fix_source=fix_src, fix_att_age_s=fix_att_age,
+                    fix_reason=fix_reason,
                     north=float(self.fuser.pos[0]), east=float(self.fuser.pos[1]),
                     lon=lon, lat=lat, sigma=self.fuser.sigma_m,
                     # Two sigmas, and the difference is the whole 20 Oct

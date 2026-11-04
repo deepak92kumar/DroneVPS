@@ -153,6 +153,24 @@ class FixResult:
     inliers: int = 0      # RANSAC inliers behind the fix
     total_matches: int = 0
     reason: str = ""      # why a rejected fix was rejected, for the recorder
+    # WHICH MATCHER THIS POSITION CAME FROM. Until 4 Nov nothing recorded it
+    # and the answer could only be inferred from fix_inliers being zero,
+    # because NCC does not produce inliers. That inference is how it came out
+    # that NCC had published every fix of flight 478 and XFeat none of them.
+    # Named now, so the log says it outright.
+    source: str = ""
+    # How stale the roll and pitch behind the nadir correction were. See
+    # MapFixWorker.submit: the correction moves the answer from the middle of
+    # the frame to under the aircraft, and it is only as good as the attitude
+    # it is given. Measured 4 Nov on 451 frames of two flights, accepted
+    # fixes, error p50/p90/max against attitude age:
+    #     0 ms  3.48/ 6.18/11.26    100 ms  3.48/ 7.68/11.60
+    #   200 ms  4.65/ 9.97/18.55    400 ms  6.32/15.13/29.41
+    # so 100 ms costs nothing and 400 ms doubles it. ATTITUDE arrives at
+    # 10 Hz, which is inside the harmless band - the risk is not the rate but
+    # the stream stalling without anyone noticing, which is exactly what
+    # nothing could see before this field existed.
+    att_age_s: float | None = None
     # The altitude the MATCH was made at, not the altitude now. Added 22 Oct:
     # the matcher's error depends strongly on height, because the search
     # window is window_alt_frac x altitude and a smaller window holds fewer
@@ -169,6 +187,8 @@ class MapFixWorker:
                  min_alt_m: float = 60.0, fix_period_s: float = 2.0,
                  min_score: float | None = None,
                  min_margin: float | None = None,
+                 trust: str | None = None,
+                 att_age_max_s: float = 0.30,
                  principal_xy=None):
         self.cache = cache
         self.focal_px = float(focal_px)
@@ -248,6 +268,71 @@ class MapFixWorker:
                 g["min_score"] if min_score is None else float(min_score),
                 g["min_margin"] if min_margin is None else float(min_margin))
         self.min_score, self.min_margin = self._gate[self._pair[0]]
+
+        # WHOSE ANSWER MAY BECOME A FIX. Both matchers still run - the
+        # disagreement is the project's best predictor of a bad fix and it
+        # needs two answers - but only a trusted one is published.
+        #
+        # Until 4 Nov there was no such idea. The loop kept the FIRST result
+        # unless a later one was ok where the earlier was not, and _pair reads
+        # ["ncc", "xfeat"], so NCC won every frame it accepted and XFeat's
+        # answer was computed, used for the disagreement number, and thrown
+        # away. On flight 478 that meant XFeat succeeded 51 times and was
+        # never once the fix.
+        #
+        # Measured 4 Nov, 675 frames of two flights, both matchers, nadir
+        # correction applied, scored against the M9N:
+        #
+        #                         n    NCC err p50/p90/max   XFeat err p50/p90/max
+        #     both accepted     339     3.80  8.09  85.69     3.55  6.49  11.36
+        #     only NCC          226    25.01 146.55 180.74   (XFeat declined)
+        #     only XFeat          9    (NCC declined)         5.18  7.37   9.00
+        #     neither           101     both about 104 m, both declined
+        #
+        # XFeat's error is bounded at 11.36 m in EVERY prior-error band and
+        # EVERY tilt band, including prior 50-200 m where it accepts 1% of
+        # frames, and including tilt 10-20 deg. NCC accepts 94-100% of frames
+        # whatever the prior, and at prior 50-200 m it accepts 55% of them
+        # with a median error of 96.88 m. XFeat's gate is a self-assessment;
+        # NCC's, at min_score 0.05 and min_margin 0.01, is not.
+        #
+        # Taking XFeat's answer and publishing nothing when it declines:
+        #
+        #                      fix rate   err p50   p90     max    >20 m  >50 m
+        #     NCC wins (old)   574/675     4.91    89.83  180.74    132    109
+        #     XFeat trusted    348/675     3.57     6.59   11.36      0      0
+        #
+        # A third of the fixes go, and every fix over 20 m goes with them. On
+        # the good flight the rate falls 98% -> 79% and the worst error 85.69
+        # -> 9.16 m. The lost fixes were not help: their median error was
+        # 25 m.
+        #
+        # NCC is NOT removed and NOT distrusted as a matcher. Flight 160 is
+        # still on the record - XFeat 2 of 40 at 15:20 against NCC's 26, when
+        # the shadows had swung away from the map's - and on a day like that
+        # this setting is how NCC is believed again, without a code change.
+        # On such a day the aircraft gets no map fixes and ALT_HOLD is the
+        # answer, which is the standing rule for the VPS stopping.
+        self._trust = [m for m in (self._pair if trust is None
+                                   else [s.strip().lower()
+                                         for s in str(trust).split(",")])
+                       if m in self._pair]
+        if trust is None and self._pair == ["ncc", "xfeat"]:
+            self._trust = ["xfeat"]
+        if not self._trust:
+            raise ValueError(f"trust={trust!r} names no matcher that is "
+                             f"running (matcher={self.matcher!r})")
+        # Answers suppressed because the matcher that produced them is not
+        # trusted. A fix rate that falls has to be visible as a number, not
+        # inferred from the absence of fixes.
+        self.n_untrusted = 0
+        # Fixes whose nadir correction rested on attitude older than this are
+        # published with the correction NOT applied and the age recorded, so
+        # a stalled ATTITUDE stream shows up as a worse fix with a reason
+        # rather than as a confident wrong one. See FixResult.att_age_s for
+        # the measurement behind 0.30 s.
+        self.att_age_max_s = float(att_age_max_s)
+        self.n_att_stale = 0
 
         self._job = None
         self._result: FixResult | None = None
@@ -361,7 +446,8 @@ class MapFixWorker:
 
     def submit(self, img: np.ndarray, *, prior_lon: float, prior_lat: float,
                altitude_m: float, yaw_deg: float,
-               roll_deg: float = 0.0, pitch_deg: float = 0.0) -> bool:
+               roll_deg: float = 0.0, pitch_deg: float = 0.0,
+               att_age_s: float | None = None) -> bool:
         """Queue a fix. False if it was refused, for any of three reasons.
 
         Below min_alt_m the map does not run at all. That is deliberate and it
@@ -400,8 +486,9 @@ class MapFixWorker:
                 self.dropped += 1
                 return False
             self._job = (img, prior_lon, prior_lat, altitude_m, yaw_deg,
-                         float(roll_deg or 0.0), float(pitch_deg or 0.0), now,
-                         discard)
+                         float(roll_deg or 0.0), float(pitch_deg or 0.0),
+                         None if att_age_s is None else float(att_age_s),
+                         now, discard)
             self.submitted += 1
             self._last_submit = now
         self._wake.set()
@@ -455,9 +542,10 @@ class MapFixWorker:
                 job = self._job
             if job is None:
                 continue
-            img, plon, plat, alt, yaw, roll, pitch, t0, discard = job
+            img, plon, plat, alt, yaw, roll, pitch, att_age, t0, discard = job
             res = None
-            got = {}
+            got = {}      # matcher -> result, accepted only
+            tried = {}    # matcher -> result, whatever it said
             try:
                 if self.cache.covers(plon, plat):
                     for mname in self._pair:
@@ -476,12 +564,37 @@ class MapFixWorker:
                             window_is_edges=(self._window_kind == "edges"),
                             principal_xy=self.principal_xy,
                             query_shape=self.query_shape)
+                        if r_ is not None:
+                            tried[mname] = r_
                         if r_ is not None and r_.ok:
                             got[mname] = r_
-                        if res is None or (r_ is not None and r_.ok and not res.ok):
-                            res = r_
             except Exception:
                 pass
+            # WHOSE ANSWER IS PUBLISHED. See self._trust for the measurement.
+            # Trust order first, so a trusted matcher that accepted wins over
+            # one that did not; then, if no trusted matcher accepted, the best
+            # available result is still carried through with ok=False so the
+            # recorder gets a position and a reason - but it can never become
+            # a fix, because live_node only folds in a result whose ok is set.
+            res = next((got[m] for m in self._trust if m in got), None)
+            if res is None:
+                untrusted = [m for m in got if m not in self._trust]
+                if untrusted:
+                    self.n_untrusted += 1
+                res = next((tried[m] for m in self._trust if m in tried),
+                           next(iter(tried.values())) if tried else None)
+                if res is not None and res.ok:
+                    # Can only happen if _trust and the loop disagree; make it
+                    # loud rather than letting an untrusted answer through.
+                    res.ok = False
+                    res.reason = (res.reason or "") + " [not a trusted matcher]"
+                if untrusted and res is not None:
+                    # APPENDED, not substituted. The trusted matcher's own
+                    # reason says why it declined, which is the diagnosis;
+                    # this says a fix was available and was suppressed, which
+                    # is what a falling fix rate has to be explainable by.
+                    res.reason = ((res.reason + "; ") if res.reason else "") + (
+                        f"{'/'.join(sorted(untrusted))} accepted, not trusted")
             # How far apart the two answers are, when both produced one. The
             # ONLY measured predictor of a bad fix: corr +0.928 against the
             # error, where score manages -0.10 and inlier count +0.20.
@@ -500,7 +613,22 @@ class MapFixWorker:
             # frame is here"; the aircraft is nadir of that, not at it. Both
             # matchers report the same centre, so this is applied once, here,
             # rather than inside either of them.
+            #
+            # AND IT IS ONLY AS GOOD AS THE ATTITUDE IT IS GIVEN. roll and
+            # pitch come from the last ATTITUDE message to arrive, so the
+            # shift is computed from the aircraft's attitude at some earlier
+            # moment than the frame. At 10 Hz that is 0-100 ms and measures as
+            # free; a stalled stream is what hurts, and until att_age_s
+            # existed nothing could see one. Beyond att_age_max_s the
+            # correction is NOT applied: an uncorrected fix is wrong by
+            # alt*tan(tilt) in a known direction, while one corrected from
+            # attitude of unknown age is wrong by an unknown amount. The
+            # reason is recorded either way.
             dN, dE = self.nadir_offset_m(alt, roll, pitch, yaw)
+            att_stale = (att_age is not None and att_age > self.att_age_max_s)
+            if att_stale:
+                self.n_att_stale += 1
+                dN = dE = 0.0
             self.last_tilt_shift_m = float(math.hypot(dN, dE))
             if res is not None and res.ok and (dN or dE):
                 res.lat = res.lat - dN / 111320.0
@@ -508,13 +636,29 @@ class MapFixWorker:
                                           * math.cos(math.radians(res.lat)))
             out = None
             if res is not None:
+                reason = getattr(res, "reason", "")
+                if att_stale:
+                    reason = ((reason + "; ") if reason else "") + (
+                        f"attitude {att_age:.2f} s old, nadir correction "
+                        f"withheld")
                 out = FixResult(res.lon, res.lat, res.score, res.margin, res.ok,
                                 time.monotonic() - t0, plon, plat,
                                 disagree,
                                 getattr(res, "inliers", 0),
                                 getattr(res, "total_matches", 0),
-                                getattr(res, "reason", ""),
-                                float(alt))
+                                reason,
+                                # By keyword from here on: source and
+                                # att_age_s sit between reason and
+                                # altitude_m in the dataclass, so a
+                                # positional altitude would land on source.
+                                altitude_m=float(alt),
+                                # tried, not got: a rejected answer still has
+                                # to say which matcher it came from, or the
+                                # recorder cannot tell "XFeat declined" from
+                                # "XFeat never ran".
+                                source=next((m for m, v in tried.items()
+                                             if v is res), ""),
+                                att_age_s=att_age)
             with self._lock:
                 if discard:
                     # Ran to keep the path warm and visible. The answer does
