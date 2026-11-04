@@ -77,7 +77,25 @@ class VpsConfig:
     # ---------------------------------------------------------------------
 
     # --- map matcher ---
-    matcher: str = "both"          # 25 OCT: BOTH. NCC came back, and the reason is in
+    # 4 NOV: "xfeat,xfeat_lg". Mutual NN first, LighterGlue only on the
+    # frames it refuses, and only above 90 m where LighterGlue is measured
+    # better. This is what the pilot asked for in words - "agar xfeat ko
+    # points na mile tho LG uski help kare" - and it measures, end to end
+    # through the real worker on 190 attempts: fix rate 50% -> 68%,
+    # LighterGlue's own 34 fixes at error p50 4.57 and worst 10.11 m, their
+    # prior error p50 23.3 m, and NOT ONE of them on a frame mutual NN had
+    # also matched.
+    #
+    # WHAT THIS DROPS: NCC no longer runs, so fix_disagree_m is empty. That
+    # costs nothing measured - NCC was never trusted after the 4 Nov finding,
+    # so its only remaining job was that number - but it does remove the
+    # shadow insurance of flight 160, where XFeat managed 2 fixes of 40 at
+    # 15:20 and NCC managed 26. On a day like that, set this back to "both".
+    # "ncc,xfeat,xfeat_lg" runs all three and needs map_trust set explicitly.
+    matcher: str = "xfeat,xfeat_lg"
+    # The previous setting and its reasoning, kept because it is still the
+    # answer on a day when the shadows have moved:
+    # matcher = "both"             # 25 OCT: BOTH. NCC came back, and the reason is in
                                    # map_match_ncc's docstring. XFeat accepted
                                    # 78% of frames at 11:38 and 0 of 40 at
                                    # 15:20 on the same site with sharper
