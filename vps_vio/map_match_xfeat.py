@@ -134,6 +134,87 @@ def _load():
     return _MODEL
 
 
+def _match_lg(model, q, win):
+    """XFeat's features, matched by LighterGlue instead of mutual NN.
+
+    THE MATCHING STEP WAS THE THING. The 4 Nov sweep moved every knob on the
+    mutual-NN path - top_k 1024/2048/3072/4096, detection_threshold 0.03 to
+    0.10, min_cossim -1/0.5/0.7/0.82/0.9, median fit against RANSAC, tol_px
+    2/4/6, sparse against XFeat* - and the error p50 stayed between 8.9 and
+    10.8 m on all eighteen. A flat sweep says the knob is not it. This is:
+    a learned matcher that reasons over both feature sets together, against a
+    mutual nearest neighbour with min_cossim defaulting to -1, which accepts
+    every mutual pair however unlike the descriptors are.
+
+    Measured on 338 frames of two flights, gates applied the same way, nadir
+    corrected, against the M9N:
+
+        mutual NN   accept 168/338 (50%)  err p50 3.53  WORST  10.95  >20 m 0
+        LighterGlue accept 213/338 (63%)  err p50 3.94  WORST  14.79  >20 m 0
+        MNN, else LG  236/338 (70%)       err p50 3.72  WORST  14.79  >20 m 0
+
+    and by how wrong the prior was - the band this exists for, because the
+    window is centred on the prior and a drifting one shows the matcher the
+    wrong ground:
+
+        prior   0- 10 m   MNN 78%   LG 75%
+        prior  10- 20 m   MNN 70%   LG 86%
+        prior  20- 50 m   MNN 22%   LG 94%     worst 14.8 m
+        prior  50+    m   MNN  0%   LG 15%     worst  9.3 m
+
+    The accuracy is not the gain - 3.53 against 3.94 - the COVERAGE is, and
+    it arrives exactly where the aircraft needs it. Tiled over a ring, LG
+    found three of four frames from flight 478's lost phase, 51 to 131 m out,
+    to 3.6-8.3 m, where mutual NN found none of four across 49 tiles each.
+
+    top_k stays at the loader's 1024: measured 38 inliers against 41 at 4096
+    for 1482 ms against 2299, and the keypoints saturate at about 1800 anyway
+    so 2048 and 4096 are identical.
+
+    kornia is required and is NOT a hard dependency: without it this raises
+    and the caller reports a refusal, which is the same outcome as a matcher
+    that declines. The mutual-NN path is untouched by its absence.
+    """
+    d0 = model.detectAndCompute(q, top_k=model.top_k)[0]
+    d1 = model.detectAndCompute(win, top_k=model.top_k)[0]
+    d0.update({"image_size": (q.shape[1], q.shape[0])})
+    d1.update({"image_size": (win.shape[1], win.shape[0])})
+    m0, m1, _ = model.match_lighterglue(d0, d1, min_conf=0.1)
+    return m0, m1
+
+
+def locate_lg(*args, **kw):
+    """locate() with LighterGlue, and the gate LighterGlue needs.
+
+    min_inliers 20, NOT the 12 the mutual-NN path uses. This is the whole
+    difference between a matcher that is bounded and one that is not, and it
+    was measured the hard way: run with min_inliers 12, LighterGlue produced
+    six fixes over 20 m wrong and a worst case of 152.67 m. Every one of them
+    had 12 to 19 inliers. Raising the floor to 20 removed all six and took
+    the worst case to 14.79 m with the accept rate still at 63%.
+
+        min_inliers   fix rate   err p50   WORST
+            12          68%       4.06     152.67
+            20          63%       3.94      14.79
+            30          58%       3.99      14.79
+            40          51%       3.96      10.65
+
+    The reason the old floor failed is that it was XFeat's. LighterGlue
+    returns fewer candidate pairs and more of them agree - inlier ratio 0.248
+    against mutual NN's 0.053 - so a gate written for one distribution barely
+    gates the other.
+
+    min_alt_m 90: LighterGlue is WORSE than mutual NN low down. Measured by
+    altitude, accept rate 55-85 m: 19% against 46%; 85-100 m: 36% against
+    36%; 100-118 m: 83% against 52%. And in the lost-frame test it found
+    3 of 3 above 100 m and 0 of 1 at 58 m. So it is not asked below 90 m.
+    """
+    kw.setdefault("min_inliers", 20)
+    kw.setdefault("min_alt_m", 90.0)
+    kw["pairs"] = "lg"
+    return locate(*args, **kw)
+
+
 def _as_3ch(img: np.ndarray) -> np.ndarray:
     """XFeat's parse_input takes HxWxC and permutes NHWC->NCHW.
 
@@ -185,6 +266,7 @@ def locate(img_grey: np.ndarray, map_window: np.ndarray, geo_window, *,
            map_gsd_x_m: float | None = None, min_inliers: int = 12, min_score: float = 0.07,
            min_margin: float = 0.20, tol_px: float = 4.0,
            window_is_edges: bool = False,
+           pairs: str = "mnn", min_alt_m: float = 0.0,
            principal_xy=None, query_shape: str = "square") -> XFeatResult:
     """Match one frame to a map window and read off lon/lat.
 
@@ -201,6 +283,12 @@ def locate(img_grey: np.ndarray, map_window: np.ndarray, geo_window, *,
         return XFeatResult(False, reason="XFeat needs an intensity window, got edges")
     if map_window is None or min(map_window.shape[:2]) < 32:
         return XFeatResult(False, reason="map window too small")
+    if min_alt_m and altitude_m < min_alt_m:
+        # Asked of LighterGlue only, and measured: it is worse than mutual NN
+        # below 85 m (19% accept against 46%) and better above 100 m (83%
+        # against 52%). See locate_lg.
+        return XFeatResult(False, reason=f"{pairs} is not asked below "
+                                         f"{min_alt_m:.0f} m")
     if not (altitude_m > 0.0):
         # Same reason as the NCC path: the barometer reads below zero on the
         # ground, and a non-positive altitude makes the query scale negative.
@@ -239,10 +327,14 @@ def locate(img_grey: np.ndarray, map_window: np.ndarray, geo_window, *,
         return XFeatResult(False, reason="query too small after rescaling")
 
     try:
-        out = model.match_xfeat(_as_3ch(_equalise(q)),
-                                _as_3ch(_equalise(map_window)))
+        if pairs == "lg":
+            out = _match_lg(model, _as_3ch(_equalise(q)),
+                            _as_3ch(_equalise(map_window)))
+        else:
+            out = model.match_xfeat(_as_3ch(_equalise(q)),
+                                    _as_3ch(_equalise(map_window)))
     except Exception as e:
-        return XFeatResult(False, reason=f"xfeat match failed: {e}")
+        return XFeatResult(False, reason=f"{pairs} match failed: {e}")
     if out is None or len(out) < 2:
         return XFeatResult(False, reason="no matches")
     src, dst = np.asarray(out[0], float), np.asarray(out[1], float)

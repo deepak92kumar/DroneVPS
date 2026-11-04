@@ -1197,6 +1197,11 @@ CSV_COLUMNS = ["t", "north_m", "east_m", "lon", "lat", "sigma_m",
     # a side effect is not a record. fix_att_age_s is blank when the frame
     # carried no attitude timestamp, which is every flight before this one.
     "fix_source", "fix_att_age_s", "fix_reason",
+    # THE LOST FLAG AND WHY. Flight 478 declared 8.5 m while 124.7 m wrong
+    # and nothing in the log said otherwise, so the aircraft's own opinion of
+    # whether it still knows where it is had to be reconstructed afterwards
+    # from the accept rate. It is stated now. See VpsNode._lost_check.
+    "lost", "lost_reason",
     # How stale the fix was when it arrived - the matcher's own round trip.
     # Until 24 Oct the correction was measured against the CURRENT position
     # rather than the prior the matcher saw, so this interval was folded into
@@ -1361,6 +1366,8 @@ def csv_row(est, f, v, gN, gE, err):
             est.get("fix_source") or "",
             "" if est.get("fix_att_age_s") is None else f"{est['fix_att_age_s']:.3f}",
             (est.get("fix_reason") or "").replace(",", ";"),
+            int(bool(est.get("lost"))),
+            (est.get("lost_reason") or "").replace(",", ";"),
             "" if est.get("fix_age_s") is None else f"{est['fix_age_s']:.3f}",
             "" if est.get("fix_disagree_m") is None
             else f"{est['fix_disagree_m']:.2f}",
@@ -2142,6 +2149,23 @@ class VpsNode:
         # decides how far each fix moves the aircraft the moment fixes return,
         # and 12 trusts the map almost three times as much as it has earned.
         self.fuser = MapFuser(flow_drift_frac=0.07, fix_sigma_m=20.0)
+        # THE LOST DETECTOR'S THRESHOLDS, from config so a flight can soften
+        # them without a code change. The defaults are the measured rule -
+        # see _lost_check for the table it was chosen from. lost_since is
+        # None until it fires and is cleared by the next accepted fix.
+        _lc = _vps_config()
+        self.lost_gap_n = int(getattr(_lc, "map_lost_gap", self.LOST_GAP))
+        self.lost_score_max = float(getattr(_lc, "map_lost_score",
+                                            self.LOST_SCORE))
+        self.lost_alt_min_m = float(getattr(_lc, "map_lost_alt_m",
+                                            self.LOST_ALT_M))
+        self.lost_sigma_m = float(getattr(_lc, "map_lost_sigma_m",
+                                          self.LOST_SIGMA_M))
+        self.lost_since = None
+        self.lost_reason = ""
+        self._lost_gap = 0
+        self.n_lost = 0
+        self.n_lost_cleared = 0
         # K's cx/cy go to the worker, so a map fix means the point under the
         # camera rather than the point under the middle of the image. The two
         # are 80 px apart on the leg-cropped frame = 11 m at 110 m, and
@@ -2305,7 +2329,93 @@ class VpsNode:
         origin = self.origin_sigma_m
         if origin is None:
             origin = float(np.sqrt(self.fuser.fix_var))
-        return float(np.hypot(origin, drift))
+        sigma = float(np.hypot(origin, drift))
+        # AND IF THE MAP HAS STOPPED RECOGNISING THE GROUND, SAY SO. The
+        # fuser's sigma grows with distance travelled and shrinks on every
+        # accepted fix, and that is honest about DRIFT - but it has no way to
+        # know the estimate has walked off the map, because the window it is
+        # judged in is centred on the estimate itself.
+        #
+        # Flight 478 declared 8.5 m while 124.7 m wrong, and across the 4582
+        # samples where the error passed 50 m the declared sigma never
+        # reached 9.60 m. corr(sigma, error) is +0.940, so the direction was
+        # right and the magnitude was out by fifteen. The mechanism is
+        # circular: the fixes were accepted BECAUSE they agreed with a
+        # drifting prior, and each one pulled sigma down, so the aircraft grew
+        # more confident as it grew more lost.
+        #
+        # horiz_accuracy is what the flight controller weighs this position
+        # by, so this is the one number that can stop it acting on a wrong
+        # one. See lost_reason for what declares it and what it measured.
+        if getattr(self, "lost_since", None) is not None:
+            sigma = max(sigma, float(getattr(self, "lost_sigma_m", 50.0)))
+        return sigma
+
+    # The lost detector's rule, as measured. Overridable from config so a
+    # flight can soften it without a code change; see VpsConfig.map_lost_*.
+    LOST_GAP = 5             # consecutive refusals
+    LOST_SCORE = 0.05        # and the refused score below this
+    LOST_ALT_M = 75.0        # and only above this height
+    LOST_SIGMA_M = 50.0      # what to declare once lost
+
+    def _lost_check(self, res, f):
+        """Does the aircraft know it is lost? Until 4 Nov, never.
+
+        Every signal here is one the aircraft HAS at the moment of a fix
+        attempt - no truth, no hindsight. Candidates were scored two ways on
+        the two 4 Nov flights: how much error the rule lets through on 478,
+        which ran away from 25 m to 124 m between t=400 and t=600, and how
+        often it fires on 476, which never got lost (prior error peaked at
+        26.4 m) so anything there is a false alarm:
+
+            rule                            fires at   false alarms on 476
+            gap>=5 & score<0.05 & alt>75     24.7 m          0 of 299
+            secs >= 40                       69.2 m          0
+            gap>=5 & alt>75                  24.7 m          1
+            rate10 <= 0.3                     4.0 m         35
+
+        Five refusals in a row whose score is far BELOW the gate - "there is
+        nothing in this window" rather than "I nearly had it" - above 75 m.
+        It fires on 478 at t=409 with the error at 24.7 m, before the run to
+        124 m.
+
+        Three honest limits. It catches the collapse of matching, not the
+        first crossing of 25 m at t=322, because the error sat near 25 m for
+        87 s before running. It is blind below LOST_ALT_M by construction,
+        because the 60 m matcher floor depresses the accept rate and that is
+        exactly what makes a rule on the accept rate alone false-alarm. And
+        two flights is a thin basis: 476 holds exactly one attempt over 25 m.
+
+        What it DOES is declare a large horiz_accuracy, nothing more. The
+        pilot's instruction stands - the aircraft holds in ALT_HOLD rather
+        than landing, because a blind descent has no idea what is under it -
+        and no mode is commanded from here.
+        """
+        gap = getattr(self, "_lost_gap", 0)
+        if res.ok:
+            self._lost_gap = 0
+            if getattr(self, "lost_since", None) is not None:
+                self.lost_since = None
+                self.lost_reason = ""
+                self.n_lost_cleared = getattr(self, "n_lost_cleared", 0) + 1
+            return
+        gap += 1
+        self._lost_gap = gap
+        score = float(getattr(res, "score", 0.0) or 0.0)
+        alt = float(f.get("alt") or 0.0)
+        gap_n = int(getattr(self, "lost_gap_n", self.LOST_GAP))
+        score_max = float(getattr(self, "lost_score_max", self.LOST_SCORE))
+        alt_min = float(getattr(self, "lost_alt_min_m", self.LOST_ALT_M))
+        if (gap_n > 0 and gap >= gap_n and score < score_max
+                and alt > alt_min
+                and getattr(self, "lost_since", None) is None):
+            self.lost_since = f["t"]
+            self.lost_reason = (f"{gap} refusals, last score {score:.3f} "
+                                f"below {score_max:.2f}, at {alt:.0f} m")
+            self.n_lost = getattr(self, "n_lost", 0) + 1
+            print(f"[map] LOST at t={f['t']:.0f}: {self.lost_reason}; "
+                  f"declaring {getattr(self, 'lost_sigma_m', self.LOST_SIGMA_M):.0f} m",
+                  flush=True)
 
     def gate_step(self, dn: float, de: float, dt: float | None,
                   altitude_m: float):
@@ -2954,6 +3064,7 @@ class VpsNode:
             fix_reason = getattr(res, "reason", "") or None
             if not res.ok:
                 self.n_fix_refused = getattr(self, "n_fix_refused", 0) + 1
+            self._lost_check(res, f)
 
         lon, lat = self.to_lonlat(*self.fuser.pos)
         return dict(step_px=self.step_px, step_action=self.step_action,
@@ -2970,6 +3081,8 @@ class VpsNode:
                     fix_inliers=fix_inl, fix_alt_m=fix_alt,
                     fix_source=fix_src, fix_att_age_s=fix_att_age,
                     fix_reason=fix_reason,
+                    lost=getattr(self, "lost_since", None) is not None,
+                    lost_reason=getattr(self, "lost_reason", ""),
                     north=float(self.fuser.pos[0]), east=float(self.fuser.pos[1]),
                     lon=lon, lat=lat, sigma=self.fuser.sigma_m,
                     # Two sigmas, and the difference is the whole 20 Oct

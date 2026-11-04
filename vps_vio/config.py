@@ -153,6 +153,39 @@ class VpsConfig:
     # already done once when a second MAVLink client changed the shared
     # channel's stream rates. UNFLOWN.
     map_att_age_max_s: float = 0.30
+    # THE LOST DETECTOR. Until 4 Nov nothing on the aircraft could say it had
+    # stopped knowing where it was: flight 478 declared 8.5 m of accuracy
+    # while 124.7 m wrong, and over the 4582 samples where the error passed
+    # 50 m the declared sigma never reached 9.60 m. The fuser's sigma is
+    # honest about DRIFT and blind to being lost, because every accepted fix
+    # pulls it down and the fixes were being accepted for agreeing with a
+    # drifting prior - so the aircraft grew more confident as it grew more
+    # lost.
+    #
+    # The rule: this many refusals in a row, each with a score far BELOW the
+    # gate rather than near it ("nothing in this window", not "nearly had
+    # it"), above this height. Scored on the two 4 Nov flights - how much
+    # error it lets through on 478, which ran 25 -> 124 m, against how often
+    # it fires on 476, which never got lost:
+    #
+    #     gap>=5 & score<0.05 & alt>75    fires at 24.7 m    0 of 299 false
+    #     secs >= 40                      fires at 69.2 m    0
+    #     gap>=5 & alt>75                 fires at 24.7 m    1
+    #     rate10 <= 0.3                   fires at  4.0 m   35
+    #
+    # The height floor is not caution, it is necessary: the 60 m matcher
+    # floor depresses the accept rate on its own, which is exactly what makes
+    # a rule on the accept rate alone false-alarm.
+    #
+    # What it does is declare map_lost_sigma_m as horiz_accuracy, which is
+    # the one number the flight controller weighs our position by. It
+    # commands no mode. The pilot's instruction stands: the aircraft holds in
+    # ALT_HOLD rather than landing, because a blind descent has no idea what
+    # is under it. Set map_lost_gap to 0 to switch the detector off. UNFLOWN.
+    map_lost_gap: int = 5
+    map_lost_score: float = 0.05
+    map_lost_alt_m: float = 75.0
+    map_lost_sigma_m: float = 50.0
     # 60 -> 50 ON 26 OCT, at the pilot's instruction and on their reasoning:
     # the gate reads the BAROMETER, which runs 5-9 m high, so a gate of 50
     # stops the map at about 44 m of real height. Below that the flow, the

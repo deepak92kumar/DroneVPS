@@ -136,6 +136,10 @@ check("widths match", len(row) == len(CSV_COLUMNS),
 # because seven columns were once added to the ROW and not to the header, and
 # 1162 rows were written with everything past the 32nd attributed to the wrong
 # name. Adding a column here is meant to be a decision, not an accident.
+# 83 -> 85 on 4 Nov: lost and lost_reason. The aircraft's own opinion of
+# whether it still knows where it is. Flight 478 declared 8.5 m of accuracy
+# while 124.7 m wrong and the log said nothing, so that opinion had to be
+# reconstructed afterwards from the accept rate. It is stated now.
 # 80 -> 83 on 4 Nov: fix_source, fix_att_age_s and fix_reason. A deliberate
 # decision, for a reason this file will recognise - a fact that was true on
 # the aircraft and that the log could not state. Flight 478 published 153 map
@@ -147,7 +151,7 @@ check("widths match", len(row) == len(CSV_COLUMNS),
 # nadir correction, which was unknowable before and costs double the error at
 # 400 ms. fix_reason is the matcher's own verdict on every attempt, accepted
 # or refused - refusals left no trace at all until now.
-check("and there are the columns we expect", len(CSV_COLUMNS) == 83,
+check("and there are the columns we expect", len(CSV_COLUMNS) == 85,
       str(len(CSV_COLUMNS)))
 i = CSV_COLUMNS.index("fc_d_roll")
 check("the three derotation opinions sit together",

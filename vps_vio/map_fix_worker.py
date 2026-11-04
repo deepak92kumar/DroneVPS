@@ -134,6 +134,12 @@ _GATES = {
     # ratio of 0.10 and a count of 12 are the same constraint, which is why
     # lowering min_inliers alone did nothing at all.
     "xfeat": dict(min_score=0.07, min_margin=0.20),
+    # SAME score and margin, and a different min_inliers - which locate_lg
+    # carries itself, because 20 against 12 is the whole difference between a
+    # LighterGlue that is bounded at 14.79 m and one that reaches 152.67 m.
+    # Its inlier ratio runs 0.248 against mutual NN's 0.053, so a score gate
+    # written for one barely gates the other, and the floor is what bites.
+    "xfeat_lg": dict(min_score=0.07, min_margin=0.20),
 }
 
 
@@ -227,8 +233,9 @@ class MapFixWorker:
         # They do NOT share a gate: see _GATES above. NCC's margin is read off
         # a coarse correlation surface and XFeat's is a cluster tightness.
         from map_match_xfeat import locate as _loc_xfeat
+        from map_match_xfeat import locate_lg as _loc_lg
         from map_match_ncc import locate as _loc_ncc
-        _ALL = {"xfeat": _loc_xfeat, "ncc": _loc_ncc}
+        _ALL = {"xfeat": _loc_xfeat, "ncc": _loc_ncc, "xfeat_lg": _loc_lg}
         if self.matcher == "both":
             # BOTH, because neither covers the day on its own. Measured
             # 25 Oct on 45 frames from each of two flights, fixes produced:
@@ -250,8 +257,20 @@ class MapFixWorker:
         elif self.matcher in _ALL:
             self._pair = [self.matcher]
         else:
-            raise ValueError(f"unknown matcher {matcher!r}, "
-                             f"expected 'xfeat', 'ncc' or 'both'")
+            # A COMMA LIST, so LighterGlue can be added as XFeat's fallback
+            # without a new keyword for every combination. "xfeat,xfeat_lg" is
+            # the measured one: mutual NN first at 520-670 ms, LighterGlue
+            # only on the frames it refuses, which is where the coverage is -
+            # fix rate 50% -> 70% on 338 frames, worst error 10.95 -> 14.79 m,
+            # and still no fix over 20 m. See map_match_xfeat._match_lg.
+            names = [s.strip().lower() for s in self.matcher.split(",")
+                     if s.strip()]
+            if names and all(n in _ALL for n in names):
+                self._pair = names
+            else:
+                raise ValueError(
+                    f"unknown matcher {matcher!r}, expected 'xfeat', 'ncc', "
+                    f"'xfeat_lg', 'both', or a comma list of those")
         self._all_locate = _ALL
         self._window_kind = "grey"
         self._locate = _ALL[self._pair[0]]
@@ -319,6 +338,13 @@ class MapFixWorker:
                        if m in self._pair]
         if trust is None and self._pair == ["ncc", "xfeat"]:
             self._trust = ["xfeat"]
+        elif trust is None:
+            # Everything running is trusted unless the pair is the measured
+            # NCC/XFeat one above. In particular "xfeat,xfeat_lg" trusts both,
+            # in that order, which is what makes LighterGlue a fallback rather
+            # than a replacement: mutual NN answers when it can, and only the
+            # frames it refuses cost the extra 1482 ms.
+            self._trust = list(self._pair)
         if not self._trust:
             raise ValueError(f"trust={trust!r} names no matcher that is "
                              f"running (matcher={self.matcher!r})")
@@ -549,6 +575,20 @@ class MapFixWorker:
             try:
                 if self.cache.covers(plon, plat):
                     for mname in self._pair:
+                        # STOP ONCE A TRUSTED MATCHER HAS ANSWERED. This is
+                        # what makes LighterGlue affordable: it costs 1482 ms
+                        # against mutual NN's 520-670, and it is only needed
+                        # on the frames mutual NN refuses. Running both every
+                        # time measured a median 2587 ms, past the 2 s fix
+                        # period; running LG only on refusals measured 1237 ms
+                        # median over 338 frames.
+                        #
+                        # It does NOT apply to the NCC/XFeat pair, where the
+                        # second answer is the disagreement number and the
+                        # whole point is to have both. There, NCC is not
+                        # trusted, so this never triggers.
+                        if any(m in got for m in self._trust):
+                            break
                         # Each matcher gets the window IT needs: NCC slides
                         # the template inside the window and starves on
                         # XFeat's radius. See _radius_for.
@@ -604,7 +644,10 @@ class MapFixWorker:
             # correction above and still means what it meant.
             disagree = None
             if len(got) == 2:
-                a, b = (got[k] for k in self._pair)
+                # Keyed off got, not _pair: _pair can hold three matchers now
+                # ("ncc,xfeat,xfeat_lg"), and indexing _pair's names into got
+                # would raise on whichever of them declined.
+                a, b = (got[k] for k in self._pair if k in got)
                 disagree = float(math.hypot(
                     (a.lat - b.lat) * 111320.0,
                     (a.lon - b.lon) * 111320.0
@@ -668,6 +711,121 @@ class MapFixWorker:
                     self._result = out
                     self.completed += 1
                 self._job = None
+
+    def relocate(self, img, *, prior_lon, prior_lat, altitude_m, yaw_deg,
+                 roll_deg=0.0, pitch_deg=0.0, search_m=250.0, tile_m=150.0,
+                 step_m=75.0, ring_min_m=0.0, matcher="xfeat_lg",
+                 budget_s=45.0):
+        """Find this frame on the map when the estimate is no longer near it.
+
+        THE WINDOW CANNOT JUST BE WIDENED. Measured 4 Nov, the prior moved D
+        metres away in eight bearings with the window widened to contain the
+        truth anyway:
+
+            prior   window    n  | recovered  false fix  declined  cost
+              0 m   528 px   12  |  17%        0%         83%      495 ms
+             50 m   724 px   96  |   2%        0%         98%      649 ms
+            100 m   920 px   96  |   0%        0%        100%      944 ms
+            200 m  1312 px   96  |   0%        0%        100%     1685 ms
+            500 m  2492 px   96  |   0%        0%        100%     5576 ms
+
+        Nothing recovers past 100 m, and the D=0 control shows why: its
+        window is already 528 px against the flown ~300, and that alone takes
+        the accept rate from about 78% to 17%. Width is what kills it.
+
+        So the region is TILED instead, at the size the matcher already works
+        on, overlapping so nothing falls between tiles. On flight 478's own
+        lost frames, 49 tiles each:
+
+            lost 51.4 m   mutual NN found nothing   LighterGlue 8.28 m
+            lost 102.1 m  mutual NN found nothing   LighterGlue 3.64 m
+            lost 131.4 m  mutual NN found nothing   LighterGlue 5.24 m
+            lost 115.2 m  mutual NN found nothing   LighterGlue found nothing
+
+        Three of four, 51 to 131 m out, to 3.6-8.3 m. The fourth was at 58 m
+        of altitude, where LighterGlue is measured weak. Mutual NN found none
+        of four. Neither EVER named a wrong tile - false fix 0% here and 0%
+        in the widening test above - which is what makes this safe to run at
+        all: it goes quiet rather than inventing a position, so the failure
+        the pilot named, being told "300 m that way" and then "800", cannot
+        come from the search itself.
+
+        Cost: 1482 ms a tile at top_k 1024, so a 7x7 square is about 30 s and
+        a ring about 20. That is why this is not the routine path and why the
+        aircraft must be holding while it runs. budget_s stops it rather than
+        letting it run forever.
+
+        Returns the best candidate as a FixResult with ok set, or None. It is
+        a HYPOTHESIS, not a position: the caller must confirm it against a
+        second answer after known motion before resetting anything. See
+        RelocateCandidate for why one answer is not enough.
+        """
+        import numpy as _np
+        locate = self._all_locate[matcher]
+        ms, mm = _GATES[matcher]["min_score"], _GATES[matcher]["min_margin"]
+        mlat = 111320.0
+        mlon = 111320.0 * math.cos(math.radians(prior_lat))
+        dN, dE = self.nadir_offset_m(altitude_m, roll_deg, pitch_deg, yaw_deg)
+        grid = _np.arange(-search_m, search_m + 1e-6, step_m)
+        t0 = time.monotonic()
+        best = None
+        self.reloc_tiles = 0
+        for dn in grid:
+            for de in grid:
+                if time.monotonic() - t0 > budget_s:
+                    self.reloc_timeout = True
+                    break
+                r = math.hypot(dn, de)
+                if r > search_m or r < ring_min_m:
+                    # A RING, not a square, when the caller knows roughly how
+                    # far it has gone and only not where. Dead reckoning gives
+                    # the distance to about 40% - net displacement over 20 s
+                    # windows measured 0.907 of truth at the median, swinging
+                    # 0.38 to 1.70 - so the plausible region is an annulus and
+                    # the middle of it is already known to be wrong.
+                    continue
+                tlat = prior_lat + dn / mlat
+                tlon = prior_lon + de / mlon
+                if not self.cache.covers(tlon, tlat):
+                    continue
+                try:
+                    win, wg = self.cache.window(tlon, tlat, tile_m / 2.0,
+                                                kind=self._window_kind)
+                    res = locate(img, win, wg, altitude_m=altitude_m,
+                                 focal_px=self.focal_px, yaw_deg=yaw_deg,
+                                 map_gsd_m=self.cache.gsd,
+                                 map_gsd_x_m=getattr(self.cache, "gsd_x", None),
+                                 min_score=ms, min_margin=mm,
+                                 principal_xy=self.principal_xy,
+                                 query_shape=self.query_shape)
+                except Exception:
+                    continue
+                self.reloc_tiles += 1
+                if res is None or not res.ok:
+                    continue
+                # The winner is the tile with the MOST agreeing points, not
+                # the best score. The score does not predict the error:
+                # measured corr(inlier ratio, error) = +0.052 over 275
+                # would-be-accepted results, with the weakest quartile
+                # holding the best median error of the four.
+                if best is None or res.inliers > best.inliers:
+                    res.lat = res.lat - dN / mlat
+                    res.lon = res.lon - dE / (111320.0
+                                              * math.cos(math.radians(res.lat)))
+                    best = res
+            else:
+                continue
+            break
+        self.reloc_secs = time.monotonic() - t0
+        if best is None:
+            return None
+        return FixResult(best.lon, best.lat, best.score, best.margin, True,
+                         self.reloc_secs, prior_lon, prior_lat, None,
+                         getattr(best, "inliers", 0),
+                         getattr(best, "total_matches", 0),
+                         f"relocated on {self.reloc_tiles} tiles in "
+                         f"{self.reloc_secs:.0f} s",
+                         altitude_m=float(altitude_m), source=matcher)
 
     def stop(self):
         self._run = False
