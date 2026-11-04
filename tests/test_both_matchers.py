@@ -88,8 +88,29 @@ check("NOTHING rejects a fix on it", "disagree" not in src.split("def _loop")[-1
 check("it reaches the CSV",
       '"fix_disagree_m"' in open(os.path.join(os.path.dirname(__file__), "..",
                                               "vps_vio", "live_node.py")).read())
-check("and the config asks for both", VpsConfig().matcher == "both",
-      VpsConfig().matcher)
+# 4 NOV: the pair is no longer NCC+XFeat. This check exists so the setting
+# cannot go dead - that is what it caught on 25 Oct, when VpsConfig.matcher
+# was being read by nothing and the worker's own default won - so it still
+# demands that the setting names MORE THAN ONE matcher. It no longer demands
+# that one of them is NCC.
+#
+# NCC was never trusted again after the 4 Nov measurement: on 675 frames it
+# accepted 94-100% of attempts whatever the prior and produced 109 fixes over
+# 50 m wrong, worst 180.74 m, against XFeat's zero. Its only remaining job
+# was fix_disagree_m. The pair is "xfeat,xfeat_lg" now, which buys coverage
+# instead - fix rate 50% -> 68% end to end, LighterGlue's own fixes at worst
+# 10.11 m, in the prior 20-50 m band where mutual NN accepts 22% and it
+# accepts 94%.
+#
+# Everything else in this file still stands, including flight 160, which is
+# why "both" remains a supported setting and this check does not forbid it.
+_m = VpsConfig().matcher
+check("the config still names more than one matcher",
+      _m == "both" or len([s for s in _m.split(",") if s.strip()]) > 1, _m)
+if "ncc" not in _m and _m != "both":
+    print("  NOTE  NCC is not in the pair, so fix_disagree_m will be empty "
+          "all flight.\n        It was logged and never enforced, so nothing "
+          "downstream depends on it.")
 
 print("\n" + ("ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}"))
 sys.exit(1 if fails else 0)
