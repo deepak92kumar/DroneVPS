@@ -74,8 +74,15 @@ import inspect
 src = inspect.getsource(MX.locate_lg)
 check("min_inliers defaults to 20", 'setdefault("min_inliers", 20)' in src,
       "12 let six fixes over 20 m through, worst 152.67 m")
-check("it is not asked below 90 m", 'setdefault("min_alt_m", 90.0)' in src,
-      "LG accepts 19% at 55-85 m against mutual NN's 46%")
+# 90 -> 85 at the pilot's instruction: NCC is trusted only below 80 m and
+# LighterGlue only above 90 left 80-90 m on XFeat alone at about 38%
+# coverage. 85 closes half that gap, and it is measured as free: in the
+# 85-100 m band the two accept the same 36% of frames, so nothing is given
+# up by starting there. The remaining 80-85 m band has XFeat at 62% with a
+# worst of 6.7 m.
+check("it is not asked below 85 m", 'setdefault("min_alt_m", 85.0)' in src,
+      "LG accepts 19% at 55-85 m against mutual NN's 46%, so it still has "
+      "a floor - just a lower one")
 check("it selects the lg matching step", 'kw["pairs"] = "lg"' in src)
 ls = inspect.getsource(MX.locate)
 check("locate still defaults to mutual NN", 'pairs: str = "mnn"' in ls,

@@ -204,13 +204,19 @@ def locate_lg(*args, **kw):
     against mutual NN's 0.053 - so a gate written for one distribution barely
     gates the other.
 
-    min_alt_m 90: LighterGlue is WORSE than mutual NN low down. Measured by
+    min_alt_m 85, NOT 90, at the pilot's instruction: NCC is trusted only
+    below 80 m and LighterGlue only above 90 left 80-90 m served by XFeat
+    alone at about 38% coverage. 85 closes half of that gap from above. It
+    sits inside the band where the two measured EQUAL - 85-100 m, 36% each -
+    so nothing is given up to close it, which is why 85 and not 80.
+
+    min_alt_m 90 -> 85. LighterGlue is WORSE than mutual NN low down. Measured by
     altitude, accept rate 55-85 m: 19% against 46%; 85-100 m: 36% against
     36%; 100-118 m: 83% against 52%. And in the lost-frame test it found
     3 of 3 above 100 m and 0 of 1 at 58 m. So it is not asked below 90 m.
     """
     kw.setdefault("min_inliers", 20)
-    kw.setdefault("min_alt_m", 90.0)
+    kw.setdefault("min_alt_m", 85.0)
     kw["pairs"] = "lg"
     return locate(*args, **kw)
 
