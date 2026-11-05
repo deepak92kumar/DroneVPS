@@ -287,7 +287,14 @@ class VpsConfig:
     # expect roughly 13 m down there. The case for it is the alternative -
     # this file's own note below records the flow going 4.13 -> 26.0 m in the
     # 12 s of a 6 m/s descent. 13 beats 26. UNFLOWN.
-    map_min_alt_m: float = 50.0    # 3 Oct: 80 -> 60 m. Flown, kept. At 80 m the
+    # 50 -> 60 ON 5 NOV, at the pilot's instruction, the same day the 50 was
+    # found never to have reached the worker. MapFixWorker's own default was
+    # 60 and won, so 60 is what every flight has actually used; writing 60
+    # here keeps the aircraft exactly where it has been while the setting is
+    # finally live. There is also no measurement below 58 m - the replay
+    # frames start there - so 50 would put NCC on ground this project has
+    # never scored a matcher against. "60 hi rakho, 50 baad mein naapenge."
+    map_min_alt_m: float = 60.0    # 3 Oct: 80 -> 60 m. Flown, kept. At 80 m the
                                    # map never started. The map runs ABOVE this
                                    # height and NOT below it, which is why the
                                    # descent is uncorrected: error went 4.13 ->
