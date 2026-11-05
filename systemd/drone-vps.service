@@ -40,7 +40,7 @@ ExecStart=/usr/bin/python3 /data/DRONE/vps_vio/live_node.py \
     --fc-port udpout:127.0.0.1:14650 \
     --send-gps --gps-id 1 \
     --out /data/DRONE/flight_logs/vps \
-    --save-frames 4 \
+    --save-frames 2 \
     --liveness /run/drone/vps.alive
 Restart=always
 RestartSec=5

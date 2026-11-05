@@ -838,7 +838,30 @@ class VpsConfig:
     # newest frame available is itself this old, the camera or the link is in
     # trouble and the position is stale enough to matter. 3 m/s for 0.12 s is
     # 0.36 m, and the flight controller reads a stale position as motion.
-    frame_age_max_s: float = 0.12
+    # 0.12 -> 0.28 ON 5 NOV, at the pilot's instruction, after the 10:57
+    # flight threw away 42% of its frames.
+    #
+    # A frame older than this is REFUSED and ntrk is set to 0, which is what
+    # the pilot heard as "VPS TRACK LOST 0" over and over - not the tracker
+    # failing, the node declining the frame. Measured on that flight,
+    # frame_age p50 0.1028 and p90 0.2519 against a 0.12 limit, so 42% of
+    # frames were dropped, the flow ran at 58% of its rate and the error came
+    # out at 6.46 m p50 against the 08:56 flight's 3.41 m.
+    #
+    # Why accepting them is sound: the flow measures displacement between two
+    # consecutive frames and divides by THEIR OWN dt, so a late frame is a
+    # valid measurement that arrived late, not a wrong one. And the FC is not
+    # given our velocity at all (EK3_SRC1_VELXY = 0), so the latency cannot
+    # corrupt its velocity. What it costs is position lag: up to 0.28 s, which
+    # at 2 m/s is 0.56 m - against the 6.46 m that dropping the frames bought.
+    #
+    # The latency is a STARTUP TRANSIENT, not thermal and not the frame
+    # saving. Both flights started high and settled - 489 from p50 0.2096 in
+    # its first half to 0.0526 in its second, 486 from 0.0413 to 0.0000 - and
+    # saving a frame changed the next samples' age by +0.008 s on 486 and
+    # -0.002 s on 489, which is nothing. 489's VPS leg (t=106-349 of 522 s)
+    # was flown entirely inside its unsettled period.
+    frame_age_max_s: float = 0.28
     dual_flow: bool = True
     crop_left_px: int = 0
 
