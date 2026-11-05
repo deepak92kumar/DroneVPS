@@ -2153,10 +2153,17 @@ class VpsNode:
         # correction 0.489 m at 90-100 m against a 0.5 cap - while the flow
         # moved the estimate 2.572 m between fixes. See
         # VpsConfig.map_max_correction_m.
+        _fc0 = _vps_config()
         self.fuser = MapFuser(
-            flow_drift_frac=0.07, fix_sigma_m=20.0,
-            max_correction_m=float(getattr(_vps_config(),
-                                           "map_max_correction_m", 0.5)))
+            flow_drift_frac=0.07,
+            # fix_sigma_m FROM CONFIG, and no longer 20. See
+            # VpsConfig.map_fix_sigma_m: 20 was telling the filter the map is
+            # 20 m accurate when the 5 Nov flights measured its published
+            # fixes at 1.89-2.68 m p50 and 10.42 m worst, which left the gain
+            # at 0.061 and the map with no authority at all.
+            fix_sigma_m=float(getattr(_fc0, "map_fix_sigma_m", 20.0)),
+            max_correction_m=float(getattr(_fc0, "map_max_correction_m", 0.5)),
+            correction_ramp_s=float(getattr(_fc0, "map_correction_ramp_s", 0.0)))
         # THE LOST DETECTOR'S THRESHOLDS, from config so a flight can soften
         # them without a code change. The defaults are the measured rule -
         # see _lost_check for the table it was chosen from. lost_since is

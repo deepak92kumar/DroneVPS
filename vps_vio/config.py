@@ -187,6 +187,51 @@ class VpsConfig:
     # is one measurable step, and map_fuse's 3-sigma gate at about 60 m still
     # rejects anything wild. UNFLOWN.
     map_max_correction_m: float = 1.0
+    # OVER HOW LONG A FIX'S CORRECTION IS APPLIED, seconds. 0 is the old
+    # one-sample step. Set to the fix period, so a correction finishes
+    # arriving just as the next fix is computed.
+    #
+    # The 5 Nov flights put this here. A fix moved the estimate up to
+    # max_correction_m in ONE sample, and the flight controller navigates on
+    # that position (EK3_SRC1_POSXY = 3), so it saw a metre of error appear
+    # instantly: DesPitch p90 9.52 deg, max 14.75, against ATC_ANGLE_MAX of
+    # 15. The pilot felt it as a jerk, "lagta hai jaise drone ko palat dega",
+    # and 14% of corrections were hitting the 1.0 m cap. Raising the cap
+    # makes a step worse; ramping makes the cap safe to raise.
+    #
+    # It is an exponential approach, so one fix delivers 63% of its metres
+    # inside one ramp and about 95% in three - 0.636 m of a 1.0 m correction
+    # in 2 s, measured. So the authority is 0.63 x cap / fix_period, which at
+    # cap 1.0 and period 2 s is 0.31 m/s rather than 0.50. Against a flow
+    # that moves the estimate at roughly 1.3 m/s that is still short, and the
+    # gain change below is what makes up the difference.
+    # UNFLOWN.
+    map_correction_ramp_s: float = 2.0
+    # WHAT THE FILTER IS TOLD A MAP FIX IS WORTH, in metres. 20 -> 5 on
+    # 5 Nov, because 20 was simply not true.
+    #
+    # It sets two things at once:
+    #     gain = var / (var + fix_sigma^2)       how much a fix moves us
+    #     gate = 3 x sqrt(var + fix_sigma^2)     how wrong a fix may be
+    #
+    # At 20 the gain measured 0.061 on the 16:25 flight - a 6 m residual
+    # became a 0.37 m correction, which matches the 0.392 m median measured
+    # in flight - so the cap at 1.0 was binding only 14% of the time and the
+    # GAIN was the limiter, not the cap. Meanwhile the published fixes
+    # themselves measured 1.89 m p50 and 6.40 m worst (xfeat, 5 Nov 08:56),
+    # 2.68 m p50 and 10.42 m worst (5 Nov 10:57). The filter was being told
+    # the map is three to ten times worse than it is.
+    #
+    # At 5 the gain becomes about 0.51 and the gate narrows from 60 m to
+    # 17 m. Both directions are right: the map corrects properly AND a wild
+    # fix is rejected sooner. 5 and not 3, because the worst measured fix was
+    # 10.42 m and a gate of 3 sigma on 3 m would start throwing away honest
+    # ones.
+    #
+    # This is only safe WITH map_correction_ramp_s: a higher gain means
+    # bigger corrections, and as a step those are the jerk the pilot felt.
+    # UNFLOWN.
+    map_fix_sigma_m: float = 5.0
     # The previous setting and its reasoning, kept because it is still the
     # answer on a day when the shadows have moved:
     # matcher = "both"             # 25 OCT: BOTH. NCC came back, and the reason is in

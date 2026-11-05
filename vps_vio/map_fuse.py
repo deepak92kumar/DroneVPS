@@ -157,6 +157,7 @@ class MapFuser:
                  # fix_score / fix_inliers / fix_alt_m. Until a flight has
                  # those, raising this is the same experiment twice.
                  max_correction_m: float = 0.5,
+                 correction_ramp_s: float = 2.0,
                  # HOW FAST A FIX IS ALLOWED TO MOVE, metres per second.
                  #
                  # The pilot's words: "agar wo ek dum se 20 mtr dur sho kar
@@ -198,6 +199,13 @@ class MapFuser:
         # slow convergence in exchange for no sudden jumps - and the residual
         # is reported every time so a log shows when the cap was biting.
         self.max_correction_m = float(max_correction_m)
+        # OVER HOW LONG A FIX'S CORRECTION IS APPLIED. 0 restores the old
+        # one-sample step. The default is the fix period, so each correction
+        # has finished arriving just as the next one is computed: the same
+        # metres, the same interval, no jump for the position controller to
+        # chase. See predict() for the measurement that put it here.
+        self.correction_ramp_s = float(correction_ramp_s)
+        self._pend = None
         self.max_fix_speed_mps = float(max_fix_speed_mps)
         self._last_resid = None       # the previous fix's residual, metres
         self._last_resid_t = None
@@ -236,6 +244,8 @@ class MapFuser:
         placed on a fresh measurement, so we know where we are again.
         """
         self.pos = np.zeros(2)
+        # A pending correction belongs to the OLD origin.
+        self._pend = None
         self.var = self._init_var
 
     @property
@@ -269,6 +279,35 @@ class MapFuser:
         """
         step = np.array([d_north, d_east], float)
         self.pos = self.pos + step
+        # THE MAP'S CORRECTION IS BLED OUT HERE, not applied as a step in
+        # update(). A fix moves the estimate up to max_correction_m, and
+        # before 5 Nov it did so in ONE sample - so the flight controller,
+        # which navigates on this position (EK3_SRC1_POSXY = 3), saw a metre
+        # of error appear instantly and demanded almost all the lean it had.
+        # Measured on the 5 Nov 08:56 flight: DesPitch p90 9.52 deg and max
+        # 14.75 against ATC_ANGLE_MAX of 15. The pilot felt it as a jerk -
+        # "lagta hai jaise drone ko palat dega" - and it gets worse with
+        # every increase of the cap.
+        #
+        # Spread over correction_ramp_s instead, as an exponential approach
+        # rather than a linear one: smoother for the controller, and it can
+        # never overshoot. It delivers 63% of a correction in one
+        # correction_ramp_s and about 95% in three, so ONE fix lands 63% of
+        # its metres inside the fix period, not 100% - measured 0.636 m of a
+        # 1.0 m correction in 2 s. In steady state that is a low-pass on the
+        # stream of corrections, which is what is wanted; what it is not is
+        # identical authority, and the number to compare against the flow's
+        # drift is 0.63 x cap / fix_period, not cap / fix_period. Nothing about the FILTER changes: the variance was
+        # already updated when the fix arrived, because that is when the
+        # information arrived. Only the position moves gradually.
+        if self._pend is not None:
+            frac = 1.0 if (dt is None or self.correction_ramp_s <= 0.0) else \
+                min(1.0, float(dt) / self.correction_ramp_s)
+            slice_ = self._pend * frac
+            self.pos = self.pos + slice_
+            self._pend = self._pend - slice_
+            if float(np.linalg.norm(self._pend)) < 1e-4:
+                self._pend = None
         dist = self.k * float(np.linalg.norm(step))
         if dt is None:
             grow_var = (trust * (dist + self.floor)) ** 2
@@ -344,7 +383,15 @@ class MapFuser:
         if self.max_correction_m > 0.0 and cn > self.max_correction_m:
             corr = corr * (self.max_correction_m / cn)
             self.n_capped += 1
-        self.pos = self.pos + corr
+        # QUEUED, not applied. See predict() for why, and note that a fix
+        # arriving while an earlier one is still bleeding REPLACES the
+        # remainder: the new fix was computed against a prior that already
+        # includes whatever had been applied, so what is left of the old one
+        # has been superseded rather than lost.
+        if self.correction_ramp_s > 0.0:
+            self._pend = corr.copy()
+        else:
+            self.pos = self.pos + corr
         # A fix accepted only because the gate had widened means the estimate
         # was lost, so the uncertainty must reflect that rather than collapsing.
         self.var = max((1.0 - gain) * self.var, min(fv, self.var))

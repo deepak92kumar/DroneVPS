@@ -240,12 +240,23 @@ print("\nthe fuser the flying code builds")
 # while the default, the docstring and every other test said 20.
 # A bounded window of the source after the call, not a split on ")" - the
 # call contains nested parentheses now and splitting cut it at the first one.
-_call = (src.split("self.fuser = MapFuser(")[1][:400]
+_call = (src.split("self.fuser = MapFuser(")[1][:1400]
          if "self.fuser = MapFuser(" in src else "")
 check("the flying code builds the fuser", bool(_call))
-check("fix_sigma_m is 20, matching MapFuser's default and the 9 Oct report",
-      "fix_sigma_m=20.0" in _call,
-      "it said 12 while the default, the docstring and the tests all said 20")
+# 5 Nov: fix_sigma_m is no longer a literal 20 in the call - it comes from
+# config, because 20 was measured to be untrue. The published fixes ran
+# 1.89-2.68 m p50 and 10.42 m worst, while 20 left the gain at 0.061 and the
+# map with no authority. What this check is FOR is unchanged: the flying code
+# must not quietly use a value that nothing documents. So it has to come from
+# the named setting, and that setting has to be in the range the fixes were
+# actually measured at.
+from config import VpsConfig as _VC                               # noqa: E402
+check("fix_sigma_m comes from config, not a literal",
+      "map_fix_sigma_m" in _call,
+      "20.0 was hard-coded and wrong; the gain it gave was 0.061")
+_fs = _VC().map_fix_sigma_m
+check("and the configured value matches what the fixes measure",
+      2.0 <= _fs <= 12.0, f"{_fs} m - fixes measured 1.89-2.68 p50, 10.42 worst")
 check("flow_drift_frac is 0.07", "flow_drift_frac=0.07" in _call)
 # 5 Nov: the cap comes from config now, because the 0.5 default was measured
 # saturating - median correction 0.489 m at 90-100 m against a 0.5 cap while
@@ -254,6 +265,9 @@ check("flow_drift_frac is 0.07", "flow_drift_frac=0.07" in _call)
 check("max_correction_m comes from config, not the default",
       "map_max_correction_m" in _call,
       "the 0.5 default saturated on the 5 Nov flight")
+check("the correction ramps rather than stepping",
+      "map_correction_ramp_s" in _call,
+      "a 1 m step made the FC demand 14.75 deg of pitch against a 15 limit")
 
 print("\n" + ("ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}"))
 sys.exit(1 if fails else 0)
