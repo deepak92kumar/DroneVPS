@@ -2161,6 +2161,7 @@ class VpsNode:
                                             self.LOST_ALT_M))
         self.lost_sigma_m = float(getattr(_lc, "map_lost_sigma_m",
                                           self.LOST_SIGMA_M))
+        self.lost_ramp_mps = float(getattr(_lc, "map_lost_ramp_mps", 0.6))
         self.lost_since = None
         self.lost_reason = ""
         self._lost_gap = 0
@@ -2350,8 +2351,28 @@ class VpsNode:
         # horiz_accuracy is what the flight controller weighs this position
         # by, so this is the one number that can stop it acting on a wrong
         # one. See lost_reason for what declares it and what it measured.
-        if getattr(self, "lost_since", None) is not None:
-            sigma = max(sigma, float(getattr(self, "lost_sigma_m", 50.0)))
+        # AND IT RAMPS, it does not step. The first version jumped straight to
+        # lost_sigma_m and the pilot stopped it: handing EKF3 a 50 m accuracy
+        # in one sample is handing it a position it must reject, which is a
+        # glitch, which is ALT_HOLD - and ALT_HOLD is not a solution, it is
+        # the aircraft drifting on the wind with nobody flying it. The point
+        # is to make the flight controller lean on us LESS while it keeps
+        # flying, and to leave room to recover.
+        #
+        # The rate is the one the error actually accumulated at on flight 478,
+        # 0.546 m/s from t=400 and 0.625 from t=500, so what is declared grows
+        # at the rate the position is really diverging. See
+        # VpsConfig.map_lost_ramp_mps.
+        lost_at = getattr(self, "lost_since", None)
+        if lost_at is not None:
+            ceiling = float(getattr(self, "lost_sigma_m", 50.0))
+            rate = float(getattr(self, "lost_ramp_mps", 0.0))
+            now = getattr(self, "prev_t", None)
+            if rate > 0.0 and now is not None:
+                held = max(0.0, float(now) - float(lost_at))
+                sigma = min(ceiling, sigma + rate * held)
+            else:
+                sigma = max(sigma, ceiling)
         return sigma
 
     # The lost detector's rule, as measured. Overridable from config so a
@@ -2416,8 +2437,11 @@ class VpsNode:
             self.lost_reason = (f"{gap} refusals, last score {score:.3f} "
                                 f"below {score_max:.2f}, at {alt:.0f} m")
             self.n_lost = getattr(self, "n_lost", 0) + 1
+            _r = getattr(self, "lost_ramp_mps", 0.0)
+            _c = getattr(self, "lost_sigma_m", self.LOST_SIGMA_M)
             print(f"[map] LOST at t={f['t']:.0f}: {self.lost_reason}; "
-                  f"declaring {getattr(self, 'lost_sigma_m', self.LOST_SIGMA_M):.0f} m",
+                  + (f"declared accuracy now ramps at {_r:.2f} m/s toward "
+                     f"{_c:.0f} m" if _r > 0 else f"declaring {_c:.0f} m"),
                   flush=True)
 
     def gate_step(self, dn: float, de: float, dt: float | None,

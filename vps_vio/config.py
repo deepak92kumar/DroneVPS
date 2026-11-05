@@ -117,8 +117,37 @@ class VpsConfig:
     # held them is downstream and unchanged: map_fuse rejects a residual past
     # 3 sigma (60.3 m at nominal) and caps an accepted one at 0.5 m.
     #
+    # 80, NOT 90: the pilot flies this aircraft and has watched NCC across
+    # the band - "ncc 80mtr tak hi aacha hai, best 70 mtr par". The replay
+    # agrees with the shape of that: NCC's own error at 70-85 m is 1.95 m p50
+    # and at 85-100 m it is 6.19 m, so it degrades through exactly there.
+    #
+    # XFeat still goes FIRST below 80 m even though NCC covers more, because
+    # where XFeat speaks it is more accurate - 4.80 m against 11.78 m on the
+    # 3 Nov flights - and putting NCC first would take the worst case from
+    # 45.81 m back to 68.92 m. NCC catches what XFeat drops; it does not lead.
+    #
     # 0.0 disables the fallback. UNFLOWN.
-    map_ncc_below_m: float = 90.0
+    map_ncc_below_m: float = 80.0
+    # HOW FAST THE DECLARED ACCURACY IS ALLOWED TO GROW once the aircraft
+    # knows it is lost, in metres per second. The first version of this
+    # stepped straight to map_lost_sigma_m, and the pilot stopped it: a step
+    # to 50 m hands EKF3 a position it must reject, which is a glitch, which
+    # is ALT_HOLD - and ALT_HOLD is not a solution, it is the aircraft
+    # drifting on the wind with nobody flying it.
+    #
+    # So it ramps. 0.6 m/s is not a guess: it is the rate the position
+    # ACTUALLY diverged on flight 478, measured at 0.546 m/s from t=400 and
+    # 0.625 m/s from t=500. Declaring uncertainty that grows at the rate the
+    # error is really accumulating is the honest number, and it means the
+    # flight controller de-weights us progressively instead of being handed a
+    # reason to stop. From a typical 8.5 m to 50 m takes about 69 s at this
+    # rate.
+    #
+    # It is a de-weighting, not a veto: a larger horiz_accuracy makes EKF3
+    # lean on our position less, it cannot make the aircraft jump. 0.0 goes
+    # back to the step. UNFLOWN.
+    map_lost_ramp_mps: float = 0.6
     # The previous setting and its reasoning, kept because it is still the
     # answer on a day when the shadows have moved:
     # matcher = "both"             # 25 OCT: BOTH. NCC came back, and the reason is in

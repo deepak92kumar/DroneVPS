@@ -153,6 +153,30 @@ for i in range(12):
 check("an occasional success keeps the run broken", n.lost_since is None,
       f"gap={n._lost_gap}")
 
+print("\nthe declared accuracy RAMPS, it does not step")
+import map_fuse                                    # noqa: E402
+n = node()
+n.fuser = map_fuse.MapFuser()
+n.origin_sigma_m = 2.0
+n.lost_ramp_mps = 0.6
+n.lost_since = 100.0
+seq = []
+for dt in (0.0, 10.0, 30.0, 60.0, 120.0):
+    n.prev_t = 100.0 + dt
+    seq.append(n.absolute_sigma_m)
+check("at the moment it fires nothing jumps", seq[0] < 5.0,
+      f"{seq[0]:.2f} m - a step to 50 m is a glitch, and a glitch is ALT_HOLD")
+check("it rises steadily", seq[0] < seq[1] < seq[2] < seq[3],
+      " -> ".join(f"{v:.1f}" for v in seq))
+check("at 0.6 m/s, matching the 0.546-0.625 m/s the error really grew at",
+      abs((seq[2] - seq[0]) / 30.0 - 0.6) < 0.05,
+      f"{(seq[2]-seq[0])/30.0:.3f} m/s")
+check("and stops at the ceiling", abs(seq[4] - 50.0) < 1e-6,
+      f"{seq[4]:.2f} m")
+n.lost_ramp_mps = 0.0
+n.prev_t = 100.0
+check("ramp 0 goes back to the step", n.absolute_sigma_m >= 50.0)
+
 print("\nbeing lost reaches the flight controller as horiz_accuracy")
 import map_fuse
 n = node()
@@ -183,7 +207,7 @@ for col in ("lost", "lost_reason"):
 check("lost is written as 0/1", 'int(bool(est.get("lost")))' in ln)
 
 
-print("\nNCC comes back below 90 m, and only there")
+print("\nNCC comes back below 80 m, and only there")
 from config import VpsConfig                    # noqa: E402
 _c = VpsConfig()
 w = W.MapFixWorker(_Cache(), focal_px=795.0, matcher=_c.matcher,
@@ -195,6 +219,9 @@ check("NCC is not in the base trust", w._trust == ["xfeat", "xfeat_lg"],
       str(w._trust))
 check("at 70 m NCC may publish", "ncc" in w._trusted_at(70.0),
       "XFeat accepts 48% there and LighterGlue is not asked at all")
+check("at 79 m it still may", "ncc" in w._trusted_at(79.0))
+check("at 85 m it may not", "ncc" not in w._trusted_at(85.0),
+      "the pilot flies this and reports NCC good to 80 m, best at 70")
 check("at 110 m it may not", "ncc" not in w._trusted_at(110.0),
       "NCC reached 180.74 m up there")
 check("and it is appended LAST at 70 m",
