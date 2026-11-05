@@ -1,0 +1,14 @@
+[Unit]
+Description=Check every 2 minutes for a flight that has just ended
+
+[Timer]
+# 2 minutes, and the analyser itself refuses a log modified in the last 60 s,
+# so it never reads one that is still being written. A run it has already
+# reported on is skipped by the presence of THREAD_REPORT.txt, so this is
+# safe to fire as often as it likes.
+OnBootSec=3min
+OnUnitActiveSec=2min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,17 @@
+[Unit]
+Description=Analyse a finished flight for the thread test (altitude, flow scale, derotation)
+Documentation=file:///data/DRONE/bench/thread_test/thread_test.py
+After=drone-vps.service
+
+[Service]
+Type=oneshot
+User=abc
+Group=abc
+# Reads the estimate CSV only. Touches no device, no flight controller, and
+# nothing the flying node owns - it runs AFTER a flight, on a log that has
+# stopped growing, and writes THREAD_REPORT.txt beside it.
+ExecStart=/usr/bin/python3 /data/DRONE/bench/thread_test/thread_test.py
+Nice=10
+IOSchedulingClass=idle
+StandardOutput=journal
+StandardError=journal
