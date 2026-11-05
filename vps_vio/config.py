@@ -148,6 +148,45 @@ class VpsConfig:
     # lean on our position less, it cannot make the aircraft jump. 0.0 goes
     # back to the step. UNFLOWN.
     map_lost_ramp_mps: float = 0.6
+    # HOW FAR ONE MAP FIX MAY MOVE THE ESTIMATE. 0.5 -> 1.0 on 5 Nov, after
+    # the first flight of the new matcher chain, and the pilot's call: "1
+    # karo, agar faida hua tho aur badhayenge."
+    #
+    # The 5 Nov flight held - no runaway, error p50 3.41 m against the M9N,
+    # the lost detector never fired - but the aircraft wandered about 10 m
+    # back and forth, 22.85 m peak to peak at 96 m with periods of 23-92 s.
+    # Measured, that is the cap:
+    #
+    #     fix interval                       2.03 s
+    #     flow moves the estimate            2.572 m between fixes
+    #     the fix pulls back                 0.383 m   - seven times weaker
+    #     at 90-100 m the correction's
+    #       median was 0.489 m against the 0.5 cap - saturated
+    #     the cap bound 35% of all corrections
+    #
+    # EK3_SRC1_POSXY is 3 and VELXY is 0, so the flight controller navigates
+    # on OUR POSITION. The aircraft holds where we say it is, so our
+    # estimate's wander becomes real aircraft motion, and the position
+    # controller commanded up to 14.9 degrees of pitch chasing it. The
+    # attitude loop is not at fault: velocity target against achieved ran
+    # 0.09-0.48 m/s RMS.
+    #
+    # WHY THIS IS SAFE NOW AND WAS NOT BEFORE. A bigger cap applies to a bad
+    # fix as readily as a good one, and until 4 Nov NCC was publishing fixes
+    # up to 180.74 m wrong - which is why 0.7 was tried earlier and reverted.
+    # On 5 Nov all 144 published fixes were within 7.0 m of the M9N:
+    #
+    #     xfeat     n=118   p50 1.89   p90 4.90   worst 6.40 m
+    #     ncc       n= 20   p50 2.13   p90 3.21   worst 5.78 m
+    #     xfeat_lg  n=  6   p50 4.58   p90 6.77   worst 7.00 m
+    #     none over 20 m
+    #
+    # At 1.0 m the map's authority goes from 0.19 to about 0.49 m/s, against
+    # a flow that moves the estimate at roughly 1.0-1.5 m/s. That is not
+    # enough to win, which is the point of going to 1.0 rather than 2.0: it
+    # is one measurable step, and map_fuse's 3-sigma gate at about 60 m still
+    # rejects anything wild. UNFLOWN.
+    map_max_correction_m: float = 1.0
     # The previous setting and its reasoning, kept because it is still the
     # answer on a day when the shadows have moved:
     # matcher = "both"             # 25 OCT: BOTH. NCC came back, and the reason is in

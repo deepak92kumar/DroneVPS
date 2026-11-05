@@ -2148,7 +2148,15 @@ class VpsNode:
         # at all (replayed: sigma p50 11.15 m at 12, 11.00 m at 20), but it
         # decides how far each fix moves the aircraft the moment fixes return,
         # and 12 trusts the map almost three times as much as it has earned.
-        self.fuser = MapFuser(flow_drift_frac=0.07, fix_sigma_m=20.0)
+        # max_correction_m PASSED, not left at MapFuser's own default. The
+        # 5 Nov flight measured the 0.5 default saturating - median
+        # correction 0.489 m at 90-100 m against a 0.5 cap - while the flow
+        # moved the estimate 2.572 m between fixes. See
+        # VpsConfig.map_max_correction_m.
+        self.fuser = MapFuser(
+            flow_drift_frac=0.07, fix_sigma_m=20.0,
+            max_correction_m=float(getattr(_vps_config(),
+                                           "map_max_correction_m", 0.5)))
         # THE LOST DETECTOR'S THRESHOLDS, from config so a flight can soften
         # them without a code change. The defaults are the measured rule -
         # see _lost_check for the table it was chosen from. lost_since is

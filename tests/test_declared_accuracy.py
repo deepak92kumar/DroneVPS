@@ -232,9 +232,28 @@ check("it is never below the origin's own error",
 # ------------------------------------------------- the number that was wrong
 
 print("\nthe fuser the flying code builds")
+# Checked as INVARIANTS rather than as one literal line. This assertion was
+# a substring match on the whole call and broke twice when the call was
+# reformatted - once on 4 Nov and again on 5 Nov when max_correction_m was
+# added to it - which tests nothing about the aircraft. What it is for is
+# the fault it caught: the flying code built the fuser with fix_sigma_m 12
+# while the default, the docstring and every other test said 20.
+# A bounded window of the source after the call, not a split on ")" - the
+# call contains nested parentheses now and splitting cut it at the first one.
+_call = (src.split("self.fuser = MapFuser(")[1][:400]
+         if "self.fuser = MapFuser(" in src else "")
+check("the flying code builds the fuser", bool(_call))
 check("fix_sigma_m is 20, matching MapFuser's default and the 9 Oct report",
-      "MapFuser(flow_drift_frac=0.07, fix_sigma_m=20.0)" in src,
+      "fix_sigma_m=20.0" in _call,
       "it said 12 while the default, the docstring and the tests all said 20")
+check("flow_drift_frac is 0.07", "flow_drift_frac=0.07" in _call)
+# 5 Nov: the cap comes from config now, because the 0.5 default was measured
+# saturating - median correction 0.489 m at 90-100 m against a 0.5 cap while
+# the flow moved the estimate 2.572 m between fixes. A cap that cannot be
+# changed from config is the min_alt_m fault again.
+check("max_correction_m comes from config, not the default",
+      "map_max_correction_m" in _call,
+      "the 0.5 default saturated on the 5 Nov flight")
 
 print("\n" + ("ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}"))
 sys.exit(1 if fails else 0)
