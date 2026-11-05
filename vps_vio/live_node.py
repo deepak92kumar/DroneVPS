@@ -2188,6 +2188,19 @@ class VpsNode:
             matcher=getattr(_cfg, "matcher", "xfeat"),
             window_alt_frac=getattr(_cfg, "map_window_alt_frac", 0.90),
             query_shape=getattr(_cfg, "map_query_shape", "full"),
+            # PASSED, and it was not. VpsConfig.map_min_alt_m reads 50 - set
+            # there by the pilot on 26 Oct, because the gate reads the
+            # BAROMETER and that runs 5-9 m high, so a gate of 50 stops the
+            # map at about 44 m of real height - while MapFixWorker's own
+            # default is 60 and won. The map has been starting at 60 m, not
+            # 50, for as long as that setting has existed.
+            #
+            # The fourth time this exact fault has been found here:
+            # map_window_alt_frac and map_query_shape were dead until 23 Oct
+            # and fix_period_s until the same day. "A constant that does not
+            # reach the thing it names is worse than no constant, because the
+            # next person changes it and measures no difference."
+            min_alt_m=float(getattr(_cfg, "map_min_alt_m", 60.0)),
             # PASSED, not defaulted. It was not before, so the worker's own
             # default won whatever the config and the CLI said - the same
             # fault that left map_window_alt_frac and map_query_shape dead.
