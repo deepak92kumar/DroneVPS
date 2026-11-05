@@ -1,0 +1,89 @@
+==============================================================================
+  flight 2026-11-03 17-27-33   |   547 s log, 72 m max, 499 s VPS par
+==============================================================================
+
+1. RCOU — chhe motor ka PWM
+   (airborne n=4607, saaf level hover n=2838)
+
+   motor  jagah         spin   airborne      hover      min     max
+     1    right        CW       1642.7     1642.9     1579    1718
+     2    left         CCW      1526.6     1525.1     1435    1596
+     3    front-left   CW       1609.2     1606.7     1493    1686
+     4    rear-right   CCW      1564.3     1565.8     1493    1620
+     5    front-right  CCW      1568.0     1564.1     1505    1623
+     6    rear-left    CW       1606.5     1609.1     1541    1661
+
+   airborne:  CW {1,3,6} =  1619.5    CCW {2,4,5} =  1553.0    ANTAR =  +66.5 PWM  (+4.2%)
+
+   hover:  CW {1,3,6} =  1619.6    CCW {2,4,5} =  1551.6    ANTAR =  +67.9 PWM  (+4.3%)
+
+
+2. RATE — jo maanga (Des) vs jo hua,  deg/s
+
+   ROLL
+      Des   mean   -0.03  sd   8.99  min   -54.17  max   +77.78
+      Act   mean   -0.01  sd   6.92  min   -66.40  max   +56.05
+      Act-Des  sd   8.60   p90|e|  12.73   max|e|   75.35
+      corr(Des,Act) +0.441     sd ka anupaat Act/Des 0.77
+
+   PITCH
+      Des   mean   +0.00  sd   8.82  min   -35.02  max   +55.30
+      Act   mean   -0.01  sd   5.12  min   -27.48  max   +31.17
+      Act-Des  sd   9.45   p90|e|  15.42   max|e|   53.22
+      corr(Des,Act) +0.163     sd ka anupaat Act/Des 0.58
+
+   YAW
+      Des   mean   -0.23  sd   4.22  min   -13.90  max   +21.74
+      Act   mean   +0.01  sd   1.36  min    -7.91  max    +8.17
+      Act-Des  sd   4.46   p90|e|   7.16   max|e|   24.43
+      corr(Des,Act) -0.023     sd ka anupaat Act/Des 0.32
+
+
+3. ATT — kon (angle), deg
+
+   ROLL
+      Des   mean  -2.906  sd  2.142  min   -13.22  max    +5.51
+      Act   mean  -2.885  sd  2.207  min   -21.12  max    +8.34
+      Act-Des  sd  1.416   p90|e|  2.171   max|e|   12.32
+
+   PITCH
+      Des   mean  -0.184  sd  3.906  min   -13.54  max   +13.90
+      Act   mean  -0.188  sd  2.667  min   -10.46  max   +10.76
+      Act-Des  sd  1.872   p90|e|  3.077   max|e|    9.45
+
+
+4. PIDR / PIDP — rate controller ke andar
+
+   ROLL  (PIDR)   n=4607
+      Tar  mean  -0.0005  sd  0.1568
+      Act  mean  -0.0001  sd  0.1208
+      Err  mean  -0.0004  sd  0.1437
+
+      PID output (P+I+D+FF):  mean -0.06349  sd 0.05291  min  -0.2270  max  +0.0389
+
+      component    mean        sd      min       max     sd ka hissa
+      P         -0.00004   0.01293   -0.0691  +0.1128     24.4%
+      I         -0.06350   0.05132   -0.1711  +0.0362     97.0%
+      D         +0.00005   0.00314   -0.0154  +0.0152      5.9%
+      FF        +0.00000   0.00000   -0.0000  -0.0000      0.0%
+
+      0.6-1.0 Hz (wo 0.74 Hz wala jhoola) me kiska zor:
+      P  93.1%   I   4.2%   D   2.7%   FF   0.0%
+
+   PITCH (PIDP)   n=4607
+      Tar  mean  +0.0000  sd  0.1537
+      Act  mean  -0.0001  sd  0.0893
+      Err  mean  +0.0002  sd  0.1626
+
+      PID output (P+I+D+FF):  mean +0.00461  sd 0.03988  min  -0.1200  max  +0.1089
+
+      component    mean        sd      min       max     sd ka hissa
+      P         +0.00001   0.01463   -0.0586  +0.0812     36.7%
+      I         +0.00460   0.03717   -0.0911  +0.0862     93.2%
+      D         -0.00000   0.00200   -0.0118  +0.0107      5.0%
+      FF        +0.00000   0.00000   -0.0000  -0.0000      0.0%
+
+      0.6-1.0 Hz (wo 0.74 Hz wala jhoola) me kiska zor:
+      P  93.5%   I   3.9%   D   2.7%   FF   0.0%
+
+==============================================================================

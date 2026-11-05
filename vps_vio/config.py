@@ -92,7 +92,33 @@ class VpsConfig:
     # shadow insurance of flight 160, where XFeat managed 2 fixes of 40 at
     # 15:20 and NCC managed 26. On a day like that, set this back to "both".
     # "ncc,xfeat,xfeat_lg" runs all three and needs map_trust set explicitly.
-    matcher: str = "xfeat,xfeat_lg"
+    matcher: str = "xfeat,xfeat_lg,ncc"
+    # NCC IS TRUSTED AGAIN BELOW THIS HEIGHT, and it took the pilot pointing
+    # at the 3 Nov flights to find it. The measurement that removed NCC was
+    # 675 frames of which 497 were at 100-118 m, and I applied its conclusion
+    # at every height. Below 90 m the aircraft has nothing else: XFeat
+    # accepts 48% there and LighterGlue is not asked below 90 m at all.
+    #
+    # Measured on the two 3 Nov flights that actually flew at 70-82 m, 197
+    # attempts, against the M9N:
+    #
+    #                      coverage   err p50   WORST   >20 m
+    #     NCC alone        172 (87%)   11.78    68.92     65
+    #     XFeat alone       94 (48%)    4.80    21.53      1
+    #     XFeat, else NCC  186 (94%)    6.64    45.81     47
+    #
+    # NCC is NOT more accurate down there - 11.78 m against 4.80 - and it
+    # produced a 68.9 m fix on a frame whose prior was under 10 m, because
+    # its gate does not self-assess at any height. What it is, is AVAILABLE.
+    # Trusting XFeat first and falling back to NCC keeps the whole 94% and
+    # takes the worst case from 68.92 to 45.81 m.
+    #
+    # Those flights held with NCC publishing 65 fixes over 20 m, and what
+    # held them is downstream and unchanged: map_fuse rejects a residual past
+    # 3 sigma (60.3 m at nominal) and caps an accepted one at 0.5 m.
+    #
+    # 0.0 disables the fallback. UNFLOWN.
+    map_ncc_below_m: float = 90.0
     # The previous setting and its reasoning, kept because it is still the
     # answer on a day when the shadows have moved:
     # matcher = "both"             # 25 OCT: BOTH. NCC came back, and the reason is in
@@ -154,7 +180,11 @@ class VpsConfig:
     # shadows have moved and XFeat produces nothing - on such a day the
     # aircraft otherwise gets no map fixes and ALT_HOLD is the answer, which
     # is the standing rule for the VPS stopping. UNFLOWN.
-    map_trust: str | None = None
+    # EXPLICIT, not None. With matcher="xfeat,xfeat_lg,ncc" a None trust
+    # would trust all three at every height, which is the behaviour this
+    # whole day's work removed. NCC comes back only below
+    # map_ncc_below_m, and only as the last resort there.
+    map_trust: str | None = "xfeat,xfeat_lg"
     # How old the roll and pitch behind the nadir correction may be before
     # the correction is withheld. The matcher says "the middle of this frame
     # is here" and the aircraft is alt*tan(tilt) from that, so the shift is

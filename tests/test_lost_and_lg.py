@@ -86,7 +86,7 @@ check("the altitude floor is enforced in locate",
 print("\nthe expensive matcher runs only when the cheap one refuses")
 ws = inspect.getsource(W.MapFixWorker._loop)
 check("the loop stops on a trusted answer",
-      "if any(m in got for m in self._trust):" in ws,
+      "if any(m in got for m in self._trusted_at(alt)):" in ws,
       "running both every frame measured 2587 ms, past the 2 s period")
 
 print("\nrelocation is tiled, bounded, and returns a hypothesis")
@@ -181,6 +181,36 @@ ln = open(os.path.join(os.path.dirname(__file__), "..",
 for col in ("lost", "lost_reason"):
     check(f"{col} is a column", f'"{col}"' in ln)
 check("lost is written as 0/1", 'int(bool(est.get("lost")))' in ln)
+
+
+print("\nNCC comes back below 90 m, and only there")
+from config import VpsConfig                    # noqa: E402
+_c = VpsConfig()
+w = W.MapFixWorker(_Cache(), focal_px=795.0, matcher=_c.matcher,
+                   trust=_c.map_trust, ncc_below_m=_c.map_ncc_below_m,
+                   min_alt_m=0.0, fix_period_s=0.0)
+check("all three matchers run", w._pair == ["xfeat", "xfeat_lg", "ncc"],
+      str(w._pair))
+check("NCC is not in the base trust", w._trust == ["xfeat", "xfeat_lg"],
+      str(w._trust))
+check("at 70 m NCC may publish", "ncc" in w._trusted_at(70.0),
+      "XFeat accepts 48% there and LighterGlue is not asked at all")
+check("at 110 m it may not", "ncc" not in w._trusted_at(110.0),
+      "NCC reached 180.74 m up there")
+check("and it is appended LAST at 70 m",
+      w._trusted_at(70.0)[-1] == "ncc",
+      "XFeat is still believed wherever it speaks - that is what takes the "
+      "worst case from 68.92 m to 45.81 m")
+w.stop()
+w = W.MapFixWorker(_Cache(), focal_px=795.0, matcher=_c.matcher,
+                   trust=_c.map_trust, ncc_below_m=0.0,
+                   min_alt_m=0.0, fix_period_s=0.0)
+check("map_ncc_below_m=0 switches the fallback off",
+      "ncc" not in w._trusted_at(10.0))
+w.stop()
+check("map_trust is explicit in config, not None",
+      _c.map_trust is not None,
+      "a None trust with three matchers would trust NCC at every height")
 
 print("\n" + ("ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}"))
 sys.exit(1 if fails else 0)

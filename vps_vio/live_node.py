@@ -2200,6 +2200,9 @@ class VpsNode:
             # flight 160 showed a day where XFeat produced 2 fixes of 40 and
             # NCC produced 26.
             trust=getattr(_cfg, "map_trust", None),
+            # NCC trusted again below this height, where XFeat accepts 48%
+            # and LighterGlue is not asked at all. See VpsConfig.
+            ncc_below_m=float(getattr(_cfg, "map_ncc_below_m", 0.0)),
             att_age_max_s=float(getattr(_cfg, "map_att_age_max_s", 0.30)),
             principal_xy=(None if K is None
                           else (float(np.asarray(K).reshape(3, 3)[0, 2]),

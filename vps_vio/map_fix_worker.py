@@ -194,6 +194,7 @@ class MapFixWorker:
                  min_score: float | None = None,
                  min_margin: float | None = None,
                  trust: str | None = None,
+                 ncc_below_m: float = 0.0,
                  att_age_max_s: float = 0.30,
                  principal_xy=None):
         self.cache = cache
@@ -348,6 +349,40 @@ class MapFixWorker:
         if not self._trust:
             raise ValueError(f"trust={trust!r} names no matcher that is "
                              f"running (matcher={self.matcher!r})")
+        # NCC IS TRUSTED AGAIN BELOW THIS HEIGHT, and the pilot was right to
+        # insist. The 4 Nov measurement that removed NCC was taken on 675
+        # frames of which 497 were at 100-118 m, and the conclusion was then
+        # applied at every height. Below 90 m the aircraft has nothing else:
+        # XFeat accepts 48% there and LighterGlue is not asked at all, so
+        # removing NCC halves the coverage in exactly the band this project
+        # already recorded it as necessary for - "It is NCC that makes this
+        # possible", 26 Oct, tested on 156 frames, in VpsConfig.min_alt_m.
+        #
+        # Measured on the two 3 Nov flights that flew at 70-82 m, 197
+        # attempts, against the M9N:
+        #
+        #                      coverage   err p50   WORST   >20 m
+        #     NCC alone        172 (87%)   11.78    68.92     65
+        #     XFeat alone       94 (48%)    4.80    21.53      1
+        #     XFeat, else NCC  186 (94%)    6.64    45.81     47
+        #
+        # So NCC is NOT more accurate down there - its own fixes run 11.78 m
+        # against XFeat's 4.80, and it produced a 68.9 m fix on a frame whose
+        # prior was under 10 m, because its gate does not self-assess at any
+        # height. What it is, is AVAILABLE: 87% against 48%. Trusting XFeat
+        # first and falling back to NCC keeps the whole 94% and takes the
+        # worst case from 68.92 to 45.81 m, because wherever XFeat speaks it
+        # is believed instead.
+        #
+        # What makes the fallback survivable is downstream and unchanged:
+        # map_fuse rejects a residual past 3 sigma, which is 60.3 m at
+        # nominal, and caps an accepted one at max_correction_m = 0.5 m. That
+        # is why those flights held with NCC publishing 65 fixes over 20 m.
+        #
+        # 0.0 disables the fallback entirely. NCC must also be in `matcher`
+        # or there is nothing to fall back to.
+        self.ncc_below_m = float(ncc_below_m)
+        self.n_ncc_low = 0
         # Answers suppressed because the matcher that produced them is not
         # trusted. A fix rate that falls has to be visible as a number, not
         # inferred from the absence of fixes.
@@ -587,7 +622,7 @@ class MapFixWorker:
                         # second answer is the disagreement number and the
                         # whole point is to have both. There, NCC is not
                         # trusted, so this never triggers.
-                        if any(m in got for m in self._trust):
+                        if any(m in got for m in self._trusted_at(alt)):
                             break
                         # Each matcher gets the window IT needs: NCC slides
                         # the template inside the window and starves on
@@ -616,12 +651,15 @@ class MapFixWorker:
             # available result is still carried through with ok=False so the
             # recorder gets a position and a reason - but it can never become
             # a fix, because live_node only folds in a result whose ok is set.
-            res = next((got[m] for m in self._trust if m in got), None)
+            trust_now = self._trusted_at(alt)
+            res = next((got[m] for m in trust_now if m in got), None)
+            if res is not None and res is got.get("ncc") and "ncc" not in self._trust:
+                self.n_ncc_low += 1
             if res is None:
-                untrusted = [m for m in got if m not in self._trust]
+                untrusted = [m for m in got if m not in trust_now]
                 if untrusted:
                     self.n_untrusted += 1
-                res = next((tried[m] for m in self._trust if m in tried),
+                res = next((tried[m] for m in trust_now if m in tried),
                            next(iter(tried.values())) if tried else None)
                 if res is not None and res.ok:
                     # Can only happen if _trust and the loop disagree; make it
@@ -711,6 +749,22 @@ class MapFixWorker:
                     self._result = out
                     self.completed += 1
                 self._job = None
+
+    def _trusted_at(self, altitude_m):
+        """Whose answer may be published at this height.
+
+        One list, plus NCC appended below ncc_below_m. See that attribute for
+        the measurement: NCC is not more accurate down there, it is the only
+        thing available - 87% against XFeat's 48% at 70-82 m, with
+        LighterGlue not asked at all below 90 m. Appended LAST, so XFeat is
+        still believed wherever it speaks, which is what takes the worst case
+        from 68.92 m to 45.81 m.
+        """
+        if (self.ncc_below_m > 0.0 and "ncc" in self._pair
+                and "ncc" not in self._trust
+                and altitude_m < self.ncc_below_m):
+            return self._trust + ["ncc"]
+        return self._trust
 
     def relocate(self, img, *, prior_lon, prior_lat, altitude_m, yaw_deg,
                  roll_deg=0.0, pitch_deg=0.0, search_m=250.0, tile_m=150.0,
