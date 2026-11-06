@@ -34,6 +34,14 @@ HOLD_LO, HOLD_HI = 5.0, 18.0     # altitudes that could be the thread hold
 STILL_M = 1.5             # M9N movement over a window that still counts as held
 MIN_HOLD_S = 6.0
 
+# A thread report only means something if a thread was actually tied on, and
+# no signal in the log says whether it was. So the pilot arms it: this marker
+# file is touched before a thread flight and the timer ignores every run whose
+# CSV is older than it. Without the marker nothing is analysed at all. The
+# first version had no marker, swept the whole back-catalogue, and wrote
+# "+27% off" onto a 3 November flight that never had a thread.
+SINCE = "/home/abc/NVME/DRONE/flight_logs/vps/.thread_test_from"
+
 
 def cols(r):
     F = lambda x, k: (float(x[k]) if x.get(k) not in (None, "") else np.nan)
@@ -185,6 +193,10 @@ def analyse(run, path, w):
 
 def main():
     force = sys.argv[1] if len(sys.argv) > 1 else None
+    since = os.path.getmtime(SINCE) if os.path.exists(SINCE) else None
+    if since is None and not force:
+        print("thread test not armed (touch %s before the flight)" % SINCE)
+        return
     runs = []
     for p in sorted(glob.glob(os.path.join(VPS, "vps_*"))):
         run = os.path.basename(p)
@@ -199,6 +211,8 @@ def main():
                 continue
             if time.time() - os.path.getmtime(csvp) < 60:
                 continue          # still flying
+            if os.path.getmtime(csvp) < since:
+                continue          # flown before the pilot armed the test
         runs.append((run, p, csvp))
     if not runs:
         return
@@ -217,7 +231,10 @@ def main():
             print("skip %s: %s" % (run, exc))
             continue
         w("=" * 72)
-        w("THREAD TEST  —  %s" % time.strftime("%Y-%m-%d %H:%M"))
+        w("THREAD TEST  —  analysed %s" % time.strftime("%Y-%m-%d %H:%M"))
+        w("run %s   flown %s" % (
+            run, time.strftime("%Y-%m-%d %H:%M",
+                               time.localtime(os.path.getmtime(csvp)))))
         w("=" * 72)
         try:
             analyse(run, csvp, w)
