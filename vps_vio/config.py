@@ -906,14 +906,27 @@ class VpsConfig:
     # saving a frame changed the next samples' age by +0.008 s on 486 and
     # -0.002 s on 489, which is nothing. 489's VPS leg (t=106-349 of 522 s)
     # was flown entirely inside its unsettled period.
-    # 0.28 -> 0.12 BACK ON 6 NOV. The 0.28 was for the 5 Nov 10:57 flight,
-    # where frame_age ran p50 0.1028 and 42% of frames were over the 0.12
-    # limit. On 6 Nov the same measurement reads p50 0.0000 with 0.0% over
-    # 0.12, so 0.28 is buying nothing - and it was one of four changes made
-    # together, against the pilot's instruction of one at a time, so it is
-    # the first to go. If the 42% ever comes back, raise it again and nothing
-    # else with it.
-    frame_age_max_s: float = 0.12
+    # 0.28 -> 0.12 on 6 Nov morning, then BACK TO 0.28 the same afternoon.
+    # The revert was wrong and the reasoning behind it was wrong: it read
+    # "p50 0.0000, 0.0% over 0.12" off a GROUND run, where nothing is late,
+    # and concluded 0.28 was buying nothing. Two flights that afternoon, both
+    # at 28 m, gave three airborne "VPS TRACK LOST 0" at frame ages 0.1206,
+    # 0.1267 and 0.1331 - every one of them a frame this limit threw away at
+    # a hundredth of a second over, with the tracker working fine. Run 504's
+    # normal rows sit at p95 0.119, a millisecond under, so it tips over
+    # whenever the pipeline breathes.
+    #
+    # Raising it is not the cure. Run 504's load log says the lateness is NOT
+    # load - corr(frame_age, rq_wait_pct) = -0.22 and corr with cpu_pct
+    # = -0.40, both NEGATIVE, and the late seconds carried LESS CPU than the
+    # clean ones. The row rate held 21.6-24.7 Hz throughout, so nothing was
+    # dropped; the frames arrived on time and old. It is one continuous block,
+    # t=145-237, rising 0.073 -> 0.116 and plateauing there - about three
+    # frames at 24 Hz - then falling back as the aircraft descended. A
+    # plateau is a queue that filled and stayed, not a clock that drifted.
+    # Until that queue is found, this limit is the difference between
+    # dead-reckoning quietly and shouting TRACK LOST at the pilot.
+    frame_age_max_s: float = 0.28
     dual_flow: bool = True
     crop_left_px: int = 0
 

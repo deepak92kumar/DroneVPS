@@ -1485,6 +1485,7 @@ class LoadLog:
             try:
                 self.wr.writerow(self._row(self._t_row, dt, now, was))
                 self.fh.flush()
+                os.fsync(self.fh.fileno())
             except Exception:
                 pass             # a log is not the mission
             was, was_t = now, now_t
@@ -1493,6 +1494,8 @@ class LoadLog:
         self._stop.set()
         self._th.join(timeout=2.0)
         try:
+            self.fh.flush()
+            os.fsync(self.fh.fileno())
             self.fh.close()
         except Exception:
             pass
