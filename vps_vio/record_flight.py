@@ -190,7 +190,8 @@ class Telemetry:
             print(f"  [telemetry] cannot open {self.port}: {e}")
             return self
         self._run = True
-        self._thr = threading.Thread(target=self._loop, daemon=True)
+        self._thr = threading.Thread(target=self._loop, name="telemetry",
+                                     daemon=True)
         self._thr.start()
         return self
 
@@ -544,7 +545,8 @@ def main():
             cv2.imwrite(path, img, enc)
             wq.task_done()
 
-    wthread = threading.Thread(target=writer, daemon=True)
+    wthread = threading.Thread(target=writer, name="jpeg-writer",
+                               daemon=True)
     wthread.start()
 
     tel = None

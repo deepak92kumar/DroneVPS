@@ -411,7 +411,10 @@ class MapFixWorker:
         # this on the radio before arming.
         self.model_ready = False
         self.model_load_s = 0.0
-        self._thread = threading.Thread(target=self._loop, daemon=True)
+        # Named so the load log can say "map-fix used 190% of the 273%"
+        # instead of "python3".
+        self._thread = threading.Thread(target=self._loop, name="map-fix",
+                                        daemon=True)
         self._thread.start()
 
     def _warm(self) -> None:

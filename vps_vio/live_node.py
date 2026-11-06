@@ -16,7 +16,7 @@ and that is refused unless the aircraft is disarmed, so the first transmission
 can only ever happen on a bench.
 """
 from __future__ import annotations
-import argparse, collections, csv, io, math, os, sys, time
+import argparse, collections, csv, io, math, os, sys, threading, time
 import numpy as np, cv2
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -1339,6 +1339,163 @@ def imu_rows(f):
     for s in (f.get("quat") or ()):
         yield ("%.6f" % s[0], "q",
                "%.6f" % s[1], "%.6f" % s[2], "%.6f" % s[3], "%.6f" % s[4])
+
+
+LOAD_LOG_COLUMNS = ["t", "cpu_pct", "threads", "rss_mb", "load1", "load5",
+                    "rq_wait_pct", "slices_s", "top1", "top2", "top3"]
+
+
+class LoadLog:
+    """The node's own CPU, once a second, beside the estimate log.
+
+    Five flights were compared on 6 November to answer "how much did
+    LighterGlue cost" and the honest answer was that nobody had ever written
+    the load down. Throughput could be reconstructed - the node held 20.7 to
+    24.7 Hz in all five - and frame_age showed that 489 spent 48.5% of its
+    rows late while 494, which ran LighterGlue five times as hard, spent none.
+    But "was the CPU saturated" had no answer at all, for any flight, ever.
+
+    It samples in its own thread and the main loop only calls mark(), which is
+    one attribute assignment. The reads are cheap - 0.06 ms each, measured -
+    but a /proc read under GIL contention from another Python thread took
+    323 ms in a bench, and a stall like that in the main loop would make a
+    frame late, which is the very signal this is here to explain. So the loop
+    never does the reading.
+
+    `rq_wait_pct` is the one to read first when frames arrive late: the
+    kernel's own run-queue wait, summed over the node's threads, as a
+    percentage of wall time. It is the time the node was ready to work and the
+    scheduler had not given it a CPU - a late frame, seen from the inside.
+    `cpu_pct` can only reach 600% on this six-core Orin; rq_wait_pct has no
+    ceiling and keeps rising after the cores are full.
+
+    The three `top` columns are the busiest threads by name, which is what
+    turns "the node used 273%" into "the matcher used 190% of it".
+    """
+
+    TICK = os.sysconf("SC_CLK_TCK")
+    PAGE_MB = os.sysconf("SC_PAGE_SIZE") / (1024.0 * 1024.0)
+
+    def __init__(self, path):
+        self.fh = open(path, "w", newline="")
+        self.wr = csv.writer(self.fh)
+        self.wr.writerow(LOAD_LOG_COLUMNS)
+        self._t_row = 0.0        # the estimate log's clock, set by mark()
+        self._stop = threading.Event()
+        self._th = threading.Thread(target=self._loop, name="loadlog",
+                                    daemon=True)
+        self._th.start()
+
+    def mark(self, t):
+        """Called from the main loop. One assignment, nothing else."""
+        self._t_row = t
+
+    @staticmethod
+    def _read(path):
+        try:
+            with open(path) as fh:
+                return fh.read()
+        except OSError:
+            return None          # a thread that exited between the listing
+                                 # and the read is not worth losing a row over
+
+    @classmethod
+    def _tail(cls, stat_line):
+        """The fields after comm, so spaces inside comm cannot shift them."""
+        return stat_line[stat_line.rindex(")") + 2:].split()
+
+    def _snap(self):
+        """Everything /proc has to say right now, or None."""
+        stat = self._read("/proc/self/stat")
+        if stat is None:
+            return None
+        tail = self._tail(stat)
+        snap = {"cpu": float(tail[11]) + float(tail[12]),
+                "threads": int(tail[17]), "rss_mb": 0.0,
+                "load1": 0.0, "load5": 0.0, "task": {}}
+        statm = self._read("/proc/self/statm")
+        if statm:
+            snap["rss_mb"] = float(statm.split()[1]) * self.PAGE_MB
+        avg = self._read("/proc/loadavg")
+        if avg:
+            parts = avg.split()
+            snap["load1"], snap["load5"] = float(parts[0]), float(parts[1])
+        try:
+            tids = os.listdir("/proc/self/task")
+        except OSError:
+            tids = []
+        # comm reads "python3" for every thread this process started, because
+        # CPython on this Jetson does not push a thread's name down to the
+        # kernel. Without this map the top columns name nothing. Threads from
+        # OpenCV and depthai are not in enumerate() and keep their own comm,
+        # which is already meaningful.
+        named = {}
+        for th in threading.enumerate():
+            nid = getattr(th, "native_id", None)
+            if nid is not None:
+                named[str(nid)] = th.name
+        for tid in tids:
+            ts = self._read("/proc/self/task/%s/stat" % tid)
+            if ts is None:
+                continue
+            name = named.get(tid) or ts[ts.index("(") + 1:ts.rindex(")")]
+            t = self._tail(ts)
+            wait_ns = slices = 0.0
+            sched = self._read("/proc/self/task/%s/schedstat" % tid)
+            if sched:
+                f = sched.split()
+                if len(f) >= 3:
+                    wait_ns, slices = float(f[1]), float(f[2])
+            snap["task"][tid] = (name, float(t[11]) + float(t[12]),
+                                 wait_ns, slices)
+        return snap
+
+    def _row(self, t, dt, now, was):
+        wait_ns = slices = 0.0
+        tops = []
+        for tid, (name, ticks, w, sl) in now["task"].items():
+            before = was["task"].get(tid)
+            if before is None:
+                continue         # a thread born since the last sample
+            wait_ns += w - before[2]
+            slices += sl - before[3]
+            pct = 100.0 * (ticks - before[1]) / self.TICK / dt
+            if pct >= 1.0:
+                tops.append((pct, name))
+        tops.sort(reverse=True)
+        row = ["%.2f" % t,
+               "%.1f" % (100.0 * (now["cpu"] - was["cpu"]) / self.TICK / dt),
+               now["threads"], "%.1f" % now["rss_mb"],
+               "%.2f" % now["load1"], "%.2f" % now["load5"],
+               "%.1f" % (100.0 * wait_ns / 1e9 / dt),
+               "%.0f" % (slices / dt)]
+        row += ["%s:%.0f" % (n, p) for p, n in tops[:3]]
+        return row + [""] * (len(LOAD_LOG_COLUMNS) - len(row))
+
+    def _loop(self):
+        was = self._snap()
+        was_t = time.monotonic()
+        while not self._stop.wait(1.0):
+            now = self._snap()
+            now_t = time.monotonic()
+            dt = now_t - was_t
+            if now is None or was is None or dt <= 0.0:
+                was, was_t = now, now_t
+                continue
+            try:
+                self.wr.writerow(self._row(self._t_row, dt, now, was))
+                self.fh.flush()
+            except Exception:
+                pass             # a log is not the mission
+            was, was_t = now, now_t
+
+    def close(self):
+        self._stop.set()
+        self._th.join(timeout=2.0)
+        try:
+            self.fh.close()
+        except Exception:
+            pass
 
 
 def csv_row(est, f, v, gN, gE, err):
@@ -3482,6 +3639,7 @@ def main():
     fwriter = None
     fh = None
     imu_fh = imu_wr = None
+    load_log = None
     if a.out:
         out_path = a.out
         if os.path.isdir(a.out) or a.out.endswith(os.sep):
@@ -3524,6 +3682,13 @@ def main():
             imu_wr.writerow(IMU_LOG_COLUMNS)
             print(f"camera IMU log: {imu_path}  (gyro rad/s and accel m/s2, "
                   f"camera frame, device timestamps)")
+
+        # Always on. The point of it is to exist for every flight without
+        # anyone remembering to ask for it, which is the reason five flights
+        # could be compared on frame_age but not on load.
+        load_log = LoadLog(out_path[:-4] + "_load.csv")
+        print(f"load log: {out_path[:-4]}_load.csv  (process CPU, threads, "
+              f"context switches and the busiest threads at 1 Hz)")
 
         if a.save_frames > 0:
             fwriter = FrameWriter(os.path.dirname(os.path.abspath(out_path)),
@@ -3897,6 +4062,8 @@ def main():
                 wr.writerow(csv_row(est, f, v, gN, gE, err))
             if imu_wr is not None:
                 imu_wr.writerows(imu_rows(f))
+            if load_log is not None:
+                load_log.mark(est["t"])
             # A row in the page cache is not a row on the disk. The battery
             # comes out of this aircraft by hand, and when it did on 20 Oct
             # the last block of two runs came back as NUL bytes.
@@ -3962,6 +4129,8 @@ def main():
             fh.close()
         if imu_fh is not None:
             imu_fh.close()
+        if load_log is not None:
+            load_log.close()
 
     dt = time.perf_counter() - t_start
     print(f"\n{n} frames in {dt:.1f} s = {n/max(dt,1e-9):.1f} Hz processed")
