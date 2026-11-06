@@ -906,7 +906,14 @@ class VpsConfig:
     # saving a frame changed the next samples' age by +0.008 s on 486 and
     # -0.002 s on 489, which is nothing. 489's VPS leg (t=106-349 of 522 s)
     # was flown entirely inside its unsettled period.
-    frame_age_max_s: float = 0.28
+    # 0.28 -> 0.12 BACK ON 6 NOV. The 0.28 was for the 5 Nov 10:57 flight,
+    # where frame_age ran p50 0.1028 and 42% of frames were over the 0.12
+    # limit. On 6 Nov the same measurement reads p50 0.0000 with 0.0% over
+    # 0.12, so 0.28 is buying nothing - and it was one of four changes made
+    # together, against the pilot's instruction of one at a time, so it is
+    # the first to go. If the 42% ever comes back, raise it again and nothing
+    # else with it.
+    frame_age_max_s: float = 0.12
     dual_flow: bool = True
     crop_left_px: int = 0
 
