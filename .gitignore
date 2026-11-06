@@ -37,3 +37,7 @@ chat_backup/
 
 # Status reports are the project record and belong in it; other PDFs do not.
 !DroneVPS_Status_*.pdf
+
+# 232 MB CUDA torch + 109 MB cuDSS, installed with pip --target on 6 Nov so the
+# system CPU-only torch stays untouched. Not source; never commit it.
+torch-cuda/
