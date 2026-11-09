@@ -435,11 +435,35 @@ class LiveSource:
         # take the newest" and "the newest is fresh" are different claims.
         self._frames_skipped = 0
         self._frame_age_s = 0.0
-        # Anchor for turning the camera's device clock into an age. Set on
-        # the first frame; only the DIFFERENCE is ever used, so the two
-        # clocks never have to agree about absolute time.
-        self._dev_t0 = None
-        self._dev_ts0 = None
+        # A ROLLING baseline for the two clocks, not a single anchor taken at
+        # the first frame. The old code anchored once and reported
+        #   max(0, (now - dev_t0) - (ts - dev_ts0))
+        # which is not this frame's age at all: it is everything that has
+        # accumulated between the Jetson's clock and the camera's since the
+        # node started, drift included, with the negative half clipped away.
+        #
+        # The 9 November mission is what it looks like when that is believed.
+        # frame_age climbed through the whole flight - 0.000, then a shelf at
+        # 0.11, back to 0.000, then 0.22, 0.26, 0.34, 0.46, 0.52 - and
+        # 26.49% of frames were thrown away for being "late". They were not.
+        # The CPU was LESS busy in those seconds, not more
+        # (corr -0.62 against rq_wait, -0.71 against cpu_pct; 257.5% in the
+        # late seconds against 364.1% in the clean ones), the camera's own
+        # cadence never moved, and the flow was untouched: tracks p50 413,
+        # under 30 on 0.01% of rows, and 4.61 m of position error in the
+        # 60-80 m band. A ramp that resets to zero is a clipped clock
+        # difference; a queue does not do that.
+        #
+        # So: keep the recent offsets and measure each frame against the
+        # LEAST delayed of them. The baseline follows the drift and the
+        # number left over is the only thing worth gating on - how much later
+        # this frame arrived than its neighbours did.
+        #
+        # 30 s: long enough that a burst lasting a few seconds is still
+        # measured against undelayed neighbours, short enough that the drift
+        # inside the window stays small.
+        self.OFF_WINDOW_S = 30.0
+        self._off_hist = collections.deque()
         self._partner_last = None
         # Non-blocking and shallow on purpose: a depth frame that is late is
         # dropped rather than delaying the mono frame the flow loop runs on.
@@ -573,13 +597,29 @@ class LiveSource:
         try:
             ts = fr.getTimestampDevice().total_seconds()
             now = time.monotonic()
-            if self._dev_t0 is None:
-                # First frame anchors the two clocks against each other. Only
-                # the difference is ever used, so they never have to agree
-                # about absolute time - and this frame's own age is unknown,
-                # which is honest: it reads 0.
-                self._dev_t0, self._dev_ts0 = now, ts
-            self._frame_age_s = max(0.0, (now - self._dev_t0) - (ts - self._dev_ts0))
+            # The offset between the two clocks at this instant. Its absolute
+            # value means nothing - they never agreed about zero - so only
+            # the spread within the window is read.
+            off = now - ts
+            self._off_hist.append((now, off))
+            cut = now - self.OFF_WINDOW_S
+            while self._off_hist and self._off_hist[0][0] < cut:
+                self._off_hist.popleft()
+            # The least delayed frame in the window is the baseline, and this
+            # frame's age is how far it sits above it. Drift moves the whole
+            # window together and cancels. What survives is a frame that
+            # genuinely arrived later than its neighbours did.
+            #
+            # The window is the limit of what this can see: a delay that
+            # outlasts it becomes the new baseline and reads zero again. That
+            # is on purpose. A permanently larger offset is indistinguishable
+            # from the clocks running at different rates, which is exactly
+            # the thing being removed, and nothing downstream should act on
+            # it. At the measured drift of about 1.2 ms/s it also means the
+            # floor under this number is some 36 ms across a 30 s window -
+            # well under any threshold worth gating on.
+            self._frame_age_s = max(0.0, off - min(o for _, o in
+                                                   self._off_hist))
         except Exception:
             self._frame_age_s = 0.0
         # tryGet, never get: the mono frame is what the flow loop is waiting on,
