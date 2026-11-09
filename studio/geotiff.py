@@ -255,6 +255,12 @@ class Sheet:
             out.append(dict(level="warn", text=(
                 f"Source samples are {self.dtype}, not 8-bit. The cut will be "
                 f"written as 8-bit; check the preview before flying it.")))
+        if self.bands not in (1, 3):
+            out.append(dict(level="warn", text=(
+                f"Source has {self.bands} bands. MapCache reads 1 or 3, so "
+                f"this sheet CANNOT BE FLOWN as it is - cut from it first. "
+                f"This was missing from the list on 6 Nov, which is why a "
+                f"4-band sheet looked merely odd instead of unusable.")))
         return out
 
 

@@ -540,8 +540,10 @@ const Map1 = {
         headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       this.showCheck(r);
       await this.loadActive();
-      status(r.ok ? 'chosen - active.tif now points at it'
-                  : 'chosen, but it will NOT work - see the checks');
+      status(!r.activated
+               ? 'REFUSED - active.tif is unchanged, see the failed checks'
+               : (r.ok ? 'chosen - active.tif now points at it'
+                       : 'forced - active.tif points at it, but it will NOT work'));
     } catch (e) { status('load: ' + e.message); }
     $('#btn-activate').disabled = false;
   },

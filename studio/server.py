@@ -254,10 +254,23 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/cut":
                 return self._send(self._cut(body))
             if u.path == "/api/activate":
-                path = flightsheet.set_active(safe(body["path"]))
+                # Check FIRST, move the symlink only if it passed. It used to
+                # be the other way round: set_active() has no condition in it,
+                # so active.tif was repointed and the UI then said "chosen,
+                # but it will NOT work". On 6 Nov that left active.tif on a
+                # 4-band Int16 sheet at 0.05 m/px that MapCache cannot even
+                # open - the node would have died at startup on the next
+                # restart. `ok` tracks the HARD checks only, so a soft note
+                # like "resolution unlike the sheet flown so far" still loads.
+                want = safe(body["path"])
                 takeoff = ((float(body["lon"]), float(body["lat"]))
                            if body.get("lat") and body.get("lon") else None)
-                out = flightsheet.load_check(path, takeoff=takeoff)
+                out = flightsheet.load_check(want, takeoff=takeoff)
+                if out.get("ok") or body.get("force"):
+                    out["path"] = flightsheet.set_active(want)
+                    out["activated"] = True
+                else:
+                    out["activated"] = False
                 out["active"] = flightsheet.active()
                 return self._send(out)
             if u.path == "/api/deactivate":
