@@ -553,11 +553,62 @@ class FlowTracker:
             self.prev = img
             return None, self.n_seed
 
-        p1, st, _ = cv2.calcOpticalFlowPyrLK(self.prev, img, self.pts, None,
-                                             winSize=(31, 31), maxLevel=4)
+        # TELL LK WHERE THE ROTATION HAS ALREADY PUT THE POINTS.
+        #
+        # Without a guess LK starts every point where it was last frame, i.e.
+        # it assumes nothing moved. That is fine while the aircraft is
+        # translating - the 10 Nov mission ran at 1.45 m/s p50 and the
+        # frame-to-frame shift was 1-7 px - but it is wrong the moment the
+        # airframe rotates, and rotation moves EVERY pixel at once:
+        # 1 degree is 14 px at this focal length, at any altitude.
+        #
+        # That flight measured what it costs. Binned by the shift LK ended up
+        # measuring:
+        #
+        #     step_px      n     tracks p50   tracks p10   gyro roll p50
+        #       0-  5    6892       423          373          0.1804
+        #       5- 10    1751       398          346          0.3156
+        #      10- 20     379       345          265          0.7754
+        #      20-100      75       243          143          4.1293
+        #
+        # corr(step_px, tracks) = -0.43, and the six rows that fell under 60
+        # tracks had a median step of 20.5 px against 3.0 for everything else
+        # and 1.400 deg of yaw change per frame against 0.000. The three
+        # airborne TRACK LOSTs of that flight were all of them, at 110 m,
+        # with frame_age of 0.006, 0.015 and 0.061 - the frames were fresh,
+        # the features were there, and the tracker simply could not find
+        # them again after the aircraft turned toward the next waypoint.
+        #
+        # So the gyro's own prediction seeds the search. The guess only moves
+        # where LK starts looking; the displacement it then measures still
+        # carries the rotation, and the per-track derotation below still has
+        # to remove it. Nothing is corrected twice.
+        guess = None
+        if derot_deg is not None:
+            _gr, _gp = derot_deg
+            if (_gr is not None and _gp is not None
+                    and np.isfinite(_gr) and np.isfinite(_gp)):
+                _gc = (self.centre if self.centre is not None
+                       else np.array([img.shape[1] / 2.0, img.shape[0] / 2.0]))
+                _gs = gyro_shift_px_at(self.pts.reshape(-1, 2), _gr, _gp,
+                                       centre_xy=_gc, focal_px=self.focal)
+                if np.isfinite(_gs).all():
+                    guess = (self.pts.reshape(-1, 2) + _gs
+                             ).reshape(-1, 1, 2).astype(np.float32)
+        if guess is None:
+            p1, st, _ = cv2.calcOpticalFlowPyrLK(self.prev, img, self.pts, None,
+                                                 winSize=(31, 31), maxLevel=4)
+        else:
+            p1, st, _ = cv2.calcOpticalFlowPyrLK(
+                self.prev, img, self.pts, guess, winSize=(31, 31), maxLevel=4,
+                flags=cv2.OPTFLOW_USE_INITIAL_FLOW)
         if p1 is None:
             self._detect(img); self.prev = img
             return None, 0
+        # The backward pass is NOT seeded. Seeding it with self.pts would hand
+        # it the very answer it exists to check, and the 1.0 px agreement test
+        # is the only thing standing between a wrong initial guess and a track
+        # that looks good while sitting on the wrong feature.
         p0r, st2, _ = cv2.calcOpticalFlowPyrLK(img, self.prev, p1, None,
                                                winSize=(31, 31), maxLevel=4)
         good = (st.ravel() == 1) & (st2.ravel() == 1) & \
