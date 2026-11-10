@@ -926,7 +926,13 @@ class VpsConfig:
     # plateau is a queue that filled and stayed, not a clock that drifted.
     # Until that queue is found, this limit is the difference between
     # dead-reckoning quietly and shouting TRACK LOST at the pilot.
-    frame_age_max_s: float = 0.28
+    # 0.28 -> 0.12 on 10 Nov, now that the number means something. The
+    # 9 Nov mission read p50 0.1408 and put 26.49% of frames over 0.28 while
+    # nothing was wrong; with the rolling baseline the 10 Nov mission read
+    # p50 0.0170, p90 0.0534, p99 0.2743 and only 0.36% over 0.28. A limit
+    # the honest measure almost never reaches is not a limit, so it comes
+    # back down to where it was first set, where it can catch a real one.
+    frame_age_max_s: float = 0.12
     dual_flow: bool = True
     crop_left_px: int = 0
 
