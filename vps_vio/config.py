@@ -185,8 +185,35 @@ class VpsConfig:
     # a flow that moves the estimate at roughly 1.0-1.5 m/s. That is not
     # enough to win, which is the point of going to 1.0 rather than 2.0: it
     # is one measurable step, and map_fuse's 3-sigma gate at about 60 m still
-    # rejects anything wild. UNFLOWN.
-    map_max_correction_m: float = 1.0
+    # rejects anything wild.
+    #
+    # 1.0 -> 1.7 on 11 November, and this is the number that was holding the
+    # error. Flight 521 measured every part of it:
+    #
+    #   fix's own error   xfeat  n=113  p50 3.29 m   xfeat_lg n=18  p50 2.88
+    #   our own error                   p50 10.61 m
+    #   effect of one fix               +0.06 m
+    #   fixes that helped               76 of 157 - a coin toss
+    #
+    # The matcher was right and was not being listened to. The bias is not
+    # shared either: our error ran dN +0.55 / dE -7.48 (7.50 m, nearly all
+    # east-west) while the fixes sat at dN -0.49 / dE -1.18 (1.28 m), so this
+    # is not a map or yaw offset that correcting cannot reach.
+    #
+    # The cap is what bound it, and the old note that "the gain binds first"
+    # no longer holds at these settings: sigma_m ran p50 5.000 m, so
+    # var = 25.0 and gain = 25/(25+25) = 0.50, which on a 10 m error asks for
+    # 5.0 m and gets 1.0. One metre every 2.03 s is 0.49 m/s of correction
+    # against a westward drift of about the same, so the error sat in
+    # EQUILIBRIUM at 7.5 m - neither growing nor closing.
+    #
+    # 1.7 makes it 0.84 m/s, which wins by 1.7x rather than overwhelming:
+    # 3.0 was the arithmetic answer and the pilot's instruction was to step,
+    # not jump, because a jump cannot tell you whether 2.9 would have been
+    # better than 3.0. A bad fix now costs 1.7 m instead of 1.0, and the only
+    # inaccurate source in that flight was NCC - p50 14.36 m against XFeat's
+    # 3.29 - at 13 fixes of 144, trusted below 80 m only. UNFLOWN.
+    map_max_correction_m: float = 1.7
     # OVER HOW LONG A FIX'S CORRECTION IS APPLIED, seconds. 0 is the old
     # one-sample step. Set to the fix period, so a correction finishes
     # arriving just as the next fix is computed.
