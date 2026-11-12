@@ -2274,6 +2274,27 @@ class VpsNode:
     # is 60 and why a VPS hold at 40 m is dead reckoning with no absolute
     # reference at all. This gate catches glitches, not noise.
     STEP_MAX_PX = 50.0
+    # A SPEED CEILING WAS TRIED HERE ON 12 NOVEMBER AND MEASURED HARMFUL.
+    # The reasoning was sound - 50 px is 6.9 m per frame at 110 m, which at
+    # 24 Hz is 166 m/s, and a real 3 m/s is 0.9 px - so a min() against
+    # 12.0 m/s was added to bound it. Replayed over the recorded steps of
+    # three flights before flying it:
+    #
+    #     flight        clipped    DR drift p50 old -> new
+    #     531 (12 Nov)    25.5%      28.22 -> 69.75 m
+    #     526 (12 Nov)    27.4%      24.82 -> 56.82 m
+    #     521 (11 Nov)    26.0%      45.98 -> 81.73 m
+    #
+    # Two to three times WORSE, consistently. A quarter of all steps exceed
+    # 12 m/s implied, and they are not noise alone: a step is real motion
+    # PLUS noise, so the largest steps are the ones where the aircraft was
+    # actually moving. Clipping them throws away real displacement in the
+    # direction of travel, the estimate lags, and the drift grows. The pixel
+    # ceiling is loose at altitude but it is loose SYMMETRICALLY; a speed cap
+    # is not.
+    #
+    # The position's drift at altitude is still unsolved. It is not solved by
+    # bounding the step.
     STEP_ESCAPE_N = 5
 
     def __init__(self, cache: MapCache, focal_px: float, *,
@@ -2725,6 +2746,7 @@ class VpsNode:
         # motion has never been checked.
         self.step_px = mag * self.focal / altitude_m
         # The ceiling in metres for THIS frame: pixels x metres-per-pixel.
+        #
         ceiling = self.STEP_MAX_PX * (altitude_m / self.focal)
         if mag <= ceiling:
             self._step_refusals = 0

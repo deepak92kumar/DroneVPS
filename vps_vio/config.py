@@ -226,7 +226,7 @@ class VpsConfig:
     # -> 8.61 m, the effect of one fix +0.055 -> -0.080 m, and fixes that
     # reduced the error 48% -> 52%. Small, in the right direction, no harm
     # found. It should come back once the velocity ceiling has flown.
-    map_max_correction_m: float = 1.0
+    map_max_correction_m: float = 1.7
     # OVER HOW LONG A FIX'S CORRECTION IS APPLIED, seconds. 0 is the old
     # one-sample step. Set to the fix period, so a correction finishes
     # arriving just as the next fix is computed.
