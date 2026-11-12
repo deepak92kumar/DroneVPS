@@ -213,7 +213,20 @@ class VpsConfig:
     # better than 3.0. A bad fix now costs 1.7 m instead of 1.0, and the only
     # inaccurate source in that flight was NCC - p50 14.36 m against XFeat's
     # 3.29 - at 13 fixes of 144, trusted below 80 m only. UNFLOWN.
-    map_max_correction_m: float = 1.7
+    # 1.7 -> 1.0 ON 12 NOVEMBER, at the pilot's instruction, after the
+    # flight that nearly landed in a tree. It did not cause that: the
+    # aircraft lost 36 m in 1.8 seconds and this cap bounds a map fix to
+    # 1.7 m, so it cannot produce a slide of that size. The cause was a
+    # flow velocity of 20 to 28.8 m/s accepted and held - see
+    # velocity_bridge.max_speed_mps.
+    #
+    # It is reverted anyway because two things changed at once would make
+    # the next flight unreadable, and this is the one with less evidence
+    # behind it. What 1.7 did buy, over 11 November's 1.0: error p50 10.61
+    # -> 8.61 m, the effect of one fix +0.055 -> -0.080 m, and fixes that
+    # reduced the error 48% -> 52%. Small, in the right direction, no harm
+    # found. It should come back once the velocity ceiling has flown.
+    map_max_correction_m: float = 1.0
     # OVER HOW LONG A FIX'S CORRECTION IS APPLIED, seconds. 0 is the old
     # one-sample step. Set to the fix period, so a correction finishes
     # arriving just as the next fix is computed.

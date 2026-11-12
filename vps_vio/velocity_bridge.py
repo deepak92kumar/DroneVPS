@@ -194,7 +194,44 @@ class VelocityBridge:
                  bias_tau_s: float = 20.0,
                  bias_adapt_below_mps: float = 0.25,
                  bias_adapt_after_s: float = 2.0,
-                 max_speed_mps: float = 30.0):
+                 # 30.0 -> 12.0 ON 12 NOVEMBER, after a flight that nearly
+                 # put the aircraft into a tree. This ceiling already existed
+                 # and already said the right thing in its docstring - "not a
+                 # fast aircraft, a tracking collapse" - it was simply set
+                 # where nothing real could ever reach it.
+                 #
+                 # Descending through 76 m the airframe went into a 0.8 Hz
+                 # oscillation, rolling +15.05 / -12.10 / +15.05 degrees
+                 # against a commanded 9, which is 6 to 9 degrees of rotation
+                 # PER FRAME. The tracker fell from 430 tracks to 74 and the
+                 # flow reported 20.0 and then 28.8 m/s westward. Both are
+                 # under 30, so both were accepted. Each was then held for
+                 # about 0.7 s while fresh samples were missing, and the
+                 # estimate slid 36 m west in 1.8 seconds. The flight
+                 # controller was flying ON that estimate, so it moved the
+                 # real aircraft 39 m EAST to correct - the M9N records
+                 # exactly that, 8.3 m to 47.6 m east at 4.3 m/s - and the
+                 # pilot took ALT_HOLD at 23 m.
+                 #
+                 # Nothing else caught it. Tracks were 74, and TRACK LOST
+                 # fires under 30, so the aircraft believed it was healthy.
+                 # The jump gate did not catch it either: its allowance is
+                 # 3 sigma of flow noise, 3 x 0.0867 x altitude, which at
+                 # 76 m is 19.8 m/s - looser than the artefact it was meant
+                 # to stop. That gate is altitude-scaled on purpose and this
+                 # ceiling deliberately is not: no altitude makes 28 m/s a
+                 # real velocity for this aircraft.
+                 #
+                 # 12.0 is twice max_sent_mps and twice the fastest ground
+                 # speed the M9N has ever recorded on this airframe (5.87
+                 # m/s), so it cannot touch real flight. It is a step, not
+                 # the tightest defensible number: the mission flies at 3-4
+                 # m/s and 8.0 would also have been safe, but a first step
+                 # that only removes the impossible is the one that can be
+                 # judged from a single flight. In the four flights to hand
+                 # it would have refused 1.8 to 5.4 per cent of flow samples,
+                 # every one of them over 10 m/s.
+                 max_speed_mps: float = 12.0):
         self.tau_s = float(tau_s)
         self.flow_timeout_s = float(flow_timeout_s)
         self.deadband_base_mps = float(deadband_base_mps)
