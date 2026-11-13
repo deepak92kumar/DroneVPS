@@ -360,12 +360,15 @@ const Map1 = {
     $('#btn-activate').onclick = () => this.activate(this.sheet && this.sheet.path);
     $('#btn-check').onclick = () => this.check(this.sheet && this.sheet.path);
     $('#btn-deactivate').onclick = () => this.deactivate();
+    $('#btn-noderestart').onclick = () => this.nodeRestart();
+    $('#btn-noderefresh').onclick = () => this.loadNode();
     $('#btn-ovr').onclick = () => this.overviews();
     for (const id of ['#c-lat', '#c-lon', '#c-w', '#c-h'])
       $(id).addEventListener('input', () => this.centreChanged());
     this.setMode('box');
     await this.loadSheets();
     await this.loadActive();
+    await this.loadNode();
   },
   async loadSheets(keep) {
     try {
@@ -540,6 +543,7 @@ const Map1 = {
         headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       this.showCheck(r);
       await this.loadActive();
+      await this.loadNode();
       status(!r.activated
                ? 'REFUSED - active.tif is unchanged, see the failed checks'
                : (r.ok ? 'chosen - active.tif now points at it'
@@ -559,6 +563,92 @@ const Map1 = {
       status('ready');
     } catch (e) { status('check: ' + e.message); }
     $('#btn-check').disabled = false;
+  },
+  // The node and the symlink are two different facts. Showing only the
+  // symlink is what let a node fly an hour on a map nobody had chosen.
+  async loadNode() {
+    const b = $('#node-body');
+    try {
+      const r = await api('/api/nodestate');
+      this.node = r;
+      this.showNode(r);
+    } catch (e) {
+      b.innerHTML = '';
+      b.appendChild(el('div', 'banner alarm', 'cannot read the node: ' + e.message));
+    }
+  },
+  showNode(r) {
+    const b = $('#node-body');
+    b.innerHTML = '';
+    const st = r.state || {};
+    const sh = (this.active && this.active.sheet) || null;
+    const want = sh ? sh.width + 'x' + sh.height : null;
+    const stale = want && st.map_px && want !== st.map_px;
+    let cls = 'ok', msg;
+    if (!r.active) { cls = 'alarm'; msg = 'the node is NOT running'; }
+    else if (!st.map_px) { cls = 'alarm'; msg = 'the node is running but has printed no map'; }
+    else if (st.no_origin) { cls = 'alarm'; msg = 'NO ORIGIN - the node publishes nothing. Power the FC, then restart.'; }
+    else if (stale) { cls = 'alarm'; msg = 'the node is flying ' + st.map_px + ', not the sheet you chose - RESTART'; }
+    else if (st.covered === false) { cls = 'alarm'; msg = 'the sheet does not cover the origin - there will be no map fixes'; }
+    else if (!st.origin) { cls = 'alarm'; msg = 'waiting for an origin'; }
+    else msg = 'ready to fly';
+    b.appendChild(el('div', 'banner ' + cls, msg));
+    const rows = [
+      ['service', r.active ? 'running' : 'stopped'],
+      ['camera', r.camera ? 'plugged in' : 'NOT found on USB'],
+      ['map in the node', st.map_px || '-'],
+      ['run folder', st.run || '-'],
+      ['origin', st.origin
+         ? st.origin[1].toFixed(6) + ', ' + st.origin[0].toFixed(6)
+           + ' (' + (st.origin_from || '?') + ')'
+         : (st.no_origin ? 'none' : '-')],
+      ['sheet covers it', st.covered === null || st.covered === undefined
+         ? '-' : (st.covered ? 'YES' : 'NO')],
+    ];
+    const t = el('table', 'kv');
+    for (const [k, v] of rows) {
+      const tr = t.insertRow();
+      tr.insertCell().textContent = k;
+      tr.insertCell().textContent = String(v);
+    }
+    b.appendChild(t);
+  },
+  async nodeRestart() {
+    // Stopping the node in the air would take the aircraft's position away
+    // mid-flight. The browser cannot know whether it is armed, so the pilot
+    // is asked - once, plainly.
+    if (!confirm('Stop and start the DroneVPS node?\n\n'
+               + 'Do this only on the ground. The flight controller should '
+               + 'already be powered: the origin is read from it once, at '
+               + 'startup.')) return;
+    const btn = $('#btn-noderestart');
+    btn.disabled = true;
+    const was = btn.textContent;
+    btn.textContent = 'restarting...';
+    status('stopping the node, waiting for the camera, starting again - up to 85 s');
+    try {
+      const r = await api('/api/noderestart', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      const b = $('#node-body');
+      b.innerHTML = '';
+      b.appendChild(el('div', 'banner ' + (r.flyable ? 'ok' : 'alarm'), r.verdict));
+      for (const st of (r.steps || [])) {
+        const n = el('div', 'check ' + (st.ok ? 'pass' : 'fail'));
+        n.appendChild(el('span', 'm', st.ok ? 'PASS' : 'FAIL'));
+        const d = el('div');
+        d.appendChild(el('b', null, st.name));
+        d.appendChild(el('em', null, st.detail));
+        n.appendChild(d);
+        b.appendChild(n);
+      }
+      b.appendChild(el('p', 'hint', 'took ' + r.seconds + ' s'));
+      this.node = r;
+      if (r.state && r.state.map_px) this.showNode({
+        active: true, camera: true, state: r.state });
+      status(r.verdict);
+    } catch (e) { status('restart: ' + e.message); }
+    btn.textContent = was;
+    btn.disabled = false;
   },
   async deactivate() {
     try {

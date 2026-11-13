@@ -50,6 +50,20 @@
         in <code>vps_vio</code> is modified. "Check" opens the sheet with the
         node's own <code>MapCache</code> and takes a matcher window out of it:
         if that works here it works in the air.</p>
+
+      <h3 style="margin-top:18px">What the node is actually flying</h3>
+      <div id="node-body"></div>
+      <div class="row" style="margin-top:10px">
+        <button class="b" id="btn-noderestart">Restart the node</button>
+        <button class="b ghost" id="btn-noderefresh">Re-read</button>
+      </div>
+      <p class="hint">The node opens the map once, at startup. Until it is
+        restarted it keeps flying whatever <code>active.tif</code> pointed at
+        when it started, however many times you press "Use" &mdash; so choose
+        the sheet, then restart, then read the three lines back.
+        Power the flight controller <em>before</em> restarting: the origin is
+        read from it once and never again, and a node with no origin publishes
+        nothing.</p>
     </section>
 
     <section class="card">

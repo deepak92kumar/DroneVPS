@@ -34,6 +34,7 @@ import analysis                                            # noqa: E402
 import flightsheet                                         # noqa: E402
 import geotiff                                             # noqa: E402
 import logs                                                # noqa: E402
+import node_ctl                                            # noqa: E402
 import plots                                               # noqa: E402
 import report                                              # noqa: E402
 
@@ -199,6 +200,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(geotiff.verify(safe(q["path"]), takeoff=takeoff))
             if u.path == "/api/active":
                 return self._send(flightsheet.active())
+            if u.path == "/api/nodestate":
+                # What the NODE has, not what the symlink says. The two
+                # disagree until it is restarted, and that gap is the whole
+                # reason this exists.
+                return self._send(node_ctl.state())
             if u.path == "/api/loadcheck":
                 takeoff = ((float(q["lon"]), float(q["lat"]))
                            if q.get("lat") and q.get("lon") else None)
@@ -283,6 +289,12 @@ class Handler(BaseHTTPRequestHandler):
                     out["activated"] = False
                 out["active"] = flightsheet.active()
                 return self._send(out)
+            if u.path == "/api/noderestart":
+                # Blocking, and bounded: stop + camera + settle is at most
+                # ~85 s and the handler is threaded, so the rest of the page
+                # keeps working. Returning early and polling would mean a
+                # second piece of state to get wrong.
+                return self._send(node_ctl.restart())
             if u.path == "/api/deactivate":
                 flightsheet.clear_active()
                 return self._send(flightsheet.active())
