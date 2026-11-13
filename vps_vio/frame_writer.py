@@ -276,4 +276,55 @@ def next_run_number(out_dir: str) -> int:
             n = max(n, int(stem[4:]))
         except ValueError:
             pass
+    if n and _never_flew(out_dir, n):
+        # REUSE IT. Every service restart used to open a new run, so a single
+        # morning left three or four folders and the pilot had to guess which
+        # one held the flight - 534 runs existed by 13 November and 123 of
+        # them had left the ground. A run that never reached 5 m and saved no
+        # frames holds nothing worth keeping, so the next start writes over
+        # it instead of taking a new number.
+        #
+        # A run that DID fly is never reused, which is the case that matters:
+        # if the node restarts in the air, that flight's rows stay where they
+        # are and the restart opens a fresh run beside them.
+        return n
     return n + 1
+
+
+def _never_flew(out_dir: str, n: int) -> bool:
+    """True if run n reached under 5 m and saved no frames.
+
+    Reads only the altitude column, and only of the newest run, so this costs
+    one pass over one file at startup. Any doubt - unreadable, missing
+    column, an exception of any kind - answers False, because the cost of
+    being wrong is overwriting a flight.
+    """
+    stem = "vps_%05d" % n
+    folder = os.path.join(out_dir, stem)
+    csv_path = os.path.join(folder, stem + ".csv")
+    if not os.path.exists(csv_path):
+        csv_path = os.path.join(out_dir, stem + ".csv")
+    if not os.path.exists(csv_path):
+        return False
+    try:
+        if os.path.isdir(folder):
+            for f in os.listdir(folder):
+                if f.endswith((".jpg", ".png")):
+                    return False
+        import csv as _csv
+        with open(csv_path, newline="") as fh:
+            rd = _csv.reader(fh)
+            head = next(rd, None)
+            if not head or "alt_m" not in head:
+                return False
+            i = head.index("alt_m")
+            for row in rd:
+                if len(row) > i and row[i]:
+                    try:
+                        if float(row[i]) >= 5.0:
+                            return False
+                    except ValueError:
+                        pass
+        return True
+    except Exception:
+        return False

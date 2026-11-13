@@ -74,6 +74,9 @@ _flights = {}
 _flights_lock = threading.Lock()
 
 
+_ROOTS = [ROOT, os.path.abspath(os.path.expanduser("~/Downloads"))]
+
+
 def safe(path: str) -> str:
     """An absolute path inside /data/DRONE, or an error.
 
@@ -81,9 +84,16 @@ def safe(path: str) -> str:
     write - goes through here. The page is served to a field network.
     """
     p = os.path.abspath(os.path.expanduser(path))
-    if not (p == ROOT or p.startswith(ROOT + os.sep)):
-        raise PermissionError(f"{path} is outside {ROOT}")
-    return p
+    # Two roots, not one. The analyser deliberately lists .BIN files from the
+    # download folder as well, because that is where they land coming off the
+    # aircraft - so refusing to OPEN them made the list a tease: every recent
+    # log appeared and every one raised "is outside /data/DRONE" on review.
+    # Nothing else is added: these are the only two directories the page may
+    # reach, and it is still served to a field network.
+    for root in _ROOTS:
+        if p == root or p.startswith(root + os.sep):
+            return p
+    raise PermissionError(f"{path} is outside {' and '.join(_ROOTS)}")
 
 
 def sheet(path: str) -> geotiff.Sheet:
