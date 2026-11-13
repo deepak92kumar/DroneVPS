@@ -692,8 +692,24 @@ const Log = {
       this.fill('#fc-list', d.fc, r => {
         this.fc = r.path; this.suggest = r.suggest;
       }, r => [r.name, r.when, `${r.mb.toFixed(0)} MB${r.cached ? ' *' : ''}`]);
-      this.fill('#node-list', d.node, r => { this.node = r.csv; },
-        r => [r.id, r.when, `${r.mb.toFixed(1)} MB${r.frames ? ` ${r.frames} img` : ''}`]);
+      // Only the runs that actually left the ground, newest first. Every
+      // service restart opens a new run folder, so 534 of them exist and
+      // 123 flew; listing all of them made the picker useless and made one
+      // flight that restarted the node look like two or three.
+      const flew = d.node.filter(r => r.flew);
+      this.allNode = d.node;
+      this.fill('#node-list', flew, r => { this.node = r.csv; },
+        r => [r.id, `${r.when}  ${r.alt_max ? r.alt_max.toFixed(0) + ' m' : ''}`,
+              `${r.mb.toFixed(1)} MB${r.frames ? ` ${r.frames} img` : ''}`]);
+      const nl = $('#node-list');
+      const more = el('div', 'hint',
+        `${flew.length} udi hui runs dikh rahi hai, ${d.node.length - flew.length} ` +
+        `zameen par rahi — sab dekhne ke liye click`);
+      more.style.cursor = 'pointer';
+      more.onclick = () => this.fill('#node-list', d.node, r => { this.node = r.csv; },
+        r => [r.id, `${r.when}  ${r.alt_max ? r.alt_max.toFixed(0) + ' m' : '-'}`,
+              `${r.mb.toFixed(1)} MB${r.frames ? ` ${r.frames} img` : ''}`]);
+      nl.appendChild(more);
     } catch (e) { status('logs: ' + e.message); }
   },
   fill(sel, rows, pick, cols) {

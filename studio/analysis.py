@@ -130,6 +130,17 @@ def load(fc_path=None, node_csv=None):
         arrays, meta = logs.read_bin(fc_path)
         b["fc"] = dict(path=fc_path, name=os.path.basename(fc_path),
                        arrays=arrays, meta=meta)
+    if node_csv and os.path.isdir(node_csv):
+        # The picker hands back the run's FOLDER, because that is what holds
+        # the frames; read_csv wants the file. Until 13 November this raised
+        # IsADirectoryError and every analysis involving a node log failed -
+        # the FC-only path worked, which is why the tab looked half alive.
+        import glob as _g
+        _c = sorted(_g.glob(os.path.join(node_csv, "vps_*.csv")))
+        _c = [x for x in _c if not x.endswith(("_imu.csv", "_load.csv"))]
+        if not _c:
+            raise FileNotFoundError("no vps_*.csv in %s" % node_csv)
+        node_csv = _c[0]
     if node_csv:
         c = logs.read_csv(node_csv)
         b["node"] = dict(path=node_csv, name=os.path.basename(os.path.dirname(node_csv))

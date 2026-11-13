@@ -41,6 +41,10 @@ import numpy as np
 ROOT = "/data/DRONE"
 BIN_DIR = os.path.join(ROOT, "flight_logs")
 VPS_DIR = os.path.join(ROOT, "flight_logs", "vps")
+# Where logs actually arrive from the aircraft. They are pulled off the SD
+# card to the browser's download folder and left there, so the analyser looks
+# in both places rather than asking the pilot to move and rename every file.
+EXTRA_BIN_DIR = os.path.expanduser("~/Downloads")
 CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
 
 # What is pulled out of a .BIN, and nothing else. Reading every field of every
@@ -133,12 +137,90 @@ def _stamp(path):
     return f"{st.st_size}-{int(st.st_mtime)}"
 
 
+_ALT_CACHE = os.path.join(VPS_DIR, ".alt_max.json")
+_alt_mem = None
+
+
+def _alt_max(csv_path, st):
+    """The highest alt_m in a run, cached by (size, mtime).
+
+    The picker listed 534 node runs with nothing to tell them apart, and the
+    great majority never left the ground - every service restart opens a new
+    one. A pilot looking for "the flight I just did" had to guess, and a
+    single flight that restarted the node mid-session looks like two or three
+    runs. This is what separates them: a run that reached 5 m flew.
+
+    Reading 534 CSVs on every page load would be absurd, so the answer is
+    cached beside them and only recomputed when a file's size or mtime moves.
+    Only the altitude column is parsed, and only for files big enough to hold
+    a flight.
+    """
+    global _alt_mem
+    if _alt_mem is None:
+        try:
+            with open(_ALT_CACHE) as fh:
+                _alt_mem = json.load(fh)
+        except Exception:
+            _alt_mem = {}
+    key = csv_path
+    stamp = "%d:%d" % (st.st_size, int(st.st_mtime))
+    hit = _alt_mem.get(key)
+    if isinstance(hit, list) and len(hit) == 2 and hit[0] == stamp:
+        return hit[1]
+    val = None
+    if st.st_size > 20000:
+        try:
+            import csv as _csv
+            with open(csv_path, newline="") as fh:
+                rd = _csv.reader(fh)
+                head = next(rd, None)
+                if head and "alt_m" in head:
+                    i = head.index("alt_m")
+                    m = None
+                    for row in rd:
+                        if len(row) > i and row[i]:
+                            try:
+                                v = float(row[i])
+                            except ValueError:
+                                continue
+                            if m is None or v > m:
+                                m = v
+                    val = m
+        except Exception:
+            val = None
+    _alt_mem[key] = [stamp, val]
+    try:
+        tmp = _ALT_CACHE + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(_alt_mem, fh)
+        os.replace(tmp, _ALT_CACHE)
+    except Exception:
+        pass
+    return val
+
+
 def discover():
     """Every FC log and every node log on this machine, newest first."""
     fc = []
-    for p in sorted(glob.glob(os.path.join(BIN_DIR, "*.BIN"))):
+    # Both cases, and the Downloads folder as well as flight_logs. The glob
+    # was "*.BIN" alone, so every log pulled off the aircraft as "2026-11-13
+    # 09-39-39.bin" - lower case, spaces, saved to ~/Downloads - was
+    # invisible to the analyser, which is why it could not open any recent
+    # flight. A set keeps a file found twice from being listed twice.
+    _seen_fc = set()
+    _cand = []
+    for _d in (BIN_DIR, EXTRA_BIN_DIR):
+        if not _d or not os.path.isdir(_d):
+            continue
+        for _pat in ("*.BIN", "*.bin"):
+            _cand += glob.glob(os.path.join(_d, _pat))
+    for p in sorted(set(_cand), key=lambda q: os.stat(q).st_mtime, reverse=True):
+        rp = os.path.realpath(p)
+        if rp in _seen_fc:
+            continue
+        _seen_fc.add(rp)
         st = os.stat(p)
-        fc.append(dict(kind="fc", id=os.path.basename(p)[:-4], path=p,
+        fc.append(dict(kind="fc", id=os.path.splitext(os.path.basename(p))[0], path=p,
                        name=os.path.basename(p), mb=st.st_size / 1e6,
                        mtime=st.st_mtime,
                        when=time.strftime("%d %b %H:%M", time.localtime(st.st_mtime)),
@@ -149,14 +231,16 @@ def discover():
         if not os.path.isdir(d):
             continue
         csvs = sorted(glob.glob(os.path.join(d, "vps_*.csv")))
-        csvs = [c for c in csvs if not c.endswith("_imu.csv")]
+        csvs = [c for c in csvs if not c.endswith(("_imu.csv", "_load.csv"))]
         if not csvs:
             continue
         st = os.stat(csvs[0])
         seen.add(os.path.basename(d))
+        am = _alt_max(csvs[0], st)
         node.append(dict(kind="node", id=os.path.basename(d), path=d,
                          csv=csvs[0], name=os.path.basename(d),
                          mb=st.st_size / 1e6, mtime=st.st_mtime,
+                         alt_max=am, flew=(am is not None and am > 5.0),
                          when=time.strftime("%d %b %H:%M", time.localtime(st.st_mtime)),
                          frames=len(glob.glob(os.path.join(d, "*.jpg")))
                          + len(glob.glob(os.path.join(d, "mono", "*.png")))))
@@ -168,8 +252,10 @@ def discover():
         if stem in seen:
             continue
         st = os.stat(p)
+        am = _alt_max(p, st)
         node.append(dict(kind="node", id=stem, path=os.path.dirname(p), csv=p,
                          name=stem, mb=st.st_size / 1e6, mtime=st.st_mtime,
+                         alt_max=am, flew=(am is not None and am > 5.0),
                          when=time.strftime("%d %b %H:%M", time.localtime(st.st_mtime)),
                          frames=0))
     fc.sort(key=lambda r: -r["mtime"])
