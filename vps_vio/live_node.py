@@ -1010,7 +1010,12 @@ class GpsInputSender:
     # height, and the fix for that is a longer measurement baseline, not a
     # number here.
     VEL_ACC_FLOOR = 0.6
-    # 0.048 -> 0.025 ON 13 NOVEMBER. The number above was fitted to the raw
+    # 0.025 WAS MEASURED AND IS NOT FLOWN. Set on 13 November and reverted
+    # the same day, before any flight, because a demo was the next day and an
+    # unflown change to what the EKF is told is not a demo-day risk. The
+    # measurement stands and is kept here so it does not have to be redone.
+    #
+    # The number in force below was fitted to the raw
     # flow; this one is fitted to what actually LEAVES the bridge, which is
     # what the EKF is being told about. Measured on 37600 samples across the
     # four flights of 11-13 November, the sent velocity against the M9N's own
@@ -1040,10 +1045,16 @@ class GpsInputSender:
     # 1.3 m/s at 110 m where the truth is 2.72, and that is a lie of the kind
     # that cost us on 20 October.
     #
-    # The risk, unflown: the EKF now trusts this velocity more, so a bad
-    # sample carries further. EK3_SRC1_VELXY is 0 so it is not fused, but the
-    # glitch check and the innovation gates read it.
-    VEL_ACC_PER_M = 0.025
+    # The risk, and the reason it waits for a quiet day: the EKF would trust
+    # this velocity more, so a bad sample carries further. EK3_SRC1_VELXY is
+    # 0 so it is never fused, but the glitch check and the innovation gates
+    # read it, and that path has never flown at the tighter figure.
+    #
+    # TO APPLY: change the line below to 0.025, restart the node, and fly it
+    # ALONE. The glitch should move from about 21 m to about 40 m. Baseline
+    # to beat is the 13 November flight: error p50 11.18, p90 18.49, max
+    # 29.93 m, descent attitude error 1.91 rms.
+    VEL_ACC_PER_M = 0.048
     # The vertical accuracy the working flights declared: a constant 3.0 m
     # (GPA.VAcc is exactly 3.00 throughout logs 00000191 and 00000194). It had
     # been sigma_m * 2 here, which at a typical sigma of 21 m declares 42 m of
