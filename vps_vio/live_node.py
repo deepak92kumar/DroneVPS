@@ -1010,7 +1010,40 @@ class GpsInputSender:
     # height, and the fix for that is a longer measurement baseline, not a
     # number here.
     VEL_ACC_FLOOR = 0.6
-    VEL_ACC_PER_M = 0.048
+    # 0.048 -> 0.025 ON 13 NOVEMBER. The number above was fitted to the raw
+    # flow; this one is fitted to what actually LEAVES the bridge, which is
+    # what the EKF is being told about. Measured on 37600 samples across the
+    # four flights of 11-13 November, the sent velocity against the M9N's own
+    # over a 1 s baseline:
+    #
+    #     alt band    real p68 (1 sigma)    declared at 0.048    % above it
+    #       3- 20 m          0.37                 0.92               2%
+    #      20- 40 m          0.96                 2.06               8%
+    #      40- 60 m          1.60                 2.98              11%
+    #      60- 80 m          2.38                 4.34              12%
+    #      80-100 m          2.36                 4.45               5%
+    #     100-120 m          2.72                 5.88               3%
+    #
+    # A one-sigma figure should be exceeded about a third of the time. At
+    # 0.048 it was exceeded 3-12%, so the aircraft was declaring something
+    # closer to two sigma and the EKF was weighting a usable velocity as if
+    # it were twice as bad. The best fit through the measured p68 is
+    # 0.29 + 0.0247 x altitude; 0.025 is that slope with the 0.6 floor left
+    # alone, and it lands at 22-31% exceeded, which is what one sigma means.
+    #
+    # WHAT THIS DOES NOT FIX. The "GPS Glitch or Compass error" at takeoff
+    # comes from this number crossing the EKF's tolerance, which sits between
+    # 0.96 (where the glitch cleared on 13 Nov) and 1.63 (where it fired).
+    # The crossing moves from about 21 m to about 40 m, so the message
+    # arrives later - but at a 110 m mission altitude both formulas are far
+    # above it and the glitch stays. Getting rid of it would mean declaring
+    # 1.3 m/s at 110 m where the truth is 2.72, and that is a lie of the kind
+    # that cost us on 20 October.
+    #
+    # The risk, unflown: the EKF now trusts this velocity more, so a bad
+    # sample carries further. EK3_SRC1_VELXY is 0 so it is not fused, but the
+    # glitch check and the innovation gates read it.
+    VEL_ACC_PER_M = 0.025
     # The vertical accuracy the working flights declared: a constant 3.0 m
     # (GPA.VAcc is exactly 3.00 throughout logs 00000191 and 00000194). It had
     # been sigma_m * 2 here, which at a typical sigma of 21 m declares 42 m of
